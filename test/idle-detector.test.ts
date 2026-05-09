@@ -9,6 +9,7 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { IdleDetector } from '../src/utils/idle-detector.js';
 import type { CliAdapter } from '../src/adapters/cli/types.js';
+import { createCocoAdapter } from '../src/adapters/cli/coco.js';
 
 // ─── Helpers ──────────────────────────────────────────────────────────────
 
@@ -680,11 +681,14 @@ describe('IdleDetector: CoCo readyPattern compatibility', () => {
   beforeEach(() => { vi.useFakeTimers(); });
   afterEach(() => { vi.useRealTimers(); });
 
-  // The actual coco adapter pattern. Keep test in sync with adapters/cli/coco.ts.
-  const COCO_READY = /⏵⏵|⬡/;
+  // Bind directly to the production adapter so this suite stays honest if
+  // the readyPattern in adapters/cli/coco.ts ever changes — no parallel
+  // hand-rolled regex to drift out of sync. We swap in a stub binary so
+  // resolveCommand() doesn't fail on hosts without `coco` installed.
+  const cocoAdapter = createCocoAdapter('/bin/true');
 
   it('matches `⏵⏵` when CoCo runs with --yolo (bypass permissions)', () => {
-    const detector = new IdleDetector(makeCli({ readyPattern: COCO_READY }));
+    const detector = new IdleDetector(cocoAdapter);
     const cb = vi.fn();
     detector.onIdle(cb);
     detector.feed('⏵⏵ bypass permissions on');
@@ -697,7 +701,7 @@ describe('IdleDetector: CoCo readyPattern compatibility', () => {
     // Pre-d289034 the readyPattern was just /⏵⏵/; an adopted CoCo (no --yolo)
     // never matched, idle never fired, the transcript bridge never drained
     // — and the user got radio silence on Lark.
-    const detector = new IdleDetector(makeCli({ readyPattern: COCO_READY }));
+    const detector = new IdleDetector(cocoAdapter);
     const cb = vi.fn();
     detector.onIdle(cb);
     detector.feed('⬡ openrouter-2o');
@@ -708,7 +712,7 @@ describe('IdleDetector: CoCo readyPattern compatibility', () => {
 
   it('does not match unrelated decorative chars on CoCo screens', () => {
     // Things like █ ◆ in the Trae announcements banner must not flip readySeen.
-    const detector = new IdleDetector(makeCli({ readyPattern: COCO_READY }));
+    const detector = new IdleDetector(cocoAdapter);
     const cb = vi.fn();
     detector.onIdle(cb);
     detector.feed('█ ◆ ◆ █  Try Codebase Copilot');
