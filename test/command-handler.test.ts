@@ -130,6 +130,11 @@ vi.mock('../src/core/session-manager.js', () => ({
   getProjectScanDirs: vi.fn(() => ['/home/testuser']),
 }));
 
+vi.mock('../src/core/session-discovery.js', () => ({
+  discoverAdoptableSessions: vi.fn(() => []),
+  validateAdoptTarget: vi.fn(() => true),
+}));
+
 vi.mock('../src/utils/user-token.js', () => ({
   generateAuthUrl: vi.fn(() => ({ authUrl: 'https://open.feishu.cn/auth/v1/test' })),
   getTokenStatus: vi.fn(() => 'User token: active'),
@@ -158,6 +163,7 @@ import { generateAuthUrl, getTokenStatus } from '../src/utils/user-token.js';
 import { bindOncall } from '../src/services/oncall-store.js';
 import { existsSync, statSync } from 'node:fs';
 import { scanMultipleProjects } from '../src/services/project-scanner.js';
+import { discoverAdoptableSessions } from '../src/core/session-discovery.js';
 
 // ─── Fixtures ───────────────────────────────────────────────────────────────
 
@@ -858,6 +864,110 @@ describe('handleCommand', () => {
       expect(getTokenStatus).toHaveBeenCalled();
       const replyContent = (deps.sessionReply as ReturnType<typeof vi.fn>).mock.calls[0][1] as string;
       expect(replyContent).toContain('User token: active');
+    });
+  });
+
+  // ─── /adopt ─────────────────────────────────────────────────────────────
+
+  describe('/adopt', () => {
+    it('should refuse re-adopt and prompt 断开 when ds.adoptedFrom is already set', async () => {
+      const ds = makeDaemonSession({
+        adoptedFrom: {
+          tmuxTarget: 'mysession:0.0',
+          originalCliPid: 12345,
+          cliId: 'coco',
+          cwd: '/home/testuser/fanxuehui.fe',
+          paneCols: 200,
+          paneRows: 50,
+        },
+        session: {
+          ...makeSession(),
+          title: 'Adopt: fanxuehui.fe',
+          adoptedFrom: {
+            tmuxTarget: 'mysession:0.0',
+            originalCliPid: 12345,
+            cliId: 'coco',
+            cwd: '/home/testuser/fanxuehui.fe',
+            paneCols: 200,
+            paneRows: 50,
+          },
+        },
+      });
+      const deps = makeDeps(ds);
+
+      await handleCommand('/adopt', ROOT_ID, makeLarkMessage('/adopt'), deps, LARK_APP_ID);
+
+      // Must NOT scan tmux when we already know the answer ("you're already adopted")
+      expect(discoverAdoptableSessions).not.toHaveBeenCalled();
+
+      const replyArgs = (deps.sessionReply as ReturnType<typeof vi.fn>).mock.calls[0];
+      const replyContent = replyArgs[1] as string;
+      // Should mention current adoption AND tell user how to release it.
+      // Critically: must NOT show the misleading "未发现可接入" message.
+      expect(replyContent).not.toContain('未发现可接入');
+      expect(replyContent).toContain('已接入');
+      expect(replyContent).toContain('断开');
+      // Surface the pane target so the user knows which session they're on
+      expect(replyContent).toContain('mysession:0.0');
+    });
+
+    it('should also refuse direct-target form (/adopt <pane>) when already adopted', async () => {
+      // Even if the user passes an explicit pane, the bridge worker would
+      // clobber the current TmuxPipeBackend without user confirmation. Force
+      // the user to 断开 first so they make the swap intentionally.
+      const ds = makeDaemonSession({
+        adoptedFrom: {
+          tmuxTarget: 'mysession:0.0',
+          originalCliPid: 12345,
+          cliId: 'coco',
+          cwd: '/home/testuser/fanxuehui.fe',
+          paneCols: 200,
+          paneRows: 50,
+        },
+      });
+      const deps = makeDeps(ds);
+
+      await handleCommand('/adopt', ROOT_ID, makeLarkMessage('/adopt 0:2.0'), deps, LARK_APP_ID);
+
+      expect(discoverAdoptableSessions).not.toHaveBeenCalled();
+      const replyContent = (deps.sessionReply as ReturnType<typeof vi.fn>).mock.calls[0][1] as string;
+      expect(replyContent).toContain('已接入');
+      expect(replyContent).toContain('断开');
+    });
+
+    it('should still show "未发现可接入" when no adoption and tmux scan returns empty', async () => {
+      // Sanity: existing behavior preserved for the legitimate "nothing to adopt" case.
+      vi.mocked(discoverAdoptableSessions).mockReturnValueOnce([]);
+      const ds = makeDaemonSession(); // no adoptedFrom
+      const deps = makeDeps(ds);
+
+      await handleCommand('/adopt', ROOT_ID, makeLarkMessage('/adopt'), deps, LARK_APP_ID);
+
+      expect(discoverAdoptableSessions).toHaveBeenCalledWith('claude-code');
+      const replyContent = (deps.sessionReply as ReturnType<typeof vi.fn>).mock.calls[0][1] as string;
+      expect(replyContent).toContain('未发现可接入');
+    });
+
+    it('should show the picker card when not adopted and discovery returns sessions', async () => {
+      vi.mocked(discoverAdoptableSessions).mockReturnValueOnce([
+        {
+          tmuxTarget: '0:1.0',
+          panePid: 1000,
+          cliPid: 1001,
+          cliId: 'claude-code',
+          cwd: '/home/testuser/projectA',
+          paneCols: 200,
+          paneRows: 50,
+        },
+      ]);
+      const ds = makeDaemonSession(); // no adoptedFrom
+      const deps = makeDeps(ds);
+
+      await handleCommand('/adopt', ROOT_ID, makeLarkMessage('/adopt'), deps, LARK_APP_ID);
+
+      const replyArgs = (deps.sessionReply as ReturnType<typeof vi.fn>).mock.calls[0];
+      expect(replyArgs[2]).toBe('interactive');
+      expect(replyArgs[1] as string).toContain('adopt-select');
     });
   });
 

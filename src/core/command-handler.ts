@@ -539,6 +539,22 @@ export async function handleCommand(
 
       case '/adopt': {
         const adoptArgs = message.content.replace(/^\/adopt\s*/i, '').trim();
+        // Refuse re-adopt when the thread is already bridged. Otherwise the
+        // user sees the misleading "未发现可接入 CLI 会话" branch whenever the
+        // discovery scan happens to return zero (e.g. the original CLI exited
+        // mid-bridge, or pane filters mismatch) — they have no idea why their
+        // working session was "lost". Force the explicit 断开 → /adopt swap.
+        if (ds?.adoptedFrom) {
+          const adopted = ds.adoptedFrom;
+          const cliName = getCliDisplayName(adopted.cliId ?? 'claude-code');
+          const project = adopted.cwd ? (adopted.cwd.split('/').pop() || adopted.cwd) : '';
+          const label = project ? `${cliName} · ${project}` : cliName;
+          await sessionReply(rootId,
+            `本话题已接入 ${label} (${adopted.tmuxTarget})。\n` +
+            '请先点击卡片上的「断开」按钮，再 /adopt 切换 CLI 会话（原 CLI 不受影响）。',
+          );
+          break;
+        }
         // Only show sessions matching this bot's CLI type
         const botCliId = ds ? getBot(ds.larkAppId).config.cliId : undefined;
         const sessions = discoverAdoptableSessions(botCliId);
