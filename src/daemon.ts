@@ -8,7 +8,7 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
 import { config } from './config.js';
 import { replyMessage, resolveAllowedUsers, sendMessage } from './im/lark/client.js';
-import { loadBotConfigs, registerBot, getBot, getAllBots, findOncallChatForAnyBot, isChatOncallBoundForAnyBot } from './bot-registry.js';
+import { loadBotConfigs, registerBot, getBot, getAllBots, findOncallChatForAnyBot, isChatOncallBoundForAnyBot, type BotState, type OncallChat } from './bot-registry.js';
 import * as sessionStore from './services/session-store.js';
 import * as chatFirstSeenStore from './services/chat-first-seen-store.js';
 import * as scheduleStore from './services/schedule-store.js';
@@ -847,15 +847,7 @@ function processBotMentionSignal(signal: BotMentionSignal): void {
     // Target bot has an active session in this thread — send the message.
     // Look up sender name from bots-info.json (each daemon only registers its own bot,
     // so getAllBots() won't find other bots).
-    let senderName = 'Bot';
-    try {
-      const infoPath = join(config.session.dataDir, 'bots-info.json');
-      if (existsSync(infoPath)) {
-        const entries: Array<{ larkAppId: string; botName: string | null; cliId: string }> = JSON.parse(readFileSync(infoPath, 'utf-8'));
-        const sender = entries.find(e => e.larkAppId === signal.senderAppId);
-        if (sender) senderName = sender.botName ?? getCliDisplayName(sender.cliId as CliId);
-      }
-    } catch { /* ignore */ }
+    const senderName = lookupSenderName(signal.senderAppId);
     const enrichedParts = [`[来自 ${senderName} 的 @mention]\n${signal.content}`];
     if (!ds.adoptedFrom) {
       const mentionBotCfg = getBot(ds.larkAppId).config;
@@ -876,9 +868,105 @@ function processBotMentionSignal(signal: BotMentionSignal): void {
     markBotMentionMessageHandled(signal.messageId);
     ds.worker.send({ type: 'message', content: enrichedContent } as DaemonToWorker);
     logger.info(`[bot-mention] Routed message from ${signal.senderAppId} to ${targetAppId} (scope=${signal.scope ?? 'thread'}, anchor=${anchor.substring(0, 12)})`);
-  } else {
-    logger.debug(`[bot-mention] Target bot ${targetAppId} has no active worker at ${signal.scope ?? 'thread'}-scope anchor ${anchor.substring(0, 12)} — WSClient auto-create path will handle it if @mention was delivered`);
+    return;
   }
+
+  // No active session. If the chat is part of an oncall workspace (this bot
+  // or any sibling has bound it), auto-spawn a new session pinned to the
+  // oncall workingDir. Lark WSClient does not deliver bot-sent events, so
+  // without this every bot-to-bot @mention into an oncall workspace where
+  // the target lacks an active session would silent-drop here.
+  const oncallEntry = findOncallChatForAnyBot(signal.chatId);
+  if (!oncallEntry) {
+    logger.debug(`[bot-mention] Target bot ${targetAppId} has no active worker at ${signal.scope ?? 'thread'}-scope anchor ${anchor.substring(0, 12)} and chat is not oncall-bound — leaving for WSClient auto-create path`);
+    return;
+  }
+  spawnSessionForBotMention(signal, targetBot, oncallEntry, anchor).catch(err => {
+    logger.error(`[bot-mention] Failed to auto-spawn session for target ${targetAppId}: ${err}`);
+  });
+}
+
+/** Look up sender bot's display name from bots-info.json. Each daemon only
+ *  registers its own bot in getAllBots(), so cross-bot enrichment goes
+ *  through the shared bots-info.json file. */
+function lookupSenderName(senderAppId: string): string {
+  try {
+    const infoPath = join(config.session.dataDir, 'bots-info.json');
+    if (!existsSync(infoPath)) return 'Bot';
+    const entries: Array<{ larkAppId: string; botName: string | null; cliId: string }> = JSON.parse(readFileSync(infoPath, 'utf-8'));
+    const sender = entries.find(e => e.larkAppId === senderAppId);
+    if (!sender) return 'Bot';
+    return sender.botName ?? getCliDisplayName(sender.cliId as CliId);
+  } catch {
+    return 'Bot';
+  }
+}
+
+/** Auto-spawn a new session for a bot-mention signal landing in an oncall
+ *  workspace where the target has no active session. Mirrors the auto-create
+ *  path in handleThreadReply (workingDir pinned from the oncall binding,
+ *  immediate forkWorker, no repo-selection card) — kept inline rather than
+ *  shared so the bot-mention path stays free of the user-event scaffolding
+ *  (mentions parsing, attachments, /command interception, etc.). */
+async function spawnSessionForBotMention(
+  signal: BotMentionSignal,
+  targetBot: BotState,
+  oncallEntry: OncallChat,
+  anchor: string,
+): Promise<void> {
+  const larkAppId = targetBot.config.larkAppId;
+  const chatType: 'group' | 'p2p' = signal.chatType === 'p2p' ? 'p2p' : 'group';
+  const scope: 'thread' | 'chat' = signal.scope ?? 'thread';
+  const title = signal.content.substring(0, 50);
+  // thread-scope: rootMessageId = anchor (real thread root). chat-scope: any
+  // value works as audit-only since routing keys off chatId.
+  const rootIdForStore = scope === 'thread' ? anchor : signal.messageId;
+  const session = sessionStore.createSession(signal.chatId, rootIdForStore, title, chatType);
+  const now = Date.now();
+  session.larkAppId = larkAppId;
+  session.lastMessageAt = new Date(now).toISOString();
+  session.scope = scope;
+  session.workingDir = oncallEntry.workingDir;
+  sessionStore.updateSession(session);
+
+  const senderName = lookupSenderName(signal.senderAppId);
+  const enrichedContent = `[来自 ${senderName} 的 @mention]\n${signal.content}`;
+
+  const botCfg = targetBot.config;
+  refreshCliVersion(botCfg.cliId, botCfg.cliPathOverride);
+  const newDs: DaemonSession = {
+    session,
+    worker: null,
+    workerPort: null,
+    workerToken: null,
+    larkAppId,
+    chatId: signal.chatId,
+    chatType,
+    scope,
+    spawnedAt: Date.parse(session.createdAt) || now,
+    cliVersion: cliVersionCache.get(botCfg.cliId)?.version ?? 'unknown',
+    lastMessageAt: now,
+    hasHistory: false,
+    pendingRepo: false,
+    workingDir: oncallEntry.workingDir,
+    currentTurnTitle: title,
+  };
+  activeSessions.set(sessionKey(anchor, larkAppId), newDs);
+  markBotMentionMessageHandled(signal.messageId);
+
+  const prompt = buildNewTopicPrompt(
+    enrichedContent,
+    session.sessionId,
+    botCfg.cliId,
+    botCfg.cliPathOverride,
+    [],
+    undefined,
+    await getAvailableBots(larkAppId, signal.chatId),
+    undefined,
+    { name: targetBot.botName, openId: targetBot.botOpenId },
+  );
+  forkWorker(newDs, prompt);
+  logger.info(`[bot-mention] Auto-spawned session for ${larkAppId} in oncall chat ${signal.chatId} (scope=${scope}, anchor=${anchor.substring(0, 12)}, dir=${oncallEntry.workingDir})`);
 }
 
 function isSignalForMe(signal: BotMentionSignal): boolean {
