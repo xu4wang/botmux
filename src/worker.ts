@@ -1555,13 +1555,33 @@ let larkAppSecretForUpload = '';
 function startScreenshotLoop(): void {
   stopScreenshotLoop();
   screenshotTimer = setInterval(() => { void captureAndUpload(); }, SCREENSHOT_INTERVAL_MS);
+  log(`Screenshot loop started (interval=${SCREENSHOT_INTERVAL_MS}ms)`);
   // Capture immediately so the user gets a first frame fast
   void captureAndUpload();
 }
 
 function stopScreenshotLoop(): void {
+  const wasRunning = !!screenshotTimer || !!pendingShotTimer;
   if (screenshotTimer) { clearInterval(screenshotTimer); screenshotTimer = null; }
   if (pendingShotTimer) { clearTimeout(pendingShotTimer); pendingShotTimer = null; }
+  if (wasRunning) log('Screenshot loop stopped');
+}
+
+// Throttle silent-skip reasons so a wedged worker prints why once every 30s
+// without spamming. Each distinct reason has its own throttle clock.
+const screenshotSkipLogState: Record<string, number> = {};
+function logScreenshotSkip(reason: string): void {
+  const now = Date.now();
+  if (now - (screenshotSkipLogState[reason] ?? 0) < 30_000) return;
+  screenshotSkipLogState[reason] = now;
+  log(`Screenshot skipped: ${reason}`);
+}
+
+// Worker errors go to stderr so pm2 routes them to error.log (not just daemon.log).
+// Mirrors the format of log() so triage tools can still split sessionId.
+function logError(msg: string): void {
+  const ts = new Date().toISOString();
+  process.stderr.write(`[${ts}] [worker:${sessionId.substring(0, 8) || '??'}] ${msg}\n`);
 }
 
 /** Schedule a single capture +1s, then resume the regular 10s cadence. */
@@ -1579,15 +1599,19 @@ function scheduleOneShotAfterAction(): void {
 }
 
 async function captureAndUpload(): Promise<void> {
-  if (displayMode !== 'screenshot') return;
-  if (awaitingFirstPrompt) return;
-  if (!renderer) return;
-  if (!larkAppIdForUpload || !larkAppSecretForUpload) return;
+  // displayMode mismatch should be impossible during a running loop (start/stop
+  // gate on it). Logging here exists to surface the unexpected case — e.g. a
+  // stray scheduleOneShotAfterAction firing after user toggled back to hidden.
+  if (displayMode !== 'screenshot') { logScreenshotSkip(`displayMode=${displayMode}`); return; }
+  if (awaitingFirstPrompt)          { logScreenshotSkip('awaitingFirstPrompt'); return; }
+  if (!renderer)                    { logScreenshotSkip('renderer=null'); return; }
+  if (!larkAppIdForUpload || !larkAppSecretForUpload) { logScreenshotSkip('lark credentials missing'); return; }
 
   const term = renderer.xterm;
   const startY = term.buffer.active.baseY;
 
-  // Hash dedup — same content → skip upload
+  // Hash dedup — same content → skip upload. Not logged: this is the expected
+  // "nothing changed" path and would dominate the log signal.
   const snap = renderer.rawSnapshot();
   const hash = createHash('md5').update(snap).digest('hex');
   if (hash === lastShotHash) return;
@@ -1599,7 +1623,7 @@ async function captureAndUpload(): Promise<void> {
     const shotRows = clamp(term.rows, MIN_RENDER_ROWS, MAX_RENDER_ROWS);
     png = captureToPng(term, { cols: shotCols, rows: shotRows, startY });
   } catch (err: any) {
-    log(`Screenshot render failed: ${err.message}`);
+    logError(`Screenshot render failed: ${err?.message ?? err}`);
     return;
   }
 
@@ -1607,7 +1631,7 @@ async function captureAndUpload(): Promise<void> {
   try {
     imageKey = await uploadImageBuffer(larkAppIdForUpload, larkAppSecretForUpload, png);
   } catch (err: any) {
-    log(`Screenshot upload failed: ${err.message}`);
+    logError(`Screenshot upload failed: ${err?.message ?? err}`);
     return;
   }
 
