@@ -41,6 +41,23 @@ export function isBotMentionMessageHandled(messageId: string | undefined): boole
   return true;
 }
 
+/** Atomic check-and-set: claim this messageId for processing. Returns `true`
+ *  iff the caller is the first to claim within the TTL window — only that
+ *  caller may enqueue the message.
+ *
+ *  Use this instead of `isBotMentionMessageHandled` + `markBotMentionMessageHandled`
+ *  whenever there is an `await` between the two: JS is single-threaded but the
+ *  yield lets the OTHER dedup path slip in, pass its own check, mark, and
+ *  enqueue — we'd then re-mark (no-op) and enqueue a second time. `tryClaim`
+ *  collapses both halves into one synchronous step so the two paths can't both
+ *  win, regardless of who runs first. */
+export function tryClaimBotMentionMessage(messageId: string | undefined): boolean {
+  if (!messageId) return false;
+  if (isBotMentionMessageHandled(messageId)) return false;
+  markBotMentionMessageHandled(messageId);
+  return true;
+}
+
 /** Test seam — drop everything. */
 export function _resetForTest(): void {
   seen.clear();

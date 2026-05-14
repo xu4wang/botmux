@@ -422,6 +422,48 @@ describe('im.message.receive_v1 — bot-to-bot @mention routing', () => {
     expect(handlers.handleThreadReply).not.toHaveBeenCalled();
   });
 
+  it('dedups when signal-file path claims DURING the WS path\'s decideRouting await (race)', async () => {
+    // Reproducer for the "@mention 触发两次" bug. The WS path's original
+    // sequence was:
+    //   1) isBotMentionMessageHandled(id) → false
+    //   2) await decideRouting(...)            ← yields the event loop
+    //   3) markBotMentionMessageHandled(id)
+    //   4) handleThreadReply(...)
+    // If the signal-file watcher's processBotMentionSignal runs during step
+    // 2's yield, it passes its own check, marks the id, and enqueues. The WS
+    // path then resumes at step 3 (no-op mark) and enqueues AGAIN at step 4
+    // → the same prompt hits the worker twice → bot replies twice.
+    //
+    // The fix: re-claim atomically after the await; if signal-file already
+    // claimed, the WS path bails. This test pins that behavior.
+    const { markBotMentionMessageHandled } = await import('../src/utils/bot-mention-dedup.js');
+
+    // Make decideRouting's getChatMode resolve asynchronously so the WS path
+    // yields between its initial check and the post-await claim. During that
+    // yield we simulate the signal-file watcher claiming the messageId.
+    mockGetChatMode.mockImplementationOnce(async () => {
+      // Defer to a later microtask so the WS handler actually yields here.
+      await Promise.resolve();
+      markBotMentionMessageHandled('msg-race-1');
+      return 'topic';
+    });
+
+    const event = makeBotMessageEvent({
+      senderOpenId: OTHER_BOT_OPEN_ID,
+      messageId: 'msg-race-1',
+      content: JSON.stringify({ text: '@BotA hi' }),
+      // No rootId+threadId → decideRouting falls through to getChatMode.
+      rootId: undefined,
+      threadId: null,
+      mentions: [{ key: '@_bot_a', name: 'BotA', id: { open_id: MY_OPEN_ID } }],
+    });
+    event.message.root_id = undefined as any;
+
+    await capturedHandlers['im.message.receive_v1'](event);
+
+    expect(handlers.handleThreadReply).not.toHaveBeenCalled();
+  });
+
   it('processes /close from own bot messages in a thread', async () => {
     const event = makeBotMessageEvent({
       senderOpenId: MY_OPEN_ID,  // own message

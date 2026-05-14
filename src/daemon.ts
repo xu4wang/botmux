@@ -62,7 +62,7 @@ import {
 import { handleCardAction } from './im/lark/card-handler.js';
 import type { CardHandlerDeps } from './im/lark/card-handler.js';
 import { isBotMentioned, probeBotOpenId, startLarkEventDispatcher, writeBotInfoFile, canOperate, type RoutingContext } from './im/lark/event-dispatcher.js';
-import { isBotMentionMessageHandled, markBotMentionMessageHandled } from './utils/bot-mention-dedup.js';
+import { isBotMentionMessageHandled, markBotMentionMessageHandled, tryClaimBotMentionMessage } from './utils/bot-mention-dedup.js';
 import { markSessionActivity } from './core/session-activity.js';
 
 // ─── State ───────────────────────────────────────────────────────────────────
@@ -870,6 +870,14 @@ function processBotMentionSignal(signal: BotMentionSignal): void {
       }
     }
     const enrichedContent = enrichedParts.join('\n\n');
+    // Atomic claim before the worker send. The active-worker branch is
+    // currently sync from the top-of-function check to here, but using the
+    // atomic helper (a) hardens against future async additions and (b)
+    // keeps both dedup paths uniform.
+    if (!tryClaimBotMentionMessage(signal.messageId)) {
+      logger.debug(`[bot-mention] Signal-file path skipping ${signal.messageId.substring(0, 12)}: WSClient claimed during signal processing`);
+      return;
+    }
     markSessionActivity(ds);
     // Park the current streaming card so the new turn's POST can recall it.
     // Without this the bot-to-bot mention path leaves old cards stranded —
@@ -878,7 +886,6 @@ function processBotMentionSignal(signal: BotMentionSignal): void {
     ds.streamCardPending = true;
     ds.currentTurnTitle = signal.content.substring(0, 50);
     persistStreamCardState(ds);
-    markBotMentionMessageHandled(signal.messageId);
     ds.worker.send({ type: 'message', content: enrichedContent } as DaemonToWorker);
     logger.info(`[bot-mention] Routed message from ${signal.senderAppId} to ${targetAppId} (scope=${signal.scope ?? 'thread'}, anchor=${anchor.substring(0, 12)})`);
     return;
