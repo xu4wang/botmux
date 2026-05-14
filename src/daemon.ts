@@ -610,18 +610,19 @@ async function handleThreadReply(data: any, ctx: RoutingContext): Promise<void> 
   // worker 的 prompt 内容，title / 命令解析 / 日志还是用原 parsed.content。
   //
   // 检测策略走双轨：
-  //   1) `sender.sender_type === 'app'` —— 飞书事件标注为机器人发送
+  //   1) `sender.sender_type === 'app' | 'bot'` —— 飞书事件标注为机器人发送。
+  //      'app' 是文档里的常规值；'bot' 是实测中跨 bot @ 卡片消息到接收方时
+  //      飞书实际给的值（与 'app' 等价对待，少依赖一次 cross-ref 学习）。
   //   2) sender 的 open_id 在我们本 app 的 cross-ref（bot-openids-<appId>.json）
-  //      里能匹配到一个 botmux 同伴名字
-  // 单 sender_type 不够：跨 bot @mention 在某些 chat-scope 路径下会以
-  // sender_type='user' 投递（已实测）。cross-ref 兜底覆盖这种情况——
-  // 只要之前 cross-ref 学过对方 open_id（@mention 学习链路），即可识别。
+  //      里能匹配到一个 botmux 同伴名字 —— 兜底覆盖 sender_type 又变其他取值
+  //      或者全无的边角情况，前提是之前已通过 @mention 学习链路记录过对方。
   const senderOpenIdForPrefix = parsed.senderId || data?.sender?.sender_id?.open_id;
   const selfBotOpenId = getBot(larkAppId).botOpenId;
+  const isBotSenderType = parsed.senderType === 'app' || parsed.senderType === 'bot';
   const isForeignBot =
     !!senderOpenIdForPrefix &&
     senderOpenIdForPrefix !== selfBotOpenId &&
-    (parsed.senderType === 'app' ||
+    (isBotSenderType ||
       isKnownPeerBot(config.session.dataDir, larkAppId, senderOpenIdForPrefix));
   const botSenderPrefix = isForeignBot
     ? `[来自 ${lookupForeignBotName(senderOpenIdForPrefix!, larkAppId)} 的 @mention]\n`
@@ -630,7 +631,7 @@ async function handleThreadReply(data: any, ctx: RoutingContext): Promise<void> 
   if (isForeignBot) {
     logger.info(
       `[${larkAppId}] foreign-bot @mention prefix attached: sender=${senderOpenIdForPrefix?.substring(0, 12)} ` +
-      `senderType=${parsed.senderType} via=${parsed.senderType === 'app' ? 'sender_type' : 'cross-ref'}`,
+      `senderType=${parsed.senderType} via=${isBotSenderType ? 'sender_type' : 'cross-ref'}`,
     );
   }
 
