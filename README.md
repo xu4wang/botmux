@@ -179,6 +179,8 @@ CLI 进入 botmux 会话时自动获得 `~/.botmux/bin` 在 PATH 中，以及一
 
 **推荐路径**：`botmux setup` 选「1) 扫码建应用」，飞书扫码完成后自动落盘 AppID/AppSecret，无需手动浏览器创建。底层走 `@larksuiteoapi/node-sdk` 的官方 device flow。
 
+> ⚠️ **目前仅支持飞书 (feishu.cn) 租户**。扫码检测到 Lark 国际版 (larksuite.com) 会中止 setup —— daemon runtime (Lark Client/WSClient/event-dispatcher 等) 需要一并接入 lark 域，会在单独 PR 跟进。
+
 **手动路径**：打开 [飞书开放平台](https://open.larkoffice.com/app)，点击「创建企业自建应用」。
 
 ![创建应用](docs/setup/create-app.png)

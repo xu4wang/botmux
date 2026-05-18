@@ -78,14 +78,28 @@ export type CredentialValidation =
  * 用 AppID/Secret 取一次 tenant_access_token, 验证凭证可用.
  *
  * Secret 不进 error.message: 错误信息只来自飞书返回的 msg 字段或 axios 错误类型.
+ *
+ * Codex review #3: 加 AbortController + 总超时. 网络半挂时 `botmux setup` /
+ * `botmux start` 不能无限卡住; 超时归类为 network, 这样 setup 走"凭证校验失败
+ * 不写盘" 路径, start 走"network 只 WARN 继续"路径.
  */
 export async function validateCredentials(
   appId: string,
   appSecret: string,
   brand: Brand = 'feishu',
+  opts: { budgetMs?: number; signal?: AbortSignal } = {},
 ): Promise<CredentialValidation> {
+  const budgetMs = opts.budgetMs ?? 10_000;
   const host = brand === 'lark' ? 'open.larksuite.com' : 'open.feishu.cn';
   const url = `https://${host}/open-apis/auth/v3/tenant_access_token/internal`;
+
+  // 自家 AbortController 控制总超时; 同时把上层传进来的 signal 也接上.
+  const ac = new AbortController();
+  const timer = setTimeout(() => ac.abort(), budgetMs);
+  if (opts.signal) {
+    if (opts.signal.aborted) ac.abort();
+    else opts.signal.addEventListener('abort', () => ac.abort(), { once: true });
+  }
 
   let res: Response;
   try {
@@ -95,10 +109,21 @@ export async function validateCredentials(
       // 注意: 这是飞书唯一接受 appSecret 的端点; 其它端点全部用 token. 不要把
       // secret 拼到 query string 或日志里.
       body: JSON.stringify({ app_id: appId, app_secret: appSecret }),
+      signal: ac.signal,
     });
   } catch (err: any) {
-    return { ok: false, error: 'network', message: `网络错误: ${err?.code ?? err?.message ?? 'unknown'}` };
+    clearTimeout(timer);
+    // AbortError (fetch 内部 / 我们自己 timeout) 全部归到 network
+    const isAbort = err?.name === 'AbortError' || ac.signal.aborted;
+    return {
+      ok: false,
+      error: 'network',
+      message: isAbort
+        ? `请求超时 (> ${budgetMs}ms)`
+        : `网络错误: ${err?.code ?? err?.message ?? 'unknown'}`,
+    };
   }
+  clearTimeout(timer);
 
   let body: any;
   try {

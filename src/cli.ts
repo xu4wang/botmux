@@ -168,19 +168,47 @@ function botBrand(b: any): 'feishu' | 'lark' {
   return b?.brand === 'lark' ? 'lark' : 'feishu';
 }
 
+// 跟 README 批量导入 JSON 对齐的完整 scope 列表 (15 项). setup 只打印这个
+// 完整集合, 让用户按向导一条路走完不缺权限. critical 5 项跟 verify-permissions.ts
+// BOTMUX_REQUIRED_SCOPES 对齐.
+const BOTMUX_FULL_SCOPES = [
+  'contact:user.base:readonly',
+  'contact:user.id:readonly',
+  'im:chat:read',
+  'im:chat.members:bot_access',
+  'im:chat.members:read',
+  'im:message',
+  'im:message:readonly',
+  'im:message:send_as_bot',
+  'im:message:update',
+  'im:message.group_at_msg',
+  'im:message.group_at_msg:readonly',
+  'im:message.group_msg',
+  'im:message.p2p_msg:readonly',
+  'im:message.reactions:write_only',
+  'im:resource',
+] as const;
+
 function printRemainingSteps(appId: string, brand: 'feishu' | 'lark'): void {
-  // verify-permissions.ts 的 buildRemainingSteps 是数据源, 这里只负责打印
-  // 为了避免在 cli.ts 启动时同步导入 Lark SDK (registerApp/verify-permissions
-  // 两个模块都拖 SDK 进来), 直接复用深链构造常量
+  // 跟 verify-permissions.ts 的 buildRemainingSteps 同步, 这里只负责打印.
+  // 为了避免 cli.ts 启动时同步导入 Lark SDK, 直接复用深链构造常量.
   const host = brand === 'lark' ? 'open.larksuite.com' : 'open.feishu.cn';
   const home = `https://${host}/app/${appId}`;
   console.log('\n⚠️  扫码/粘贴只完成了"建应用 + 拿凭证". 飞书开放平台没开放写 API,');
   console.log('   以下几步必须用户手动在浏览器里点完, botmux 才能真正收到消息：\n');
-  console.log('  1. 开通 scope 并提交审批（im:message / im:message.group_at_msg / im:resource / im:chat / contact:user.base:readonly）');
+  console.log('  1. 进入「权限管理」→「批量导入/导出权限」, 粘贴下面 JSON 一次性导入并提交审批:');
   console.log(`     ${home}/auth\n`);
-  console.log('  2. 配置事件订阅（长连接模式，订阅 im.message.receive_v1 + card.action.trigger）');
+  console.log('     {');
+  console.log('       "scopes": { "tenant": [');
+  for (let i = 0; i < BOTMUX_FULL_SCOPES.length; i++) {
+    const tail = i === BOTMUX_FULL_SCOPES.length - 1 ? '' : ',';
+    console.log(`         "${BOTMUX_FULL_SCOPES[i]}"${tail}`);
+  }
+  console.log('       ] }');
+  console.log('     }\n');
+  console.log('  2. 配置事件订阅（长连接模式，订阅 im.message.receive_v1 + card.action.trigger）:');
   console.log(`     ${home}/dev-config/event-sub\n`);
-  console.log('  3. 开通机器人能力（应用功能 → 机器人，设置名称和头像）');
+  console.log('  3. 开通机器人能力（应用功能 → 机器人，设置名称和头像）:');
   console.log(`     ${home}/feature/bot\n`);
   console.log('  完成后 `botmux start` (或 `botmux restart`)，启动检查不会卡住，');
   console.log('  缺权限只 WARN，去开放平台补齐后 daemon 自动恢复。\n');
@@ -199,7 +227,7 @@ function printRemainingSteps(appId: string, brand: 'feishu' | 'lark'): void {
  */
 async function obtainCredentials(rl: ReturnType<typeof createInterface>): Promise<
   | { ok: true; appId: string; appSecret: string; brand: 'feishu' | 'lark' }
-  | { ok: false; reason: 'cancelled' }
+  | { ok: false; reason: 'cancelled' | 'lark_unsupported' }
 > {
   console.log('── 飞书应用建立 ──\n');
   console.log('1) 扫码建应用（推荐，一步拿到 AppID/Secret，需要飞书 App 扫码）');
@@ -211,6 +239,19 @@ async function obtainCredentials(rl: ReturnType<typeof createInterface>): Promis
     const { tryRegisterApp } = await import('./setup/register-app.js');
     const result = await tryRegisterApp();
     if (result.ok) {
+      // Lark 国际版需要 daemon 链路全程走 larksuite.com 域 (Client domain /
+      // WSClient / event-dispatcher 的 fetch URL / scope 深链 host). 当前
+      // botmux runtime 这几处都硬编码 feishu.cn, 所以即使扫码成功了也无法
+      // 真正跑起来. 干净做法是 setup 阶段就拒绝, 让用户用 feishu 租户. 单
+      // 独 PR 完整接入 lark 后再去掉这个分支.
+      if (result.brand === 'lark') {
+        console.log(`\n❌ 检测到 Lark 国际版 (larksuite.com) 租户。`);
+        console.log(`   botmux 当前 daemon 运行链路仅支持飞书 (feishu.cn) 租户,`);
+        console.log(`   Lark 国际版完整接入会在单独 PR 跟进 (BotConfig / Client domain /`);
+        console.log(`   WSClient / event-dispatcher 等需要一并支持).`);
+        console.log(`   请用飞书 (feishu.cn) 租户重试 setup。\n`);
+        return { ok: false, reason: 'lark_unsupported' };
+      }
       console.log(`\n✅ 应用创建成功`);
       console.log(`   App ID: ${result.appId}`);
       console.log(`   租户类型: ${result.brand}`);
@@ -226,17 +267,16 @@ async function obtainCredentials(rl: ReturnType<typeof createInterface>): Promis
     console.log('\n请在浏览器打开 https://open.feishu.cn/app 创建应用，然后回来粘 ID/Secret。\n');
   }
 
-  // 手动 fallback
+  // 手动 fallback. 不再提问租户类型 — 当前 daemon runtime 只支持 feishu,
+  // 让用户选 lark 是误导. 等 lark 完整接入再加回来.
   const appId = (await ask(rl, 'AppID (cli_xxx): ')).trim();
   const appSecret = (await ask(rl, 'AppSecret: ')).trim();
-  const brandInput = (await ask(rl, '租户类型 1) feishu  2) lark  [1]: ')).trim();
-  const brand: 'feishu' | 'lark' = brandInput === '2' ? 'lark' : 'feishu';
 
   if (!appId || !appSecret) {
     console.log('\n❌ AppID/AppSecret 不能为空，setup 中止。');
     return { ok: false, reason: 'cancelled' };
   }
-  return { ok: true, appId, appSecret, brand };
+  return { ok: true, appId, appSecret, brand: 'feishu' };
 }
 
 /**
@@ -362,8 +402,10 @@ async function cmdSetup(): Promise<void> {
         console.log('\n⚠️  setup 中止，旧配置保留不动。');
         return;
       }
-      // 配置成功后才备份旧文件 + 写新文件. 失败不动 bots.json.
-      renameSync(BOTS_JSON_FILE, BOTS_JSON_FILE + '.bak');
+      // Codex review #1: 先 copyFileSync 备份, 再原子写新文件. 之前先 rename
+      // 旧文件再 write, 一旦 write 失败 (磁盘/权限/进程被 kill) 用户就丢了
+      // bots.json. copy 之后写失败旧文件原地不动, .bak 是无害的同名副本.
+      copyFileSync(BOTS_JSON_FILE, BOTS_JSON_FILE + '.bak');
       console.log(`旧配置已备份: ${BOTS_JSON_FILE}.bak`);
       writeBotsJsonAtomic([newBot]);
       console.log(`✅ 配置已写入: ${BOTS_JSON_FILE}`);

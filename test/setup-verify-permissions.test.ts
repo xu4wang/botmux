@@ -89,6 +89,45 @@ describe('validateCredentials', () => {
     if (!r.ok) expect(r.error).toBe('network');
   });
 
+  it('honors budgetMs and classifies timeout as network', async () => {
+    // fetch 永远不 resolve — 自带的 AbortController 应该在 budgetMs 后中止
+    fetchMock.mockImplementation(
+      (_url: string, init: any) =>
+        new Promise((_, reject) => {
+          init?.signal?.addEventListener('abort', () => {
+            const err = new Error('aborted') as any;
+            err.name = 'AbortError';
+            reject(err);
+          });
+        }),
+    );
+    const r = await validateCredentials('cli_x', 'sec', 'feishu', { budgetMs: 30 });
+    expect(r.ok).toBe(false);
+    if (!r.ok) {
+      expect(r.error).toBe('network');
+      expect(r.message).toContain('超时');
+    }
+  });
+
+  it('respects external AbortSignal', async () => {
+    fetchMock.mockImplementation(
+      (_url: string, init: any) =>
+        new Promise((_, reject) => {
+          init?.signal?.addEventListener('abort', () => {
+            const err = new Error('aborted') as any;
+            err.name = 'AbortError';
+            reject(err);
+          });
+        }),
+    );
+    const ctrl = new AbortController();
+    const p = validateCredentials('cli_x', 'sec', 'feishu', { budgetMs: 10_000, signal: ctrl.signal });
+    setTimeout(() => ctrl.abort(), 10);
+    const r = await p;
+    expect(r.ok).toBe(false);
+    if (!r.ok) expect(r.error).toBe('network');
+  });
+
   it('uses larksuite.com host when brand=lark', async () => {
     fetchMock.mockResolvedValue({ ok: true, status: 200, json: async () => ({ code: 0, tenant_access_token: 'x' }) });
     await validateCredentials('cli_x', 'sec', 'lark');

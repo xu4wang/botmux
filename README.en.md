@@ -77,6 +77,8 @@ Compared to OpenClaw-style approaches built on Agent SDKs:
 
 **Recommended**: `botmux setup` → pick "1) Scan-to-create app". Scan with the Lark mobile app and the AppID/AppSecret are persisted automatically; no manual browser navigation. Falls back to manual paste on cancel/timeout/network error.
 
+> ⚠️ **Currently only Feishu (feishu.cn) tenants are supported.** If scan detects a Lark international (larksuite.com) tenant, setup aborts — the daemon runtime (Lark Client/WSClient/event-dispatcher) hasn't been wired up for the `larksuite.com` domain yet, so accepting Lark credentials would land users in a half-working state. A follow-up PR will add full Lark support.
+
 **Manual**: go to the [Lark Open Platform](https://open.larkoffice.com/app) and click "Create Custom App".
 
 ![Create App](docs/setup/create-app.png)
