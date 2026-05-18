@@ -193,41 +193,7 @@ CLI 进入 botmux 会话时自动获得 `~/.botmux/bin` 在 PATH 中，以及一
 
 ![获取凭证](docs/setup/credentials.png)
 
-### Step 3: 添加权限
-
-进入「权限管理」→「批量导入/导出权限」，粘贴以下 JSON 一次性导入所有权限：
-
-![权限管理](docs/setup/permissions.png)
-
-<details>
-<summary>点击展开批量导入 JSON</summary>
-
-```json
-{
-  "scopes": {
-    "tenant": [
-      "contact:user.base:readonly",
-      "contact:user.id:readonly",
-      "im:chat:read",
-      "im:chat.members:bot_access",
-      "im:chat.members:read",
-      "im:message",
-      "im:message:readonly",
-      "im:message:send_as_bot",
-      "im:message:update",
-      "im:message.group_at_msg",
-      "im:message.group_at_msg:readonly",
-      "im:message.group_msg",
-      "im:message.p2p_msg:readonly",
-      "im:message.reactions:write_only",
-      "im:resource"
-    ]
-  }
-}
-```
-</details>
-
-### Step 4: 安装 & 启动 botmux
+### Step 3: 安装 & 启动 botmux
 
 ```bash
 # 安装
@@ -235,6 +201,7 @@ npm install -g botmux
 
 # 交互式配置 — 选「1) 扫码建应用」或「2) 手动粘 AppID/Secret」
 # 凭证拿到后自动取一次 tenant_access_token 校验，通过才落盘 bots.json
+# setup 末尾会把完整权限 JSON 写到 ~/.botmux/lark-scopes.json 并打印一键复制命令
 botmux setup
 
 # 启动（飞书后台配置长连接订阅前需要先启动，否则无法检测到连接）
@@ -242,19 +209,34 @@ botmux setup
 botmux start
 ```
 
-### Step 5: 配置事件订阅
+### Step 4: 添加权限
 
-回到飞书开放平台，进入「事件与回调」：
+setup 完成后，按 terminal 提示的一键复制命令把权限 JSON 复制到剪贴板，进入「权限管理」→「批量导入/导出权限」粘贴 → 提交审批。可用性范围选「仅自己可见」会自动通过：
 
-1. **订阅方式**：点击编辑图标，选择「使用长连接接收事件」（需要 botmux 已启动，飞书会检测长连接是否建立）
+![权限管理](docs/setup/permissions.png)
 
-![配置长连接](docs/setup/event-websocket.png)
+完整 JSON 已经写到 `~/.botmux/lark-scopes.json`，源仓库版本在 [src/setup/lark-scopes.json](src/setup/lark-scopes.json)（与本仓库内部 wiki 文档同步，覆盖 tenant + user 双套域 ≈ 290 项）。
 
-2. **添加事件**：点击「添加事件」，搜索添加 `im.message.receive_v1`（接收消息 v2.0）
+```bash
+# macOS
+cat ~/.botmux/lark-scopes.json | pbcopy
+# Linux X
+cat ~/.botmux/lark-scopes.json | xclip -selection clipboard
+# Wayland
+cat ~/.botmux/lark-scopes.json | wl-copy
+```
 
-![添加事件](docs/setup/event-receive-msg.png)
+> 扫码建出来的应用（PersonalAgent 类型）**已经默认订阅** `im.message.receive_v1` + `card.action.trigger`，**也已开通 bot 能力**，所以早期版本里的"事件订阅"和"开通机器人能力"两步已经不需要手动做了。
 
-3. **启用回调**：切换到「回调配置」tab，开启「卡片回传交互」（`card.action.trigger`）
+### Step 5: 添加重定向 URL（按需）
+
+如果之后要在飞书里 `/login` 让 botmux 以你的身份调云文档/日历/Wiki 等 API，进入「安全设置」→「重定向 URL」填入：
+
+```
+http://127.0.0.1:9768/callback
+```
+
+只用 bot 收发消息的话这一步可以跳过。
 
 ### Step 6: 发版
 

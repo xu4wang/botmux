@@ -168,48 +168,70 @@ function botBrand(b: any): 'feishu' | 'lark' {
   return b?.brand === 'lark' ? 'lark' : 'feishu';
 }
 
-// 跟 README 批量导入 JSON 对齐的完整 scope 列表 (15 项). setup 只打印这个
-// 完整集合, 让用户按向导一条路走完不缺权限. critical 5 项跟 verify-permissions.ts
-// BOTMUX_REQUIRED_SCOPES 对齐.
-const BOTMUX_FULL_SCOPES = [
-  'contact:user.base:readonly',
-  'contact:user.id:readonly',
-  'im:chat:read',
-  'im:chat.members:bot_access',
-  'im:chat.members:read',
-  'im:message',
-  'im:message:readonly',
-  'im:message:send_as_bot',
-  'im:message:update',
-  'im:message.group_at_msg',
-  'im:message.group_at_msg:readonly',
-  'im:message.group_msg',
-  'im:message.p2p_msg:readonly',
-  'im:message.reactions:write_only',
-  'im:resource',
-] as const;
+/**
+ * 把 botmux 推荐的完整 scope JSON (从 src/setup/lark-scopes.json) 写到
+ * 用户配置目录, 同时给出跨平台一键复制命令. JSON 长 (293 项, 297 行),
+ * terminal 直接打印用户也复制不了, 写文件 + pbcopy/xclip 才是顺手的姿势.
+ *
+ * Returns: 写出的 JSON 文件绝对路径.
+ */
+function writeScopesJsonToConfigDir(): string {
+  // build script 会把 src/setup/lark-scopes.json copy 到 dist/setup/.
+  // dist 模式下 __dirname 是 dist/, 找 ./setup/lark-scopes.json; dev (tsx)
+  // 模式找 src/setup/lark-scopes.json 在源码同目录也成立.
+  const here = dirname(fileURLToPath(import.meta.url));
+  const srcCandidates = [
+    join(here, 'setup', 'lark-scopes.json'),
+    join(here, '..', 'src', 'setup', 'lark-scopes.json'),
+  ];
+  let scopesPath = srcCandidates[0];
+  for (const p of srcCandidates) {
+    if (existsSync(p)) { scopesPath = p; break; }
+  }
+  const destPath = join(CONFIG_DIR, 'lark-scopes.json');
+  copyFileSync(scopesPath, destPath);
+  return destPath;
+}
+
+function printCopyHint(filePath: string): void {
+  console.log('  一键复制 JSON 到剪贴板:');
+  console.log(`    macOS:   cat ${filePath} | pbcopy`);
+  console.log(`    Linux:   cat ${filePath} | xclip -selection clipboard`);
+  console.log(`    Wayland: cat ${filePath} | wl-copy`);
+  console.log(`    远程 SSH: scp 拉到本地, 或 less ${filePath} 终端选中复制`);
+}
 
 function printRemainingSteps(appId: string, brand: 'feishu' | 'lark'): void {
-  // 跟 verify-permissions.ts 的 buildRemainingSteps 同步, 这里只负责打印.
-  // 为了避免 cli.ts 启动时同步导入 Lark SDK, 直接复用深链构造常量.
+  // 跟 README 列表对齐, 数据源是 src/setup/lark-scopes.json (来自飞书内部
+  // wiki UBOXwH01CixfxfkqxUpcKgvQnsg "[Botmux] 5分钟创建一个真正好用的飞书助理"
+  // 的"权限申请"段). 扫码建出来的 PersonalAgent 应用已经预订阅好
+  // im.message.receive_v1 / card.action.trigger 事件, bot 能力也已开通, 所以
+  // 这两步已经不需要用户手动操作了.
   const host = brand === 'lark' ? 'open.larksuite.com' : 'open.feishu.cn';
   const home = `https://${host}/app/${appId}`;
-  console.log('\n⚠️  扫码/粘贴只完成了"建应用 + 拿凭证". 飞书开放平台没开放写 API,');
-  console.log('   以下几步必须用户手动在浏览器里点完, botmux 才能真正收到消息：\n');
-  console.log('  1. 进入「权限管理」→「批量导入/导出权限」, 粘贴下面 JSON 一次性导入并提交审批:');
-  console.log(`     ${home}/auth\n`);
-  console.log('     {');
-  console.log('       "scopes": { "tenant": [');
-  for (let i = 0; i < BOTMUX_FULL_SCOPES.length; i++) {
-    const tail = i === BOTMUX_FULL_SCOPES.length - 1 ? '' : ',';
-    console.log(`         "${BOTMUX_FULL_SCOPES[i]}"${tail}`);
+  let scopesJsonPath = '';
+  try {
+    scopesJsonPath = writeScopesJsonToConfigDir();
+  } catch (err) {
+    // 不应阻止 setup 完成, 只 WARN
+    console.log(`\n⚠️  写权限 JSON 失败 (${(err as Error).message}), 请手动从仓库源码 src/setup/lark-scopes.json 拷.`);
   }
-  console.log('       ] }');
-  console.log('     }\n');
-  console.log('  2. 配置事件订阅（长连接模式，订阅 im.message.receive_v1 + card.action.trigger）:');
-  console.log(`     ${home}/dev-config/event-sub\n`);
-  console.log('  3. 开通机器人能力（应用功能 → 机器人，设置名称和头像）:');
-  console.log(`     ${home}/feature/bot\n`);
+
+  console.log('\n⚠️  扫码/粘贴完成了"建应用 + 拿凭证 + 事件订阅 + bot 能力" (PersonalAgent 默认配好). 还差两步:\n');
+
+  console.log('  1. 申请权限 (一次性导入完整 JSON 提交审批)');
+  console.log(`     深链: ${home}/auth → 进入「权限管理」→「批量导入/导出权限」→ 粘贴 → 提交`);
+  if (scopesJsonPath) {
+    console.log(`     权限 JSON: ${scopesJsonPath}`);
+    printCopyHint(scopesJsonPath);
+  }
+  console.log('');
+
+  console.log('  2. 添加重定向 URL (用于 botmux 内 `/login` 拿用户 UAT 调云文档/日历等)');
+  console.log(`     深链: ${home}/safe → 进入「安全设置」→「重定向 URL」`);
+  console.log('     填入: http://127.0.0.1:9768/callback');
+  console.log('     不打算用 `/login` 跨用户调 API 的话, 这一步可以跳过.\n');
+
   console.log('  完成后 `botmux start` (或 `botmux restart`)，启动检查不会卡住，');
   console.log('  缺权限只 WARN，去开放平台补齐后 daemon 自动恢复。\n');
 }

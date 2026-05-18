@@ -91,41 +91,7 @@ Open the app details page → "Credentials & Basic Info", and copy the **App ID*
 
 ![Get Credentials](docs/setup/credentials.png)
 
-### Step 3: Add Permissions
-
-Go to "Permissions & Scopes" → "Batch Import/Export", and paste the following JSON to import all permissions at once:
-
-![Permissions](docs/setup/permissions.png)
-
-<details>
-<summary>Click to expand batch import JSON</summary>
-
-```json
-{
-  "scopes": {
-    "tenant": [
-      "contact:user.base:readonly",
-      "contact:user.id:readonly",
-      "im:chat:read",
-      "im:chat.members:bot_access",
-      "im:chat.members:read",
-      "im:message",
-      "im:message:readonly",
-      "im:message:send_as_bot",
-      "im:message:update",
-      "im:message.group_at_msg",
-      "im:message.group_at_msg:readonly",
-      "im:message.group_msg",
-      "im:message.p2p_msg:readonly",
-      "im:message.reactions:write_only",
-      "im:resource"
-    ]
-  }
-}
-```
-</details>
-
-### Step 4: Install & Start botmux
+### Step 3: Install & Start botmux
 
 ```bash
 # Install
@@ -133,6 +99,8 @@ npm install -g botmux
 
 # Interactive setup — pick "1) Scan-to-create app" or "2) Paste AppID/Secret manually".
 # Credentials are validated with a tenant_access_token call before bots.json is written.
+# At the end of setup the wizard writes the full scope JSON to ~/.botmux/lark-scopes.json
+# and prints a one-line clipboard copy command for your platform.
 botmux setup
 
 # Start (must be running before configuring WebSocket subscription — Lark checks for an active connection)
@@ -140,19 +108,34 @@ botmux setup
 botmux start
 ```
 
-### Step 5: Configure Event Subscription
+### Step 4: Add Permissions
 
-Back in the Lark Open Platform, go to "Events & Callbacks":
+Run the copy-to-clipboard command setup printed, then go to "Permissions & Scopes" → "Batch Import/Export" and paste. Submit for review — visibility "only me" auto-approves.
 
-1. **Subscription mode**: Click the edit icon, select "Receive events via persistent connection" (WebSocket) — requires botmux to be running so Lark can detect the connection
+![Permissions](docs/setup/permissions.png)
 
-![WebSocket subscription](docs/setup/event-websocket.png)
+The full JSON lives at `~/.botmux/lark-scopes.json` (also tracked in-repo at [src/setup/lark-scopes.json](src/setup/lark-scopes.json), kept in sync with the internal wiki, covers ~290 tenant + user scopes).
 
-2. **Add event**: Click "Add Event", search and add `im.message.receive_v1` (Receive messages v2.0)
+```bash
+# macOS
+cat ~/.botmux/lark-scopes.json | pbcopy
+# Linux X
+cat ~/.botmux/lark-scopes.json | xclip -selection clipboard
+# Wayland
+cat ~/.botmux/lark-scopes.json | wl-copy
+```
 
-![Add event](docs/setup/event-receive-msg.png)
+> Apps created via the scan flow (PersonalAgent type) **already have** `im.message.receive_v1` + `card.action.trigger` subscribed and the bot capability enabled. The old "configure event subscription" and "enable bot capability" steps are no longer required.
 
-3. **Enable callback**: Switch to the "Callback Configuration" tab, turn on "Card action callback" (`card.action.trigger`)
+### Step 5: Add Redirect URL (optional)
+
+If you plan to use `/login` inside Lark to let botmux act on your behalf for docs / calendar / wiki / sheets, add a redirect URL under "Security Settings" → "Redirect URL":
+
+```
+http://127.0.0.1:9768/callback
+```
+
+Skip this step if you only need bot messaging.
 
 ### Step 6: Publish the App
 
