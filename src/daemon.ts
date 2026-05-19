@@ -703,16 +703,24 @@ async function handleThreadReply(data: any, ctx: RoutingContext): Promise<void> 
     );
   }
 
-  // Resolve sender once per turn for <sender> tag injection. When the sender
-  // is a known foreign botmux peer, hint the lookup with that display name
-  // (and force type=bot) so we don't waste a contact API call on what is
-  // demonstrably a bot identity.
-  const threadSender = await resolveSender(
-    larkAppId,
-    senderOpenIdForPrefix,
-    parsed.senderType,
-    isForeignBot ? { type: 'bot', name: foreignBotName !== 'Bot' ? foreignBotName : undefined } : undefined,
-  );
+  // resolveSender is deferred until we know the message actually needs prompt
+  // injection. callback URLs, daemon commands, and "other bot owns this
+  // anchor" all return early; routing them through resolveSender first would
+  // tack the 800ms budget onto paths that never see the sender tag. Use the
+  // helper below at every actual injection point.
+  let threadSenderCached: import('./im/lark/identity-cache.js').ResolvedSender | undefined;
+  let threadSenderResolved = false;
+  const getThreadSender = async (): Promise<typeof threadSenderCached> => {
+    if (threadSenderResolved) return threadSenderCached;
+    threadSenderResolved = true;
+    threadSenderCached = await resolveSender(
+      larkAppId,
+      senderOpenIdForPrefix,
+      parsed.senderType,
+      isForeignBot ? { type: 'bot', name: foreignBotName !== 'Bot' ? foreignBotName : undefined } : undefined,
+    );
+    return threadSenderCached;
+  };
 
   const content = parsed.content.trim();
   // Strip leading @<bot> mentions so "@bot /restart" is recognized as a command.
@@ -824,7 +832,7 @@ async function handleThreadReply(data: any, ctx: RoutingContext): Promise<void> 
     // can contain messages from multiple users while a single ds.pendingSender
     // is fixed at the first message, so without per-message attribution the
     // CLI can't tell which user said what after repo selection unlocks the spawn.
-    const followUpSenderTag = renderSenderTag(threadSender);
+    const followUpSenderTag = renderSenderTag(await getThreadSender());
     if (followUpSenderTag) enriched = `${followUpSenderTag}\n${enriched}`;
     if (!ds.pendingFollowUps) ds.pendingFollowUps = [];
     ds.pendingFollowUps.push(enriched);
@@ -887,6 +895,11 @@ async function handleThreadReply(data: any, ctx: RoutingContext): Promise<void> 
       : null;
 
     const pinnedWorkingDir = oncallEntry?.workingDir ?? inheritedFrom?.workingDir;
+    // Now we know the message will spawn or pend a real session — resolve
+    // sender (may await contact API budget) since every downstream branch
+    // injects it either into the immediate prompt or stashes it on
+    // pendingSender for the deferred spawn.
+    const autoCreateSender = await getThreadSender();
     const newDs: DaemonSession = {
       session,
       worker: null,
@@ -904,7 +917,7 @@ async function handleThreadReply(data: any, ctx: RoutingContext): Promise<void> 
       pendingPrompt: promptContent,
       pendingAttachments: attachments.length > 0 ? attachments : undefined,
       pendingMentions: parsed.mentions,
-      pendingSender: threadSender,
+      pendingSender: autoCreateSender,
       ownerOpenId: senderOId,
       currentTurnTitle: parsed.content.substring(0, 50),
       workingDir: pinnedWorkingDir,
@@ -919,7 +932,7 @@ async function handleThreadReply(data: any, ctx: RoutingContext): Promise<void> 
     // spawn CLI immediately, skip repo selection.
     if (pinnedWorkingDir) {
       const selfBot = getBot(larkAppId);
-      const prompt = buildNewTopicPrompt(promptContent, session.sessionId, botCfg.cliId, botCfg.cliPathOverride, attachments, parsed.mentions, await getAvailableBots(larkAppId, autoCreateChatId), undefined, { name: selfBot.botName, openId: selfBot.botOpenId }, localeForBot(larkAppId), threadSender);
+      const prompt = buildNewTopicPrompt(promptContent, session.sessionId, botCfg.cliId, botCfg.cliPathOverride, attachments, parsed.mentions, await getAvailableBots(larkAppId, autoCreateChatId), undefined, { name: selfBot.botName, openId: selfBot.botOpenId }, localeForBot(larkAppId), autoCreateSender);
       forkWorker(newDs, prompt);
       const reason = oncallEntry
         ? `oncall-bound chat ${autoCreateChatId}`
@@ -944,7 +957,7 @@ async function handleThreadReply(data: any, ctx: RoutingContext): Promise<void> 
       // No projects found — skip repo selection, spawn directly
       newDs.pendingRepo = false;
       const selfBot = getBot(larkAppId);
-      const prompt = buildNewTopicPrompt(promptContent, session.sessionId, botCfg.cliId, botCfg.cliPathOverride, attachments, parsed.mentions, await getAvailableBots(larkAppId, autoCreateChatId), undefined, { name: selfBot.botName, openId: selfBot.botOpenId }, localeForBot(larkAppId), threadSender);
+      const prompt = buildNewTopicPrompt(promptContent, session.sessionId, botCfg.cliId, botCfg.cliPathOverride, attachments, parsed.mentions, await getAvailableBots(larkAppId, autoCreateChatId), undefined, { name: selfBot.botName, openId: selfBot.botOpenId }, localeForBot(larkAppId), autoCreateSender);
       forkWorker(newDs, prompt);
     }
 
@@ -976,7 +989,7 @@ async function handleThreadReply(data: any, ctx: RoutingContext): Promise<void> 
           isAdoptMode: false,
           cliId: dsBotCfgForMsg.cliId,
           cliPathOverride: dsBotCfgForMsg.cliPathOverride,
-          sender: threadSender,
+          sender: await getThreadSender(),
         });
     beginNewTurn(ds, parsed.content);
     ds.worker.send({ type: 'message', content: msgContent } as DaemonToWorker);
@@ -1018,7 +1031,7 @@ async function handleThreadReply(data: any, ctx: RoutingContext): Promise<void> 
       cliId: dsBotCfgForFork.cliId,
       cliPathOverride: dsBotCfgForFork.cliPathOverride,
       selfMention: { name: selfBot.botName, openId: selfBot.botOpenId },
-      sender: threadSender,
+      sender: await getThreadSender(),
     });
     forkWorker(ds, wrappedPrompt, ds.hasHistory);
   }

@@ -56,7 +56,7 @@ vi.mock('../src/core/worker-pool.js', () => ({
 
 // ─── Imports ──────────────────────────────────────────────────────────────
 
-import { buildNewTopicPrompt, buildFollowUpContent, buildReforkPrompt } from '../src/core/session-manager.js';
+import { buildNewTopicPrompt, buildFollowUpContent, buildReforkPrompt, renderSenderTag } from '../src/core/session-manager.js';
 import type { DaemonSession } from '../src/core/types.js';
 
 // ─── Tests ────────────────────────────────────────────────────────────────
@@ -267,5 +267,94 @@ describe('buildReforkPrompt', () => {
     expect(out).not.toContain('<botmux_reminder>');
     expect(out).not.toContain('<session_id>');
     expect(out).toContain('hello');
+  });
+});
+
+// ─── renderSenderTag — <sender> attribute rendering / XML escape ────────────
+
+describe('renderSenderTag', () => {
+  it('returns empty string when sender is undefined or has no openId', () => {
+    expect(renderSenderTag()).toBe('');
+    expect(renderSenderTag({ openId: '', type: 'user' })).toBe('');
+  });
+
+  it('emits open_id and type even when name is missing', () => {
+    const out = renderSenderTag({ openId: 'ou_xyz', type: 'user' });
+    expect(out).toBe('<sender type="user" open_id="ou_xyz" />');
+    expect(out).not.toContain('name=');
+  });
+
+  it('includes name attribute when present', () => {
+    const out = renderSenderTag({ openId: 'ou_a', type: 'user', name: '张三' });
+    expect(out).toContain('type="user"');
+    expect(out).toContain('open_id="ou_a"');
+    expect(out).toContain('name="张三"');
+  });
+
+  it('preserves bot type for foreign botmux peers', () => {
+    const out = renderSenderTag({ openId: 'ou_b', type: 'bot', name: 'CoCo' });
+    expect(out).toContain('type="bot"');
+    expect(out).toContain('name="CoCo"');
+  });
+
+  it('XML-escapes name and open_id so quotes/angle brackets can\'t break the tag', () => {
+    const out = renderSenderTag({
+      openId: 'ou_"weird"',
+      type: 'user',
+      name: '<Alice & "Bob"\'s pal>',
+    });
+    // Each special char must round-trip via entity references so the attribute
+    // string stays well-formed for downstream prompt parsers.
+    expect(out).toContain('name="&lt;Alice &amp; &quot;Bob&quot;&apos;s pal&gt;"');
+    expect(out).toContain('open_id="ou_&quot;weird&quot;"');
+    // And the tag's outer quotes are not eaten by inner ones.
+    expect(out.startsWith('<sender ')).toBe(true);
+    expect(out.endsWith(' />')).toBe(true);
+  });
+});
+
+// ─── pendingRepo multi-sender follow-up regression ─────────────────────────
+//
+// Repros the scenario the issue tracker called out: A opens a session with
+// a question, B补充约束 while the repo card is still pending. Each
+// buffered follow-up MUST keep its own sender attribution after the spawn
+// finally happens.
+
+describe('buildNewTopicPrompt with multi-user follow-ups', () => {
+  it('preserves per-follow-up <sender> tags embedded by the daemon', () => {
+    // daemon.ts prefixes each buffered enriched string with a <sender> tag
+    // rendered from THAT message's sender. Builder then drops each into its
+    // own <follow_up_message> wrapper.
+    const followUps = [
+      `${renderSenderTag({ openId: 'ou_alice', type: 'user', name: 'Alice' })}\nAlice 的补充约束 1`,
+      `${renderSenderTag({ openId: 'ou_bob', type: 'user', name: 'Bob' })}\nBob 的补充约束 2`,
+    ];
+
+    const prompt = buildNewTopicPrompt(
+      '主消息（来自 Alice）',
+      'test-session',
+      'codex',
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      followUps,
+      undefined,
+      undefined,
+      { openId: 'ou_alice', type: 'user', name: 'Alice' },
+    );
+
+    // Main message keeps its sibling <sender>
+    expect(prompt).toContain('<user_message>\n主消息（来自 Alice）\n</user_message>');
+    // Each follow-up wrapper contains the matching open_id — no cross-contamination
+    const fu1Match = prompt.match(/<follow_up_message>\n([\s\S]*?)\n<\/follow_up_message>/g);
+    expect(fu1Match).toHaveLength(2);
+    expect(fu1Match![0]).toContain('open_id="ou_alice"');
+    expect(fu1Match![0]).toContain('Alice 的补充约束 1');
+    expect(fu1Match![1]).toContain('open_id="ou_bob"');
+    expect(fu1Match![1]).toContain('Bob 的补充约束 2');
+    // Bob's sender does NOT leak into Alice's follow-up and vice versa
+    expect(fu1Match![0]).not.toContain('ou_bob');
+    expect(fu1Match![1]).not.toContain('ou_alice');
   });
 });

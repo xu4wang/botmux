@@ -178,17 +178,35 @@ export async function resolveName(larkAppId: string, openId: string): Promise<st
   const key = `${larkAppId}:${openId}`;
   let pending = inflight.get(key);
   if (!pending) {
-    pending = fetchUserName(larkAppId, openId).finally(() => {
-      inflight.delete(key);
-    });
+    pending = fetchUserName(larkAppId, openId);
     inflight.set(key, pending);
+    // Identity-guarded cleanup. A request that times out is evicted by the
+    // catch below; if its underlying fetch later settles, we must NOT clobber
+    // whatever inflight entry now lives there — that entry belongs to a
+    // newer caller. Comparing by reference catches both this race and the
+    // simple "settled normally" case.
+    //
+    // `.then(cleanup, cleanup)` (not `.finally`) so a future fetchUserName
+    // refactor that rejects can't leave the returned cleanup promise as an
+    // unhandled rejection. Current fetchUserName swallows everything to
+    // logger.debug, but that's an undocumented invariant we shouldn't rely on.
+    const local = pending;
+    const cleanup = () => { if (inflight.get(key) === local) inflight.delete(key); };
+    void local.then(cleanup, cleanup);
   }
 
   try {
     await withTimeout(pending, RESOLVE_BUDGET_MS);
   } catch {
-    // Either the underlying API errored (logged inside fetchUserName) or we
-    // timed out. Either way, fall through to whatever the cache holds now.
+    // withTimeout rejected → either the budget elapsed or the underlying
+    // request errored. If the Lark SDK call hangs forever (no built-in
+    // request timeout) the cleanup wired via local.then(...) above never
+    // fires, and every subsequent caller would re-wait the full budget.
+    // Evict here so the next caller starts a fresh attempt. Same identity
+    // guard: only evict if the entry still IS our promise — otherwise we'd
+    // race-clobber a newer caller's entry that arrived between our await
+    // rejection and this line.
+    if (inflight.get(key) === pending) inflight.delete(key);
   }
   return getIdentity(larkAppId, openId)?.name;
 }
