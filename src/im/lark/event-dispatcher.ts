@@ -13,6 +13,7 @@ import { logger } from '../../utils/logger.js';
 import { parseForceTopicInvocation } from '../../core/command-handler.js';
 import { stripLeadingMentions } from './message-parser.js';
 import { recordObservedBots } from '../../services/observed-bots-store.js';
+import { BOTMUX_REQUIRED_SCOPES, buildScopeDeepLink } from '../../setup/verify-permissions.js';
 
 // ─── Bot identity ─────────────────────────────────────────────────────────
 
@@ -189,32 +190,44 @@ export async function checkRequiredScopes(larkAppId: string): Promise<void> {
       logger.debug(`[${larkAppId}] scope check inconclusive: scopes array empty or shape unexpected — skipping`);
       return;
     }
-    const grantedScopes = scopesRaw.map(s => typeof s === 'string' ? s : s?.scope).filter(Boolean) as string[];
-    if (grantedScopes.includes(REQUIRED_BOT_AT_SCOPE)) {
-      logger.info(`[${larkAppId}] required scope present: ${REQUIRED_BOT_AT_SCOPE}`);
+    const grantedScopes = new Set(
+      scopesRaw.map(s => typeof s === 'string' ? s : s?.scope).filter(Boolean) as string[],
+    );
+
+    // Diff against the canonical list. Critical-missing is the main signal;
+    // non-critical is mentioned only when something critical is also missing,
+    // so single-bot deployments don't get nagged about `include_bot:readonly`.
+    const missingCritical = BOTMUX_REQUIRED_SCOPES.filter(s => s.critical && !grantedScopes.has(s.name));
+    const missingOptional = BOTMUX_REQUIRED_SCOPES.filter(s => !s.critical && !grantedScopes.has(s.name));
+
+    if (missingCritical.length === 0) {
+      logger.info(`[${larkAppId}] all critical scopes granted (${BOTMUX_REQUIRED_SCOPES.filter(s => s.critical).length} checked)`);
       return;
     }
 
-    // Missing — log + DM
+    // Log + DM consolidated message listing all missing critical scopes.
+    const summaryLine = missingCritical.map(s => `${s.name} (${s.desc})`).join('、');
     logger.error(
-      `[${larkAppId}] 缺少必需权限 ${REQUIRED_BOT_AT_SCOPE}（"获取群组中其他机器人和用户@当前机器人的消息"）。` +
-      `跨 bot @ 消息无法到达本 bot，多 bot 协作会失效。请到飞书开放平台 → 应用 → 权限管理里申请该权限，开通后 \`botmux restart\`。`,
+      `[${larkAppId}] 缺少 ${missingCritical.length} 项必需权限：${summaryLine}。` +
+      `botmux 核心功能（消息收发、附件下载、用户名解析等）会受影响。请到飞书开放平台 → 应用 → 权限管理里申请，开通后 \`botmux restart\`。`,
     );
     const adminOpenId = getAdminOpenId(bot);
     if (!adminOpenId) {
       logger.warn(`[${larkAppId}] no resolved admin open_id in allowedUsers; missing-scope warning visible only in daemon log`);
       return;
     }
-    const authUrl = `https://open.feishu.cn/app/${bot.config.larkAppId}/auth?q=${encodeURIComponent(REQUIRED_BOT_AT_SCOPE)}&op_from=openapi&token_type=tenant`;
+    const criticalLines = missingCritical.map((s, i) =>
+      `${i + 1}. **${s.desc}** (\`${s.name}\`)\n   ${buildScopeDeepLink(bot.config.larkAppId, s.name)}`,
+    ).join('\n\n');
+    const optionalBlock = missingOptional.length > 0
+      ? `\n\n**可选权限（建议一并开通）**：\n${missingOptional.map(s => `- ${s.desc} (\`${s.name}\`): ${buildScopeDeepLink(bot.config.larkAppId, s.name)}`).join('\n')}`
+      : '';
     const dm =
-      `⚠️ botmux 启动检查发现机器人 "${bot.botName ?? larkAppId}" 缺少必需权限\n\n` +
-      `权限名：获取群组中其他机器人和用户@当前机器人的消息\n` +
-      `scope: ${REQUIRED_BOT_AT_SCOPE}\n\n` +
-      `没开通的话，跨机器人 @ 收不到事件，botmux 多机器人协作的整套场景都失效。\n\n` +
-      `**操作步骤**：\n` +
-      `1. 点链接申请权限（免审批，自动通过）：${authUrl}\n` +
-      `2. \`botmux restart\``;
-    await dmAdmin(larkAppId, adminOpenId, dm, 'required scope missing');
+      `⚠️ botmux 启动检查发现机器人 "${bot.botName ?? larkAppId}" 缺少 ${missingCritical.length} 项必需权限\n\n` +
+      `**操作步骤（点链接 → 申请开通 → 重启 daemon）**：\n\n` +
+      `${criticalLines}\n\n` +
+      `开通完成后执行 \`botmux restart\`，botmux 会再次自检并把结果发到这里。${optionalBlock}`;
+    await dmAdmin(larkAppId, adminOpenId, dm, `missing scopes: ${missingCritical.map(s => s.name).join(',')}`);
   } catch (err: any) {
     logger.debug(`[${larkAppId}] scope check errored: ${err?.message ?? err}`);
   }
@@ -363,8 +376,10 @@ const INTRODUCE_RE = /^\/introduce(?:\s|$)/i;
  * - sender is not in allowedUsers — silent drop, do not surface "无操作权限"
  * - mentions[] minus self is empty — nothing to learn, ignore quietly
  *
- * Always writes ALL mentions including self to the store so every daemon's
- * view of the chat converges on the same content regardless of who acked.
+ * Writes ALL mentions including self to the store. Each receiving bot's
+ * daemon owns its own per-observer file (see observed-bots-store), so the
+ * self entry is the only authoritative record of this app's own open_id
+ * in the per-observer view — useful for `botmux bots list` self-identification.
  */
 export async function tryHandleIntroduceCommand(
   larkAppId: string,

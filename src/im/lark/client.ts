@@ -589,10 +589,11 @@ async function listByChatFilter(c: any, chatId: string, rootMessageId: string, p
  *    the same host). Probed via `isInChat` per bot; only those actually in
  *    the chat are returned. open_id is corrected via the per-app cross-ref.
  * 2. **introduce** — bots discovered passively from the `/introduce`
- *    collaboration handshake, persisted per chat in
- *    `observed-bots-<chatId>.json`. Critical for external bots run by other
- *    botmux daemons (or even non-botmux bots) that aren't in our bots.json
- *    but the user wants this daemon to know about.
+ *    collaboration handshake, persisted per observer × chat in
+ *    `observed-bots-<larkAppId>-<chatId>.json`. Critical for external bots
+ *    run by other botmux daemons (or even non-botmux bots) that aren't in
+ *    our bots.json but the user wants this daemon to know about. Read with
+ *    the caller's `larkAppId` so open_ids match this app's perspective.
  *
  * Configured wins on open_id collision (`source: 'configured'`); observed
  * entries fill in everyone else (`source: 'introduce'`). Observed entries
