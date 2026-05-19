@@ -40,15 +40,23 @@ vi.mock('../src/bot-registry.js', () => ({
 const mockListChatBotMembers = vi.fn(async () => [] as Array<{ openId: string; name: string }>);
 const mockGetChatMode = vi.fn(async () => 'topic' as 'group' | 'topic' | 'p2p');
 const mockGetChatInfo = vi.fn(async () => ({ userCount: 1, botCount: 1 }));
+const mockReplyMessage = vi.fn(async () => 'msg-id');
 vi.mock('../src/im/lark/client.js', () => ({
   getChatInfo: (...args: any[]) => mockGetChatInfo(...args),
   getChatMode: (...args: any[]) => mockGetChatMode(...args),
   listChatBotMembers: (...args: any[]) => mockListChatBotMembers(...args),
-  replyMessage: vi.fn(async () => 'msg-id'),
+  replyMessage: (...args: any[]) => mockReplyMessage(...args),
 }));
 
 vi.mock('../src/utils/logger.js', () => ({
   logger: { info: vi.fn(), debug: vi.fn(), warn: vi.fn(), error: vi.fn() },
+}));
+
+const mockRecordObservedBots = vi.fn();
+const mockListObservedBots = vi.fn(() => [] as any[]);
+vi.mock('../src/services/observed-bots-store.js', () => ({
+  recordObservedBots: (...args: any[]) => mockRecordObservedBots(...args),
+  listObservedBots: (...args: any[]) => mockListObservedBots(...args),
 }));
 
 // Capture the registered event handlers from EventDispatcher.register()
@@ -1099,6 +1107,215 @@ describe('im.message.receive_v1 — /t force-topic override', () => {
 
     expect(handlers.handleNewTopic).not.toHaveBeenCalled();
     expect(handlers.handleThreadReply).not.toHaveBeenCalled();
+  });
+});
+
+describe('im.message.receive_v1 — /introduce command', () => {
+  let handlers: ReturnType<typeof makeHandlers>;
+  const OTHER_BOT_OPEN_ID_2 = 'ou_bot_c_open_id';
+
+  beforeEach(() => {
+    capturedHandlers = {};
+    setupBotState();
+    handlers = makeHandlers();
+    mockIsChatOncallBoundForAnyBot.mockReturnValue(false);
+    mockRecordObservedBots.mockReset();
+    mockReplyMessage.mockReset().mockResolvedValue('ack-msg-id');
+    mockGetChatMode.mockResolvedValue('topic');
+    startLarkEventDispatcher(MY_APP_ID, 'secret', handlers);
+  });
+
+  function makeIntroduceEvent(opts: {
+    extraText?: string;
+    mentions: Array<{ key: string; name: string; id: { open_id: string } }>;
+    chatId?: string;
+    messageId?: string;
+  }) {
+    const text = `/introduce${opts.extraText ?? ''}`;
+    return makeUserMessageEvent({
+      senderOpenId: USER_OPEN_ID,
+      content: JSON.stringify({ text }),
+      chatId: opts.chatId ?? 'chat-intro-001',
+      messageId: opts.messageId ?? 'msg-intro-001',
+      chatType: 'group',
+      mentions: opts.mentions,
+    });
+  }
+
+  it('records mentioned bots (including self) when external bot is in mentions', async () => {
+    const event = makeIntroduceEvent({
+      mentions: [
+        { key: '@_a', name: 'BotA', id: { open_id: MY_OPEN_ID } },
+        { key: '@_b', name: 'BotB', id: { open_id: OTHER_BOT_OPEN_ID } },
+      ],
+    });
+
+    await capturedHandlers['im.message.receive_v1'](event);
+
+    expect(mockRecordObservedBots).toHaveBeenCalledTimes(1);
+    const [, chatIdArg, botsArg, sourceArg] = mockRecordObservedBots.mock.calls[0];
+    expect(chatIdArg).toBe('chat-intro-001');
+    expect(sourceArg).toBe('introduce');
+    expect((botsArg as Array<{ openId: string; name: string }>).sort((a, b) => a.openId.localeCompare(b.openId)))
+      .toEqual([
+        { openId: MY_OPEN_ID, name: 'BotA' },
+        { openId: OTHER_BOT_OPEN_ID, name: 'BotB' },
+      ].sort((a, b) => a.openId.localeCompare(b.openId)));
+  });
+
+  it('sends ack reply when /introduce is consumed', async () => {
+    const event = makeIntroduceEvent({
+      mentions: [
+        { key: '@_a', name: 'BotA', id: { open_id: MY_OPEN_ID } },
+        { key: '@_b', name: 'BotB', id: { open_id: OTHER_BOT_OPEN_ID } },
+      ],
+    });
+
+    await capturedHandlers['im.message.receive_v1'](event);
+
+    expect(mockReplyMessage).toHaveBeenCalledTimes(1);
+    const [larkAppIdArg, messageIdArg, contentArg] = mockReplyMessage.mock.calls[0];
+    expect(larkAppIdArg).toBe(MY_APP_ID);
+    expect(messageIdArg).toBe('msg-intro-001');
+    expect(contentArg).toContain('BotB');
+  });
+
+  it('does NOT route /introduce message to handleNewTopic or handleThreadReply', async () => {
+    const event = makeIntroduceEvent({
+      mentions: [
+        { key: '@_a', name: 'BotA', id: { open_id: MY_OPEN_ID } },
+        { key: '@_b', name: 'BotB', id: { open_id: OTHER_BOT_OPEN_ID } },
+      ],
+    });
+
+    await capturedHandlers['im.message.receive_v1'](event);
+
+    expect(handlers.handleNewTopic).not.toHaveBeenCalled();
+    expect(handlers.handleThreadReply).not.toHaveBeenCalled();
+  });
+
+  it('does NOT record or ack when only self is @mentioned', async () => {
+    const event = makeIntroduceEvent({
+      mentions: [
+        { key: '@_a', name: 'BotA', id: { open_id: MY_OPEN_ID } },
+      ],
+    });
+
+    await capturedHandlers['im.message.receive_v1'](event);
+
+    expect(mockRecordObservedBots).not.toHaveBeenCalled();
+    expect(mockReplyMessage).not.toHaveBeenCalled();
+  });
+
+  it('does NOT record or ack when no mentions at all', async () => {
+    const event = makeIntroduceEvent({
+      mentions: [],
+    });
+
+    await capturedHandlers['im.message.receive_v1'](event);
+
+    expect(mockRecordObservedBots).not.toHaveBeenCalled();
+    expect(mockReplyMessage).not.toHaveBeenCalled();
+  });
+
+  it('still consumes (no routing) when only self is @mentioned — does not fall through to CLI', async () => {
+    const event = makeIntroduceEvent({
+      mentions: [
+        { key: '@_a', name: 'BotA', id: { open_id: MY_OPEN_ID } },
+      ],
+    });
+
+    await capturedHandlers['im.message.receive_v1'](event);
+
+    expect(handlers.handleNewTopic).not.toHaveBeenCalled();
+    expect(handlers.handleThreadReply).not.toHaveBeenCalled();
+  });
+
+  it('does NOT trigger on normal user message that doesn\'t contain /introduce', async () => {
+    const event = makeUserMessageEvent({
+      senderOpenId: USER_OPEN_ID,
+      content: JSON.stringify({ text: '@BotA hi there' }),
+      mentions: [{ key: '@_a', name: 'BotA', id: { open_id: MY_OPEN_ID } }],
+      chatType: 'group',
+      messageId: 'msg-normal',
+    });
+
+    await capturedHandlers['im.message.receive_v1'](event);
+
+    expect(mockRecordObservedBots).not.toHaveBeenCalled();
+    expect(mockReplyMessage).not.toHaveBeenCalled();
+    // Normal routing should fire
+    expect(handlers.handleNewTopic).toHaveBeenCalled();
+  });
+
+  it('consumes /introduce with extra text after the command (extra text is dropped, not forwarded to CLI)', async () => {
+    const event = makeIntroduceEvent({
+      extraText: ' 还有这些请帮忙',
+      mentions: [
+        { key: '@_a', name: 'BotA', id: { open_id: MY_OPEN_ID } },
+        { key: '@_b', name: 'BotB', id: { open_id: OTHER_BOT_OPEN_ID } },
+      ],
+    });
+
+    await capturedHandlers['im.message.receive_v1'](event);
+
+    expect(mockRecordObservedBots).toHaveBeenCalledTimes(1);
+    expect(handlers.handleNewTopic).not.toHaveBeenCalled();
+    expect(handlers.handleThreadReply).not.toHaveBeenCalled();
+  });
+
+  it('records all bots (>=3) in one introduce', async () => {
+    const event = makeIntroduceEvent({
+      mentions: [
+        { key: '@_a', name: 'BotA', id: { open_id: MY_OPEN_ID } },
+        { key: '@_b', name: 'BotB', id: { open_id: OTHER_BOT_OPEN_ID } },
+        { key: '@_c', name: 'BotC', id: { open_id: OTHER_BOT_OPEN_ID_2 } },
+      ],
+    });
+
+    await capturedHandlers['im.message.receive_v1'](event);
+
+    const [, , botsArg] = mockRecordObservedBots.mock.calls[0];
+    expect((botsArg as Array<{ openId: string }>).map(b => b.openId).sort())
+      .toEqual([MY_OPEN_ID, OTHER_BOT_OPEN_ID, OTHER_BOT_OPEN_ID_2].sort());
+  });
+
+  it('ignores /introduce when sender is not in allowedUsers', async () => {
+    mockGetBot.mockReturnValue({
+      config: { larkAppId: MY_APP_ID, larkAppSecret: 'secret', cliId: 'claude-code' },
+      botOpenId: MY_OPEN_ID,
+      resolvedAllowedUsers: ['ou_some_other_human'],  // USER_OPEN_ID not in list
+    });
+    const event = makeIntroduceEvent({
+      mentions: [
+        { key: '@_b', name: 'BotB', id: { open_id: OTHER_BOT_OPEN_ID } },
+      ],
+    });
+
+    await capturedHandlers['im.message.receive_v1'](event);
+
+    expect(mockRecordObservedBots).not.toHaveBeenCalled();
+    expect(mockReplyMessage).not.toHaveBeenCalled();
+    // Also should not fall through to CLI handlers
+    expect(handlers.handleNewTopic).not.toHaveBeenCalled();
+    expect(handlers.handleThreadReply).not.toHaveBeenCalled();
+  });
+
+  it('matches /introduce only as a standalone token (not as a substring like /introducer)', async () => {
+    const event = makeUserMessageEvent({
+      senderOpenId: USER_OPEN_ID,
+      content: JSON.stringify({ text: '/introducer @BotB foo' }),
+      mentions: [
+        { key: '@_a', name: 'BotA', id: { open_id: MY_OPEN_ID } },
+        { key: '@_b', name: 'BotB', id: { open_id: OTHER_BOT_OPEN_ID } },
+      ],
+      chatType: 'group',
+      messageId: 'msg-introducer',
+    });
+
+    await capturedHandlers['im.message.receive_v1'](event);
+
+    expect(mockRecordObservedBots).not.toHaveBeenCalled();
   });
 });
 

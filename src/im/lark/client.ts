@@ -6,6 +6,7 @@ import { loadBotConfigs } from '../../bot-registry.js';
 import { config } from '../../config.js';
 import { logger } from '../../utils/logger.js';
 import { resolveUserToken } from '../../utils/user-token.js';
+import { listObservedBots } from '../../services/observed-bots-store.js';
 
 // Cached lightweight Lark clients for all configured bots (for isInChat checks)
 let allBotClients: Array<{ appId: string; cliId: string; client: InstanceType<typeof Client> }> | null = null;
@@ -312,7 +313,7 @@ export async function downloadMessageResource(larkAppId: string, messageId: stri
     logger.debug(`App Token download failed (${status ?? 'unknown'}), trying User Token fallback...`);
   }
 
-  // Fallback: User Token via feishu-cli's stored OAuth token
+  // Fallback: User Token from botmux OAuth (/login)
   const bot = getBot(larkAppId);
   const userToken = await resolveUserToken(bot.config.larkAppId, bot.config.larkAppSecret);
   if (!userToken) {
@@ -582,11 +583,28 @@ async function listByChatFilter(c: any, chatId: string, rootMessageId: string, p
 
 /**
  * Check which bots are in a chat.
- * Uses isInChat API for ALL configured bots (from bots.json), not just
- * the one registered in this daemon process. This is critical for
- * multi-bot groups where each daemon only manages a single bot.
+ *
+ * Two-source merge:
+ * 1. **configured** — bots in `bots.json` (this daemon and sibling daemons on
+ *    the same host). Probed via `isInChat` per bot; only those actually in
+ *    the chat are returned. open_id is corrected via the per-app cross-ref.
+ * 2. **introduce** — bots discovered passively from the `/introduce`
+ *    collaboration handshake, persisted per chat in
+ *    `observed-bots-<chatId>.json`. Critical for external bots run by other
+ *    botmux daemons (or even non-botmux bots) that aren't in our bots.json
+ *    but the user wants this daemon to know about.
+ *
+ * Configured wins on open_id collision (`source: 'configured'`); observed
+ * entries fill in everyone else (`source: 'introduce'`). Observed entries
+ * carry `larkAppId=""` since they don't map to any local-daemon-managed bot.
  */
-export type ChatBotMember = { larkAppId: string; openId: string; name: string; displayName: string };
+export type ChatBotMember = {
+  larkAppId: string;
+  openId: string;
+  name: string;
+  displayName: string;
+  source: 'configured' | 'introduce';
+};
 
 export async function listChatBotMembers(larkAppId: string, chatId: string): Promise<ChatBotMember[]> {
   // Read per-bot cross-reference: other bots' open_ids as seen by larkAppId's app.
@@ -617,8 +635,8 @@ export async function listChatBotMembers(larkAppId: string, chatId: string): Pro
   } catch { /* ignore corrupt file */ }
 
   const clients = getAllBotClients();
-  const results = await Promise.all(
-    clients.map(async ({ appId, cliId, client }) => {
+  const configuredResults = await Promise.all(
+    clients.map(async ({ appId, cliId, client }): Promise<ChatBotMember | null> => {
       try {
         const res = await (client as any).im.v1.chatMembers.isInChat({
           path: { chat_id: chatId },
@@ -629,7 +647,13 @@ export async function listChatBotMembers(larkAppId: string, chatId: string): Pro
           const openId = (info?.botName && crossRef.get(info.botName.toLowerCase()))
             ?? info?.botOpenId
             ?? appId;
-          return { larkAppId: appId, openId, name: cliId, displayName: info?.botName ?? cliId };
+          return {
+            larkAppId: appId,
+            openId,
+            name: cliId,
+            displayName: info?.botName ?? cliId,
+            source: 'configured',
+          };
         }
       } catch (err) {
         logger.debug(`isInChat check failed for ${appId}: ${err}`);
@@ -637,5 +661,25 @@ export async function listChatBotMembers(larkAppId: string, chatId: string): Pro
       return null;
     }),
   );
-  return results.filter((r): r is ChatBotMember => r !== null);
+  const configured: ChatBotMember[] = configuredResults.filter((r): r is ChatBotMember => r !== null);
+
+  // Merge in observed entries (from /introduce), dedup by openId (configured wins).
+  const seenOpenIds = new Set(configured.map(b => b.openId));
+  let observed: ChatBotMember[] = [];
+  try {
+    const observedList = listObservedBots(config.session.dataDir, chatId);
+    observed = observedList
+      .filter(o => !seenOpenIds.has(o.openId))
+      .map(o => ({
+        larkAppId: '',
+        openId: o.openId,
+        name: o.name,
+        displayName: o.name,
+        source: 'introduce' as const,
+      }));
+  } catch (err) {
+    logger.debug(`Failed to load observed bots for ${chatId}: ${err}`);
+  }
+
+  return [...configured, ...observed];
 }

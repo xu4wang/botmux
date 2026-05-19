@@ -12,6 +12,7 @@ import { getChatInfo, getChatMode, listChatBotMembers, replyMessage, sendUserMes
 import { logger } from '../../utils/logger.js';
 import { parseForceTopicInvocation } from '../../core/command-handler.js';
 import { stripLeadingMentions } from './message-parser.js';
+import { recordObservedBots } from '../../services/observed-bots-store.js';
 
 // ─── Bot identity ─────────────────────────────────────────────────────────
 
@@ -334,6 +335,74 @@ export function updateBotOpenIdCrossRef(
       logger.debug(`Failed to write bot open_id cross-ref: ${err}`);
     }
   }
+}
+
+// ─── /introduce collaboration handshake ──────────────────────────────────
+//
+// 用户在群里发 `@A @B /introduce`（顺序任意，带不带额外文本都行），每个被
+// @ 的 bot 的 daemon 都会收到一份相同的 mentions[]，里面自带每个被 @ 实体
+// 的 (open_id, name)。我们把这些登记进按 chatId 分文件的 observed-bots-store，
+// 后续 `botmux bots list` / `<available_bots>` 就能感知到非本机 daemon 启动
+// 的协作 bot，并能 @ 回去。
+//
+// 飞书没有任何公开接口能列出群里 bot 的 open_id（chat-members/get 明文跳过
+// bot 成员），这是当前条件下能拿到陌生 bot open_id 的唯一可靠路径。
+
+/** Token boundary match: `/introduce` must be whitespace-bounded so it doesn't
+ *  trigger on `/introducer` or be hidden inside `s/introduce/foo/g` etc. */
+const INTRODUCE_RE = /(?:^|\s)\/introduce(?=\s|$)/;
+
+/**
+ * If `message` is a /introduce command, side-effect it (record observed bots
+ * + send ack) and return `true` so the caller skips normal CLI routing.
+ *
+ * Consumed without side effects (still returns true) when:
+ * - sender is not in allowedUsers — silent drop, do not surface "无操作权限"
+ * - mentions[] minus self is empty — nothing to learn, ignore quietly
+ *
+ * Always writes ALL mentions including self to the store so every daemon's
+ * view of the chat converges on the same content regardless of who acked.
+ */
+export async function tryHandleIntroduceCommand(
+  larkAppId: string,
+  message: any,
+  senderOpenId: string | undefined,
+  isAllowed: boolean,
+): Promise<boolean> {
+  const text = extractMessageTextForRouting(message);
+  if (!text || !INTRODUCE_RE.test(text)) return false;
+
+  if (!isAllowed) {
+    logger.debug(`[${larkAppId}] /introduce from non-allowed user ${senderOpenId} — silent drop`);
+    return true;
+  }
+
+  const selfOpenId = getBot(larkAppId).botOpenId;
+  const rawMentions: Array<{ name?: string; id?: { open_id?: string } }> = message.mentions ?? [];
+  const all = rawMentions
+    .map(m => ({ openId: m.id?.open_id ?? '', name: m.name ?? '' }))
+    .filter(m => m.openId && m.name);
+  const hasExternal = all.some(m => m.openId !== selfOpenId);
+  if (!hasExternal) {
+    logger.debug(`[${larkAppId}] /introduce ignored: no external bot in mentions`);
+    return true;
+  }
+
+  const chatId = message.chat_id as string;
+  try {
+    recordObservedBots(config.session.dataDir, chatId, all, 'introduce');
+  } catch (err) {
+    logger.warn(`[${larkAppId}] /introduce: failed to persist observed bots: ${err}`);
+  }
+
+  const items = all.map(m => `@${m.name}`).join(' ');
+  const ackText = `✅ 已认识本群 ${all.length} 个伙伴：${items}`;
+  try {
+    await replyMessage(larkAppId, message.message_id, ackText);
+  } catch (err) {
+    logger.warn(`[${larkAppId}] /introduce ack failed: ${err}`);
+  }
+  return true;
 }
 
 // ─── @mention detection ──────────────────────────────────────────────────
@@ -681,6 +750,13 @@ export function startLarkEventDispatcher(larkAppId: string, larkAppSecret: strin
 
         const senderOpenId = sender?.sender_id?.open_id as string | undefined;
         const isAllowed = canTalk(larkAppId, chatId, senderOpenId);
+
+        // /introduce — collaboration handshake. Intercept before any routing
+        // so the command never reaches a CLI session (each @ed bot's daemon
+        // independently records the mentions[] open_ids + names).
+        if (await tryHandleIntroduceCommand(larkAppId, message, senderOpenId, isAllowed)) {
+          return;
+        }
 
         logger.debug('Received message:', message);
 

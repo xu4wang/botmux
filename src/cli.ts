@@ -2936,14 +2936,24 @@ async function cmdBots(sub: string, rest: string[]): Promise<void> {
   try {
     const { listChatBotMembers } = await import('./im/lark/client.js');
     const chatBots = await listChatBotMembers(appId, s.chatId);
-    const result = chatBots.map(cb => {
-      return { name: cb.displayName, openId: cb.openId, isSelf: cb.larkAppId === appId };
-    });
+    // source: 'configured' = registered in local bots.json (managed by some
+    // botmux daemon on this host). 'introduce' = discovered via /introduce
+    // collaboration command (external bot, possibly other-tenant). isSelf is
+    // retained (not filtered) so the model can still identify itself when needed.
+    const result = chatBots.map(cb => ({
+      name: cb.displayName,
+      openId: cb.openId,
+      isSelf: cb.larkAppId === appId,
+      source: cb.source,
+    }));
     console.log(JSON.stringify({ sessionId: sid, chatId: s.chatId, bots: result, total: result.length }, null, 2));
   } catch (err: any) {
     // Fallback to bots-info.json
     const result = botEntries.filter(b => b.botOpenId).map(b => ({
-      name: b.botName ?? b.cliId, openId: b.botOpenId!, isSelf: b.larkAppId === appId,
+      name: b.botName ?? b.cliId,
+      openId: b.botOpenId!,
+      isSelf: b.larkAppId === appId,
+      source: 'configured' as const,
     }));
     console.log(JSON.stringify({ sessionId: sid, bots: result, total: result.length, note: `chat query failed: ${err.message}` }, null, 2));
   }
