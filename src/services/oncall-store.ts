@@ -14,59 +14,10 @@
  * write race. The lock is also re-acquired around the read so the modify
  * step always works against the latest on-disk snapshot.
  */
-import { promises as fsp } from 'node:fs';
 import { readFileSync } from 'node:fs';
-import { getBot, getLoadedConfigPath, type BotDefaultOncall, type OncallChat } from '../bot-registry.js';
-import { withFileLock } from '../utils/file-lock.js';
+import { getBot, type BotDefaultOncall, type OncallChat } from '../bot-registry.js';
+import { rmwBotEntry } from './config-store.js';
 import { logger } from '../utils/logger.js';
-
-async function readRawConfig(path: string): Promise<any[]> {
-  const raw = JSON.parse(await fsp.readFile(path, 'utf-8'));
-  if (!Array.isArray(raw)) throw new Error(`Config file is not a JSON array: ${path}`);
-  return raw;
-}
-
-async function writeRawConfigAtomic(path: string, raw: any[]): Promise<void> {
-  const tmp = path + '.tmp.' + process.pid;
-  await fsp.writeFile(tmp, JSON.stringify(raw, null, 2) + '\n', 'utf-8');
-  await fsp.rename(tmp, path);
-}
-
-function findEntryIndex(raw: any[], larkAppId: string): number {
-  return raw.findIndex((e: any) => e?.larkAppId === larkAppId);
-}
-
-function requireConfigPath(): string {
-  const p = getLoadedConfigPath();
-  if (!p) throw new Error('Bot config path unknown — cannot persist oncall bindings');
-  return p;
-}
-
-/**
- * Run a read-modify-write critical section against the bot config file under
- * a cross-process lock. `mutate` runs against the freshest on-disk snapshot
- * and decides what to write back; returning `undefined` means "no write".
- */
-async function rmwBotEntry<T>(
-  larkAppId: string,
-  mutate: (entry: any, raw: any[]) => { write: boolean; result: T } | T,
-): Promise<{ ok: true; result: T } | { ok: false; reason: string }> {
-  const path = requireConfigPath();
-  return withFileLock(path, async () => {
-    const raw = await readRawConfig(path);
-    const idx = findEntryIndex(raw, larkAppId);
-    if (idx < 0) return { ok: false, reason: 'bot_not_in_config' };
-    const entry = raw[idx];
-    const out = mutate(entry, raw);
-    if (out && typeof out === 'object' && 'write' in (out as any)) {
-      const wrap = out as { write: boolean; result: T };
-      if (wrap.write) await writeRawConfigAtomic(path, raw);
-      return { ok: true, result: wrap.result };
-    }
-    await writeRawConfigAtomic(path, raw);
-    return { ok: true, result: out as T };
-  });
-}
 
 // ─── Manual binding ───────────────────────────────────────────────────────
 

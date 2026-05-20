@@ -44,6 +44,33 @@ export const messages: Record<string, string> = {
   'card.repo.current_marker': ' ← current',
   'card.repo.note': 'You can also reply `/repo <N>` to switch — e.g. `/repo 1`.',
 
+  // In-group authorization card
+  'card.grant.title': '🔑 Access Request',
+  'card.grant.body_request': 'User **{name}** is requesting to use me in this chat. <at id={owner}></at> please choose the grant scope:',
+  'card.grant.body_owner': 'Choose the grant scope for **{name}** (<at id={owner}></at>):',
+  'card.grant.btn_chat': 'Grant this chat',
+  'card.grant.btn_global': 'Grant globally',
+  'card.grant.btn_deny': 'Deny',
+  'card.grant.note': '"Grant this chat" only lets them talk to me here; management commands (/cd, /oncall, …) remain owner-only.',
+  'card.grant.toast_owner_only': 'Only the owner can do this',
+  'card.grant.toast_expired': 'This request has expired',
+  'card.grant.toast_no_repo_perm': 'No permission to switch repo',
+  'card.grant.result_chat': '✅ Granted for this chat',
+  'card.grant.result_global': '✅ Granted globally',
+  'card.grant.result_deny': '🚫 Request denied',
+
+  // /grant, /revoke command replies
+  'cmd.grant.owner_only': 'Only the owner can use /grant.',
+  'cmd.grant.usage': 'Usage: @bot /grant @someone — pops an authorization card for the owner to pick the scope (this chat / global).',
+  'cmd.revoke.owner_only': 'Only the owner can use /revoke.',
+  'cmd.revoke.usage': 'Usage: @bot /revoke @someone — revokes their this-chat and global access.',
+  'cmd.revoke.done': "Revoked {name}'s access (scope: {scope}).",
+  'cmd.revoke.would_open': '⚠️ Revoke failed: that user is the last global allowed user / owner; revoking would open the bot to everyone. Blocked.',
+  'cmd.revoke.failed': '⚠️ Revoke failed: {reason}',
+  'cmd.revoke.scope_chat': 'this-chat ',
+  'cmd.revoke.scope_global': 'global',
+  'cmd.revoke.scope_none': 'none',
+
   // ─── Adopt card ──────────────────────────────────────────────────────────
   'card.adopt.title': '📡 Choose a CLI session to adopt',
   'card.adopt.placeholder_select': 'Pick a CLI session',
@@ -138,6 +165,9 @@ export const messages: Record<string, string> = {
   'help.oncall_bind': '/oncall bind <path>  - Bind this group to a project, skipping the repo-selection card',
   'help.oncall_unbind': '/oncall unbind       - Unbind this group',
   'help.oncall_status': '/oncall status       - Show oncall binding for this group',
+  'help.heading_grant': '🔑 Access grants (owner only):',
+  'help.grant': '/grant @someone   - Pop an authorization card to grant "this chat" or "global" access',
+  'help.revoke': '/revoke @someone  - Revoke their this-chat + global access',
   'help.help': '/help       - Show this help',
 
   // ─── AI system prompt (Claude Code: --append-system-prompt) ──────────────

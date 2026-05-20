@@ -5,10 +5,12 @@
  */
 import { execSync } from 'node:child_process';
 import { config } from '../../config.js';
-import { getBot, getAllBots } from '../../bot-registry.js';
+import { getBot, getAllBots, getOwnerOpenId } from '../../bot-registry.js';
 import { canOperate } from './event-dispatcher.js';
 import { sendUserMessage, updateMessage, deleteMessage } from './client.js';
-import { buildSessionCard, buildStreamingCard, buildTuiPromptCard, buildTuiPromptProcessingCard, buildTuiPromptResolvedCard, buildSessionClosedCard, getCliDisplayName, truncateContent } from './card-builder.js';
+import { buildSessionCard, buildStreamingCard, buildTuiPromptCard, buildTuiPromptProcessingCard, buildTuiPromptResolvedCard, buildSessionClosedCard, buildGrantResultCard, getCliDisplayName, truncateContent } from './card-builder.js';
+import { addChatGrant, addGlobalGrant } from '../../services/grant-store.js';
+import { checkNonce, clearPending, markDenied } from './grant-pending.js';
 import { createCliAdapterSync } from '../../adapters/cli/registry.js';
 import { logger } from '../../utils/logger.js';
 import * as sessionStore from '../../services/session-store.js';
@@ -127,6 +129,37 @@ export async function handleCardAction(data: CardActionData, deps: CardHandlerDe
   // Use the receiving bot's allowedUsers — the operator open_id in card actions
   // is scoped to the app that received the callback.
   const operatorOpenId = data?.operator?.open_id;
+
+  // ─── 群内授权卡片动作（grant_chat / grant_global / grant_deny）─────────────
+  // 不绑定 session，必须在 session 解析之前处理。owner 强闸门 + nonce 校验。
+  if (value?.action && (value.action === 'grant_chat' || value.action === 'grant_global' || value.action === 'grant_deny') && larkAppId) {
+    const loc = localeForBot(larkAppId);
+    const owner = getOwnerOpenId(larkAppId);
+    // owner 强闸门：必须是当前 app 的 owner 本人（比 canOperate 更严）
+    if (!operatorOpenId || operatorOpenId !== owner) {
+      logger.info(`Grant action "${value.action}" blocked for non-owner: ${operatorOpenId}`);
+      return { toast: { type: 'error', content: t('card.grant.toast_owner_only', undefined, loc) } };
+    }
+    const target = value.target_open_id;
+    const grantChatId = value.chat_id;
+    const nonce = value.nonce;
+    if (!target || !grantChatId || !nonce || !checkNonce(larkAppId, grantChatId, target, nonce)) {
+      return { toast: { type: 'error', content: t('card.grant.toast_expired', undefined, loc) } };
+    }
+    if (value.action === 'grant_deny') {
+      markDenied(larkAppId, grantChatId, target);
+      if (cardMessageId) await updateMessage(larkAppId, cardMessageId, buildGrantResultCard('deny', loc));
+      return;
+    }
+    if (value.action === 'grant_chat') await addChatGrant(larkAppId, grantChatId, target);
+    else await addGlobalGrant(larkAppId, target);
+    clearPending(larkAppId, grantChatId, target);
+    if (cardMessageId) {
+      await updateMessage(larkAppId, cardMessageId, buildGrantResultCard(value.action === 'grant_chat' ? 'chat' : 'global', loc));
+    }
+    return;
+  }
+
   const isSensitive = value?.action && ['restart', 'close', 'resume', 'skip_repo', 'get_write_link', 'toggle_stream', 'toggle_display', 'export_text', 'term_action', 'refresh_screenshot', 'takeover', 'disconnect', 'tui_keys', 'tui_text_input'].includes(value.action);
   if (isSensitive) {
     const rootId = value?.root_id;
@@ -718,6 +751,17 @@ export async function handleCardAction(data: CardActionData, deps: CardHandlerDe
   if (!targetDs) {
     logger.warn(`Card action: no active session found for root ${rootId}`);
     return;
+  }
+
+  // 权限边界：pendingRepo（首次选 repo 才能 spawn）放行「会话发起人 或 canOperate」，
+  // 让本群授权用户能完成自己的首次使用；非 pending 的 mid-session 切换是管理动作，要 canOperate。
+  const isSessionOwnerOp = !!operatorOpenId && operatorOpenId === targetDs.session.ownerOpenId;
+  const allowRepo = targetDs.pendingRepo
+    ? (isSessionOwnerOp || canOperate(targetDs.larkAppId, targetDs.chatId, operatorOpenId))
+    : canOperate(targetDs.larkAppId, targetDs.chatId, operatorOpenId);
+  if (!allowRepo) {
+    logger.info(`Repo card action blocked for ${operatorOpenId} (pending=${targetDs.pendingRepo})`);
+    return { toast: { type: 'error', content: t('card.grant.toast_no_repo_perm', undefined, localeForBot(targetDs.larkAppId)) } };
   }
 
   // Resolve the project name from cached scan

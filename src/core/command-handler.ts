@@ -682,6 +682,10 @@ export async function handleCommand(
           t('help.oncall_unbind', undefined, loc),
           t('help.oncall_status', undefined, loc),
           '',
+          t('help.heading_grant', undefined, loc),
+          t('help.grant', undefined, loc),
+          t('help.revoke', undefined, loc),
+          '',
           t('help.help', undefined, loc),
         ];
         await sessionReply(rootId, help.join('\n'));

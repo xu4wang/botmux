@@ -404,17 +404,29 @@ export async function uploadFile(larkAppId: string, filePath: string): Promise<s
  * must be a full email address (e.g. "alice@example.com") and is looked up.
  * Returns an array of open_ids (unresolvable entries are dropped with a warning).
  */
-export async function resolveAllowedUsers(larkAppId: string, raw: string[]): Promise<string[]> {
+/**
+ * Resolve a raw allowedUsers list (mix of `ou_*` open_ids and emails) into
+ * open_ids, AND return a `raw entry → resolved open_id` map. The map lets
+ * `/revoke` delete the correct raw entry (email OR open_id) from bots.json so
+ * the revocation survives a restart. open_id entries map to themselves;
+ * resolved emails map via the API's `item.email`. Unresolvable emails are
+ * dropped from both the list and the map.
+ */
+export async function resolveAllowedUsersWithMap(
+  larkAppId: string, raw: string[],
+): Promise<{ resolved: string[]; map: Map<string, string> }> {
+  const map = new Map<string, string>();
   const openIds: string[] = [];
   const emails: string[] = [];
   for (const v of raw) {
     if (v.startsWith('ou_')) {
       openIds.push(v);
+      map.set(v, v);
     } else {
       emails.push(v);
     }
   }
-  if (emails.length === 0) return openIds;
+  if (emails.length === 0) return { resolved: openIds, map };
 
   const c = getBotClient(larkAppId);
   try {
@@ -424,12 +436,13 @@ export async function resolveAllowedUsers(larkAppId: string, raw: string[]): Pro
     });
     if (res.code !== 0) {
       logger.warn(`Failed to resolve emails to open_ids: ${res.msg} (code: ${res.code})`);
-      return openIds;
+      return { resolved: openIds, map };
     }
     const userList: any[] = res.data?.user_list ?? [];
     for (const item of userList) {
       if (item.user_id) {
         openIds.push(item.user_id);
+        if (item.email) map.set(item.email, item.user_id);
         logger.info(`Resolved ${item.email} → ${item.user_id}`);
       } else {
         logger.warn(`Could not resolve email: ${item.email}`);
@@ -438,7 +451,11 @@ export async function resolveAllowedUsers(larkAppId: string, raw: string[]): Pro
   } catch (err: any) {
     logger.warn(`resolveAllowedUsers failed: ${err.message}`);
   }
-  return openIds;
+  return { resolved: openIds, map };
+}
+
+export async function resolveAllowedUsers(larkAppId: string, raw: string[]): Promise<string[]> {
+  return (await resolveAllowedUsersWithMap(larkAppId, raw)).resolved;
 }
 
 
