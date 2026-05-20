@@ -7,7 +7,7 @@
  * Run:  pnpm vitest run test/message-parser.test.ts
  */
 import { describe, it, expect } from 'vitest';
-import { parseApiMessage, extractResources, parseEventMessage, stripLeadingMentions, createImgNumberer } from '../src/im/lark/message-parser.js';
+import { parseApiMessage, extractResources, parseEventMessage, stripLeadingMentions, createImgNumberer, cardContentHasUpgradeFallback, isPureCardUpgradeFallback, mergeCardText, wrapResolvedCardText, CARD_EMBEDDED_PLACEHOLDER } from '../src/im/lark/message-parser.js';
 
 // ─── Helpers ──────────────────────────────────────────────────────────────
 
@@ -62,7 +62,8 @@ describe('Interactive card parsing: Format A (API simplified)', () => {
       ]],
     };
     const result = parseApiMessage(makeMsg('interactive', card));
-    expect(result.content).toBe('[卡片: Links]\nSee docs or ask @Alice');
+    // href is kept so links aren't lost — Format A separates text from href.
+    expect(result.content).toBe('[卡片: Links]\nSee docs(https://example.com) or ask @Alice');
   });
 
   it('should extract button labels', () => {
@@ -170,7 +171,10 @@ describe('Interactive card parsing: Format B (original card JSON)', () => {
     expect(result.content).toContain('All 42 tests passed');
   });
 
-  it('should handle session card (actions only, no div/markdown)', () => {
+  it('surfaces buttons inside an action block (recurses el.actions)', () => {
+    // action blocks hold children in `actions`, not `elements`. Regression:
+    // these used to be dropped, which silently lost real card content like the
+    // 确认/创建群组/驾驶舱 controls on Argos alarm cards.
     const card = {
       header: { title: { tag: 'plain_text', content: '🖥️ Claude 会话已启动' } },
       elements: [
@@ -181,7 +185,34 @@ describe('Interactive card parsing: Format B (original card JSON)', () => {
       ],
     };
     const result = parseApiMessage(makeMsg('interactive', card));
-    expect(result.content).toBe('[卡片: 🖥️ Claude 会话已启动]');
+    expect(result.content).toContain('[卡片: 🖥️ Claude 会话已启动]');
+    expect(result.content).toContain('[🖥️ 打开终端]');
+    expect(result.content).toContain('[❌ 关闭会话]');
+  });
+
+  it('extracts div.fields[] cells and input/select placeholders', () => {
+    const card = {
+      header: { title: { tag: 'plain_text', content: '报警' } },
+      elements: [
+        { tag: 'div', fields: [
+          { text: { tag: 'lark_md', content: '规则: error_level' } },
+          { text: { tag: 'lark_md', content: '报警时间: 17:45' } },
+        ]},
+        { tag: 'action', actions: [
+          { tag: 'input', placeholder: { tag: 'plain_text', content: '输入报警备注' } },
+          { tag: 'select_static', placeholder: { tag: 'plain_text', content: '报警是否有帮助？' },
+            options: [
+              { text: { tag: 'plain_text', content: '正确有效报警' } },
+              { text: { tag: 'plain_text', content: '规则不合理' } },
+            ]},
+        ]},
+      ],
+    };
+    const result = parseApiMessage(makeMsg('interactive', card));
+    expect(result.content).toContain('规则: error_level');
+    expect(result.content).toContain('报警时间: 17:45');
+    expect(result.content).toContain('[输入框: 输入报警备注]');
+    expect(result.content).toContain('[下拉: 报警是否有帮助？ | 选项: 正确有效报警 / 规则不合理]');
   });
 
   it('should recurse into column_set / column elements', () => {
@@ -198,6 +229,58 @@ describe('Interactive card parsing: Format B (original card JSON)', () => {
     const result = parseApiMessage(makeMsg('interactive', card));
     expect(result.content).toContain('Col 1');
     expect(result.content).toContain('Col 2');
+  });
+});
+
+// ─── mergeCardText: A+B union ─────────────────────────────────────────────
+
+describe('mergeCardText', () => {
+  it('fills a B field value B left blank from A (e.g. 值班人 names)', () => {
+    const textB = '[卡片: 报警]\n规则: error_level报警\n值班人:';
+    const textA = '规则: error_level报警值班人: 赵方涛田大露';
+    const merged = mergeCardText(textA, textB);
+    expect(merged).toContain('值班人: 赵方涛田大露');
+    // 规则 already in B → not duplicated
+    expect(merged.match(/error_level报警/g)?.length).toBe(1);
+  });
+
+  it('does NOT fill a label whose value B already renders on adjacent lines', () => {
+    const textB = '[卡片: 报警]\n[ 检测结果 ]:\n条件组 1';
+    const textA = '[ 检测结果 ]:条件组 1';
+    const merged = mergeCardText(textA, textB);
+    expect(merged.match(/条件组 1/g)?.length).toBe(1);
+  });
+
+  it('marks client-only sub-cards (A holes) with an honest placeholder', () => {
+    const textB = '[卡片: 报警]\nArgos分析';
+    const textA = '日志指标\n请升级至最新版本客户端，以查看内容\nArgos分析';
+    const merged = mergeCardText(textA, textB);
+    expect(merged).toContain(CARD_EMBEDDED_PLACEHOLDER);
+    expect(merged).not.toContain('请升级至最新版本客户端');
+  });
+
+  it('falls back to the non-empty side when the other is empty/fallback', () => {
+    expect(mergeCardText('', '[卡片: x]\n正文')).toBe('[卡片: x]\n正文');
+    expect(mergeCardText('[卡片: y]\n正文', '请升级至最新版本客户端，以查看内容')).toContain('正文');
+  });
+});
+
+describe('wrapResolvedCardText sentinel', () => {
+  it('extractCardContent returns the merged text verbatim through parseApiMessage', () => {
+    const text = '[卡片: 报警]\n值班人: 赵方涛田大露\n' + CARD_EMBEDDED_PLACEHOLDER;
+    const msg = makeMsg('interactive', {});
+    msg.body.content = wrapResolvedCardText(text);
+    expect(parseApiMessage(msg).content).toBe(text);
+  });
+
+  it('still exposes image resources alongside the sentinel text', () => {
+    // Sentinel carries B structure so extractResources keeps finding images.
+    const wrapped = JSON.stringify({
+      __botmux_card_text__: '[卡片: x]\n正文',
+      elements: [{ tag: 'img', image_key: 'img_abc' }],
+    });
+    const resources = extractResources('interactive', wrapped);
+    expect(resources.map(r => r.key)).toContain('img_abc');
   });
 });
 
@@ -240,6 +323,51 @@ describe('Interactive card parsing: edge cases', () => {
     };
     const result = parseApiMessage(makeMsg('interactive', card));
     expect(result.content).toBe('[卡片: T]');
+  });
+});
+
+// ─── isCardUpgradeFallback: REST re-resolution gate for `botmux history` ──
+
+describe('cardContentHasUpgradeFallback (broad re-resolution trigger)', () => {
+  it('matches the bare upgrade notice', () => {
+    expect(cardContentHasUpgradeFallback('请升级至最新版本客户端，以查看内容')).toBe(true);
+  });
+
+  it('matches an embedded fallback buried mid-body (complex card)', () => {
+    // Argos-style card: renders fine at the top, but nested sub-cards fall back.
+    const c = '[卡片: 报警]\n规则: error_level\n请升级至最新版本客户端，以查看内容\nArgos智能分析';
+    expect(cardContentHasUpgradeFallback(c)).toBe(true);
+  });
+
+  it('does NOT match normal card content', () => {
+    expect(cardContentHasUpgradeFallback('[卡片: 标题]\n正文内容')).toBe(false);
+  });
+});
+
+describe('isPureCardUpgradeFallback (replace gate)', () => {
+  it('matches the bare upgrade notice', () => {
+    expect(isPureCardUpgradeFallback('请升级至最新版本客户端，以查看内容')).toBe(true);
+  });
+
+  it('matches the notice prefixed by a leading image placeholder', () => {
+    // This is exactly what im.message.list returns for a whole-card fallback.
+    expect(isPureCardUpgradeFallback('[图片]请升级至最新版本客户端，以查看内容')).toBe(true);
+  });
+
+  it('matches the notice prefixed by a numbered file placeholder', () => {
+    expect(isPureCardUpgradeFallback('[文件 1: a.pdf]请升级至最新版本客户端')).toBe(true);
+  });
+
+  it('does NOT match a card whose body merely quotes the phrase mid-text', () => {
+    // Regression: a message discussing the fallback string itself must not be
+    // mistaken for the fallback, or the REST-resolved real body gets discarded.
+    const real = '✅ 实锤了。message.list 返回 `请升级至最新版本客户端，以查看内容` 这个 fallback';
+    expect(isPureCardUpgradeFallback(real)).toBe(false);
+  });
+
+  it('does NOT match an embedded fallback when real content leads', () => {
+    const c = '[卡片: 报警]\n规则: error_level\n请升级至最新版本客户端';
+    expect(isPureCardUpgradeFallback(c)).toBe(false);
   });
 });
 

@@ -44,13 +44,13 @@ export async function resolveNonsupportMessage(data: RawEventData, larkAppId: st
   const type = data.message.message_type;
   if (type !== 'nonsupport' && type !== 'interactive') return;
 
-  // For interactive fallbacks, the WS payload often embeds the full v2 card JSON
-  // inside a `user_dsl` string. Unwrap it locally — no REST call needed, and it
-  // works even cross-tenant where im.message.get is denied.
+  // Interactive cards: resolve to the COMPLETE merged text (union of both
+  // im.message.get representations) so forwarded cards reach the model fully
+  // parsed — same resolver `botmux history` uses. resolveEventCard falls back
+  // to local user_dsl unwrap if REST is unavailable (e.g. cross-tenant).
   if (type === 'interactive') {
-    if (unwrapUserDsl(data)) return;
-    // No user_dsl — only fetch when the content looks like a fallback.
-    if (!isCardFallback(data.message.content)) return;
+    await resolveEventCard(data, larkAppId);
+    return;
   }
 
   try {
@@ -97,20 +97,39 @@ function unwrapUserDsl(data: RawEventData): boolean {
 }
 
 /**
- * Detect whether an interactive message's WS content is the simplified
- * "upgrade your client" fallback rather than the real card body.
+ * Lark's simplified "upgrade your client" card fallback marker. When this text
+ * shows up in a card's resolved content, the real body was stripped and must be
+ * recovered via `im.message.get` (with `card_msg_content_type=user_card_content`).
  */
-function isCardFallback(rawContent: string): boolean {
-  if (rawContent.includes('请升级至最新版本客户端')) return true;
-  try {
-    const c = JSON.parse(rawContent);
-    // Real v2 cards have schema/body; v1 card JSON usually has header/config.
-    // The fallback has only {title, elements:[[...]]} with no schema/header/config.
-    const hasRealStructure = c.schema || c.body || c.header || c.config;
-    return !hasRealStructure;
-  } catch {
-    return false;
-  }
+export const CARD_UPGRADE_FALLBACK = '请升级至最新版本客户端';
+
+/**
+ * Broad check — content carries the upgrade notice *somewhere*. Used to decide
+ * whether a card needs REST re-resolution. Deliberately a substring match: a
+ * false positive only costs one extra `im.message.get`, and this is the only
+ * way to catch **embedded** fallbacks — complex cards (e.g. Argos alarm cards
+ * with nested sub-cards) render fine at the top level but bury one or more
+ * `请升级…` placeholders mid-body where an anchored check would miss them.
+ */
+export function cardContentHasUpgradeFallback(content: string): boolean {
+  return content.includes(CARD_UPGRADE_FALLBACK);
+}
+
+/**
+ * Narrow check — content *is* essentially just Lark's upgrade notice, not a
+ * body that merely mentions it. Anchored at the start after stripping leading
+ * `[图片]` / `[文件 N]` placeholders (the bare fallback renders as
+ * `[图片]请升级至最新版本客户端，以查看内容`). Used as the replace gate when
+ * re-resolving via REST: it keeps a card that legitimately quotes the phrase
+ * mid-text — e.g. a message discussing this very fallback — from being
+ * discarded, while still rejecting a REST view that came back as a bare
+ * fallback. Makes no structural assumptions, so it's safe for the
+ * simplified-but-real Format A shape (no schema/body/header) message.list
+ * returns.
+ */
+export function isPureCardUpgradeFallback(content: string): boolean {
+  const stripped = content.replace(/^(?:\s*\[(?:图片|文件)[^\]]*\])+/, '').trimStart();
+  return stripped.startsWith(CARD_UPGRADE_FALLBACK);
 }
 
 export interface MessageResource {
@@ -448,6 +467,11 @@ function extractCardContent(rawContent: string, numberer?: ImgNumberer): string 
   try {
     const card = JSON.parse(rawContent);
 
+    // Pre-resolved merged text injected by resolveMergedCardContent (the
+    // A+B union for complex cards). Return it verbatim so the merge flows
+    // through both parseEventMessage (live) and parseApiMessage (history).
+    if (typeof card[RESOLVED_TEXT_KEY] === 'string') return card[RESOLVED_TEXT_KEY];
+
     // Template-based card — no inline content to extract
     if (card.type === 'template') {
       return '[卡片 (模板)]';
@@ -482,7 +506,12 @@ function extractCardContent(rawContent: string, numberer?: ImgNumberer): string 
           const buttons: string[] = [];
           for (const node of paragraph) {
             if (node.tag === 'text') { if (node.text) textNodes.push(node.text); }
-            else if (node.tag === 'a') textNodes.push(node.text ?? node.href ?? '');
+            else if (node.tag === 'a') {
+              // Keep the href so links survive — Format A separates text/href,
+              // and dropping href loses real content (规则配置/详情/Trace 链接).
+              const t = node.text ?? '';
+              textNodes.push(node.href && t ? `${t}(${node.href})` : (t || node.href || ''));
+            }
             else if (node.tag === 'at') textNodes.push(`@${node.user_name ?? 'unknown'}`);
             else if (node.tag === 'img' || node.tag === 'image') {
               const k = node.image_key ?? node.img_key;
@@ -491,6 +520,18 @@ function extractCardContent(rawContent: string, numberer?: ImgNumberer): string 
             else if (node.tag === 'button') {
               const btnText = typeof node.text === 'string' ? node.text : node.text?.content;
               if (btnText) buttons.push(`[${btnText}]`);
+            }
+            else if (node.tag === 'input') {
+              const ph = typeof node.placeholder === 'string' ? node.placeholder : node.placeholder?.content;
+              if (ph) buttons.push(`[输入框: ${ph}]`);
+            }
+            else if (node.tag === 'select_static' || node.tag === 'multi_select_static' || node.tag === 'overflow') {
+              const ph = typeof node.placeholder === 'string' ? node.placeholder : node.placeholder?.content;
+              const opts = Array.isArray(node.options)
+                ? node.options.map((o: any) => (typeof o.text === 'string' ? o.text : o.text?.content)).filter(Boolean)
+                : [];
+              const head = ph ? `[下拉: ${ph}` : '[下拉';
+              buttons.push(opts.length ? `${head} | 选项: ${opts.join(' / ')}]` : `${head}]`);
             }
           }
           const line = textNodes.join('').trim();
@@ -508,6 +549,141 @@ function extractCardContent(rawContent: string, numberer?: ImgNumberer): string 
   } catch {
     return '[卡片]';
   }
+}
+
+// ─── Complete card resolution: union of both Lark representations ──────────
+
+/** Sentinel key carrying pre-merged card text through extractCardContent. */
+const RESOLVED_TEXT_KEY = '__botmux_card_text__';
+
+/**
+ * Marker for sub-cards Lark renders only client-side (collapsible panels,
+ * lazy "展开" sections). Neither `im.message.get` representation returns their
+ * body — Format A shows the upgrade fallback, Format B omits them — so we
+ * surface an honest placeholder instead of a misleading blank or raw fallback.
+ */
+export const CARD_EMBEDDED_PLACEHOLDER = '[卡片内嵌组件，需在飞书客户端展开查看]';
+
+/** Wrap merged text so extractCardContent returns it verbatim downstream. */
+export function wrapResolvedCardText(text: string): string {
+  return JSON.stringify({ [RESOLVED_TEXT_KEY]: text });
+}
+
+/** Strip inline markup (font/text_tag tags, bold markers) but keep text,
+ *  brackets and links so labels and values stay readable. */
+function stripInlineMarkup(s: string): string {
+  return s.replace(/<\/?[a-z_]+[^>]*>/gi, '').replace(/\*\*/g, '');
+}
+
+/** Normalize for content-presence checks: drop whitespace, punctuation, inline
+ *  markup and link URLs so the same content rendered by the two API formats
+ *  compares equal regardless of cosmetic differences. */
+function normalizeForDedup(s: string): string {
+  return stripInlineMarkup(s)
+    .replace(/\((https?:[^)]+)\)/g, '')         // (https://…) link targets
+    .replace(/\s+/g, '')
+    .replace(/[，,：:。.\[\]()（）|/、]/g, '');
+}
+
+/** Find the value Format A rendered for a `label:` field — the text after the
+ *  first occurrence of the label up to the line end. Returns '' if not found. */
+function findLabelValue(strippedA: string, label: string): string {
+  const idx = strippedA.indexOf(label);
+  if (idx < 0) return '';
+  const rest = strippedA.slice(idx + label.length);
+  return rest.split('\n')[0].trim();
+}
+
+/**
+ * Merge the two Lark card renderings into one complete text. Format B (full
+ * structured) is the base — it preserves links, sub-card bodies and select
+ * options. From Format A (server-rendered) we recover only the field VALUES B
+ * left blank (e.g. 值班人 names) via targeted label-fill: a B label line whose
+ * value is empty is filled from A only when A's value isn't already present in
+ * B (so fields B already renders aren't duplicated). Sub-cards Lark serves
+ * client-side only — which A shows as upgrade holes and B omits — get one
+ * honest placeholder rather than a silent drop or raw "请升级" text.
+ */
+export function mergeCardText(textA: string, textB: string): string {
+  const markHoles = (t: string) =>
+    t.split('\n').map(l => isPureCardUpgradeFallback(l) ? CARD_EMBEDDED_PLACEHOLDER : l).join('\n');
+
+  const a = (textA || '').trim();
+  const b = (textB || '').trim();
+  if (!b || isPureCardUpgradeFallback(b)) return markHoles(a) || a;
+  if (!a || isPureCardUpgradeFallback(a)) return markHoles(b) || b;
+
+  // Drop A's holes from the base, count them so we can flag client-only content.
+  const aHoleCount = a.split('\n').filter(isPureCardUpgradeFallback).length;
+  const strippedA = stripInlineMarkup(a);
+
+  const baseLines = b.split('\n').filter(l => !isPureCardUpgradeFallback(l));
+  const bAll = baseLines.map(normalizeForDedup).join('');
+
+  const filled = baseLines.map(line => {
+    const sm = stripInlineMarkup(line).trimEnd();
+    // empty-value field label, e.g. "值班人:" — but not bracketed section
+    // headers like "[ 检测结果 ]:" whose values live on following lines.
+    const m = sm.match(/^([^[\]\n]{1,16}?[:：])$/);
+    if (!m) return line;
+    const value = findLabelValue(strippedA, m[1]);
+    if (!value) return line;
+    // Only fill when B genuinely lacks this value (avoids duplicating fields
+    // whose values B already renders on adjacent lines, e.g. Tags/检测结果).
+    if (normalizeForDedup(value) && bAll.includes(normalizeForDedup(value))) return line;
+    return `${line.replace(/\s*$/, '')} ${value}`;
+  });
+
+  // One honest marker if A carried sub-cards Lark only renders client-side.
+  if (aHoleCount > 0) filled.push(CARD_EMBEDDED_PLACEHOLDER);
+  return filled.join('\n');
+}
+
+/**
+ * Resolve a card to its most complete text by unioning both `im.message.get`
+ * representations (server-rendered Format A + full structured Format B). Used
+ * by BOTH the live event path and `botmux history` so a single message_id
+ * resolves identically everywhere. Returns null when neither representation
+ * could be fetched (caller keeps whatever it already had).
+ */
+export async function resolveMergedCardContent(
+  larkAppId: string, messageId: string, numberer?: ImgNumberer,
+): Promise<{ text: string; structuredContent: string } | null> {
+  const [aRes, bRes] = await Promise.all([
+    getMessageDetail(larkAppId, messageId, { userCardContent: false }).catch(() => null),
+    getMessageDetail(larkAppId, messageId, { userCardContent: true }).catch(() => null),
+  ]);
+  const aContent = aRes?.items?.[0]?.body?.content;
+  const bContent = bRes?.items?.[0]?.body?.content;
+  if (!aContent && !bContent) return null;
+  const textA = aContent ? extractCardContent(normalizeApiMessageContent('interactive', aContent), numberer) : '';
+  const textB = bContent ? extractCardContent(normalizeApiMessageContent('interactive', bContent), numberer) : '';
+  const merged = mergeCardText(textA, textB);
+  if (!merged) return null;
+  // Carry the structured card JSON (B preferred) alongside the merged text so
+  // resource extraction (image_key/file_key) keeps working — extractResources
+  // walks elements/body, extractCardContent short-circuits on the text key.
+  return { text: merged, structuredContent: (bContent ?? aContent)! };
+}
+
+/**
+ * Resolve an interactive event's card to its complete merged text in place.
+ * Stores a sentinel that carries BOTH the merged text (for extractCardContent)
+ * and the structured card JSON (for extractResources image/file extraction).
+ * Falls back to local user_dsl unwrap if the REST merge yields nothing. Shared
+ * by the live daemon path so forwarded cards reach the model fully parsed.
+ */
+export async function resolveEventCard(data: RawEventData, larkAppId: string): Promise<void> {
+  let resolved: { text: string; structuredContent: string } | null = null;
+  try {
+    resolved = await resolveMergedCardContent(larkAppId, data.message.message_id);
+  } catch { /* fall through to local unwrap */ }
+  if (resolved) {
+    const structured = (() => { try { return JSON.parse(resolved!.structuredContent); } catch { return {}; } })();
+    data.message.content = JSON.stringify({ ...structured, [RESOLVED_TEXT_KEY]: resolved.text });
+    return;
+  }
+  unwrapUserDsl(data);
 }
 
 type ResourcePusher = (resources: MessageResource[], r: MessageResource) => void;
@@ -550,10 +726,39 @@ function extractElementText(el: any, parts: string[], imgLabel: (key: string) =>
     if (text) parts.push(text);
   }
 
+  // div.fields[] — v2 cards put most body text in a fields array of lark_md
+  // cells (规则/报警时间/Tags/检测结果/详情链接…), NOT in el.text. Without this
+  // the entire detail section of field-based cards (e.g. Argos alarm cards)
+  // silently vanishes. A div can carry both el.text and el.fields, so this is
+  // additive rather than an else-branch.
+  if (Array.isArray(el.fields)) {
+    for (const f of el.fields) {
+      const t = f?.text?.content ?? f?.content;
+      if (t) parts.push(t);
+    }
+  }
+
   // button — text may be a plain_text object (v2) or a string (v1 simplified).
   if (tag === 'button') {
     const btnText = typeof el.text === 'string' ? el.text : el.text?.content;
     if (btnText) parts.push(`[${btnText}]`);
+  }
+
+  // input — surface the placeholder so the reader knows the field is there.
+  if (tag === 'input') {
+    const ph = el.placeholder?.content;
+    if (ph) parts.push(`[输入框: ${ph}]`);
+  }
+
+  // select / multi-select / overflow — surface placeholder + selectable
+  // options so the choices the card offers aren't lost.
+  if (tag === 'select_static' || tag === 'multi_select_static' || tag === 'overflow') {
+    const ph = el.placeholder?.content;
+    const opts = Array.isArray(el.options)
+      ? el.options.map((o: any) => o.text?.content).filter(Boolean)
+      : [];
+    const head = ph ? `[下拉: ${ph}` : '[下拉';
+    parts.push(opts.length ? `${head} | 选项: ${opts.join(' / ')}]` : `${head}]`);
   }
 
   // image — emit a numbered placeholder matching the attachment list order.
@@ -580,6 +785,11 @@ function extractElementText(el: any, parts: string[], imgLabel: (key: string) =>
         for (const child of col.elements) extractElementText(child, parts, imgLabel);
       }
     }
+  }
+  // action blocks hold their children in `actions`, not `elements` — recurse so
+  // their buttons / inputs / selects (确认/创建群组/驾驶舱…) get surfaced.
+  if (Array.isArray(el.actions)) {
+    for (const child of el.actions) extractElementText(child, parts, imgLabel);
   }
   if (Array.isArray(el.elements) && tag !== 'note') {
     for (const child of el.elements) extractElementText(child, parts, imgLabel);
