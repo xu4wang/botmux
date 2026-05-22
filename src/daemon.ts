@@ -8,7 +8,7 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
 import { config } from './config.js';
 import { statSync } from 'node:fs';
-import { getChatMode, replyMessage, resolveAllowedUsersWithMap, sendMessage, updateMessage } from './im/lark/client.js';
+import { getChatMode, listChatMemberOpenIds, replyMessage, resolveAllowedUsersWithMap, sendMessage, updateMessage } from './im/lark/client.js';
 import { loadBotConfigs, registerBot, getBot, getAllBots, findOncallChatForAnyBot, type BotState, type OncallChat } from './bot-registry.js';
 import * as sessionStore from './services/session-store.js';
 import * as chatFirstSeenStore from './services/chat-first-seen-store.js';
@@ -2236,6 +2236,23 @@ async function handleThreadReply(data: any, ctx: RoutingContext): Promise<void> 
   }
 }
 
+async function resolveAllowedChatGroups(bot: BotState): Promise<void> {
+  const chatIds = bot.config.allowedChatGroups ?? [];
+  if (chatIds.length === 0) return;
+
+  const resolved = new Set<string>();
+  for (const chatId of chatIds) {
+    try {
+      const members = await listChatMemberOpenIds(bot.config.larkAppId, chatId);
+      for (const openId of members) resolved.add(openId);
+      logger.info(`[${bot.config.larkAppId}] Resolved allowedChatGroups ${chatId}: ${members.length} member(s)`);
+    } catch (err: any) {
+      logger.warn(`[${bot.config.larkAppId}] Failed to resolve allowedChatGroups ${chatId}: ${err?.message ?? err}`);
+    }
+  }
+  bot.resolvedAllowedChatGroupUsers = [...resolved];
+}
+
 // ─── Main ────────────────────────────────────────────────────────────────────
 
 export async function startDaemon(botIndex?: number): Promise<void> {
@@ -2346,6 +2363,8 @@ export async function startDaemon(botIndex?: number): Promise<void> {
       desc.resolvedAllowedUsers = bot.resolvedAllowedUsers.filter(u => !u.includes('@'));
       try { writeDaemonDescriptor(desc); } catch { /* best effort */ }
     }
+
+    await resolveAllowedChatGroups(bot);
 
     // Probe bot open_id and persist to bots-info.json. When the friendly
     // botName comes back from /bot/v3/info, refresh the dashboard descriptor
