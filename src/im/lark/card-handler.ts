@@ -769,6 +769,7 @@ export async function handleCardAction(data: CardActionData, deps: CardHandlerDe
           { name: selfBot.botName, openId: selfBot.botOpenId },
           locDs,
           ds.pendingSender,
+          { larkAppId: ds.larkAppId, chatId: ds.chatId },
         );
         rememberLastCliInput(ds, pendingPrompt, prompt);
         ds.pendingPrompt = undefined;
@@ -888,6 +889,7 @@ export async function handleCardAction(data: CardActionData, deps: CardHandlerDe
       { name: selfBot.botName, openId: selfBot.botOpenId },
       locTarget,
       targetDs.pendingSender,
+      { larkAppId: targetDs.larkAppId, chatId: targetDs.chatId },
     );
     rememberLastCliInput(targetDs, pendingPrompt, prompt);
     targetDs.pendingPrompt = undefined;

@@ -247,7 +247,6 @@ export const messages: Record<string, string> = {
   'role.nothing_to_delete': '当前群没有 Role 配置，无需删除。',
   'role.set_empty': 'Role 内容不能为空。用法：/role set <Markdown 内容>',
   'role.no_chat': '无法获取群信息，请稍后重试。',
-  'role.no_working_dir': '无法获取工作目录，请检查 bot 配置。',
   'role.help': '/role 用法：\n• /role — 查看当前角色\n• /role set <Markdown 内容> — 设置角色\n• /role delete — 删除角色',
 
   // ─── Card handler responses ──────────────────────────────────────────────

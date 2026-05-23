@@ -178,9 +178,8 @@ async function handleRoleCommand(
   args: string,
   rootId: string,
   chatId: string,
-  workingDir: string,
+  larkAppId: string,
   deps: CommandHandlerDeps,
-  larkAppId?: string,
 ): Promise<void> {
   const sessionReply = (rid: string, content: string, msgType?: string) =>
     deps.sessionReply(rid, content, msgType, larkAppId);
@@ -189,7 +188,7 @@ async function handleRoleCommand(
 
   // /role → show current role
   if (!trimmed) {
-    const content = resolveRoleFile(workingDir, chatId);
+    const content = resolveRoleFile(larkAppId, chatId);
     if (content) {
       const len = Buffer.byteLength(content, 'utf-8');
       await sessionReply(rootId, `${t('role.current', undefined, loc)}\n\`\`\`markdown\n${content}\n\`\`\`\n${t('role.byte_count', { bytes: len, max: 4096 }, loc)}`);
@@ -207,7 +206,7 @@ async function handleRoleCommand(
       await sessionReply(rootId, t('role.set_empty', undefined, loc));
       return;
     }
-    writeRoleFile(workingDir, chatId, content);
+    writeRoleFile(larkAppId, chatId, content);
     const len = Buffer.byteLength(content, 'utf-8');
     await sessionReply(rootId, t('role.saved_via_cmd', { bytes: len, max: 4096 }, loc));
     return;
@@ -215,7 +214,7 @@ async function handleRoleCommand(
 
   // /role delete
   if (trimmed === 'delete' || trimmed === '删除') {
-    const existed = deleteRoleFile(workingDir, chatId);
+    const existed = deleteRoleFile(larkAppId, chatId);
     if (existed) {
       await sessionReply(rootId, t('role.deleted_via_cmd', undefined, loc));
     } else {
@@ -488,7 +487,7 @@ export async function handleCommand(
               { name: selfBot.botName, openId: selfBot.botOpenId },
               loc,
               ds.pendingSender,
-              { workingDir: ds.workingDir ?? botCfg.workingDir, chatId: ds.chatId },
+              { larkAppId, chatId: ds.chatId },
             );
             rememberLastCliInput(ds, pendingPrompt, prompt);
             ds.pendingPrompt = undefined;
@@ -568,7 +567,7 @@ export async function handleCommand(
             { name: selfBot.botName, openId: selfBot.botOpenId },
             loc,
             ds.pendingSender,
-            { workingDir: ds.workingDir ?? botCfg.workingDir, chatId: ds.chatId },
+            { larkAppId, chatId: ds.chatId },
           );
           rememberLastCliInput(ds, pendingPrompt, prompt);
           ds.pendingPrompt = undefined;
@@ -627,18 +626,12 @@ export async function handleCommand(
 
       case '/role': {
         const chatId = ds?.chatId;
-        if (!chatId) {
+        if (!chatId || !larkAppId) {
           await sessionReply(rootId, t('role.no_chat', undefined, loc));
           break;
         }
-        const bot = larkAppId ? getBot(larkAppId) : null;
-        const workingDir = ds?.workingDir ?? bot?.config?.workingDir;
-        if (!workingDir) {
-          await sessionReply(rootId, t('role.no_working_dir', undefined, loc));
-          break;
-        }
         const roleArgs = message.content.replace(/^\/role\s*/, '');
-        await handleRoleCommand(roleArgs, rootId, chatId, workingDir, deps, larkAppId);
+        await handleRoleCommand(roleArgs, rootId, chatId, larkAppId, deps);
         logger.info(`[${logTag}] Role command handled`);
         break;
       }

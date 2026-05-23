@@ -206,7 +206,7 @@ export function buildNewTopicPrompt(
   botIdentity?: { name?: string; openId?: string },
   locale?: Locale,
   sender?: ResolvedSender,
-  opts?: { workingDir?: string; chatId?: string },
+  opts?: { larkAppId?: string; chatId?: string },
 ): string {
   const adapter = createCliAdapterSync(cliId, cliPathOverride);
   // Non-Claude CLIs receive the botmux routing hints inline via the prompt
@@ -232,8 +232,8 @@ export function buildNewTopicPrompt(
   }
 
   let roleBlock = '';
-  if (opts?.workingDir && opts?.chatId) {
-    const roleContent = resolveRoleFile(opts.workingDir, opts.chatId);
+  if (opts?.larkAppId && opts?.chatId) {
+    const roleContent = resolveRoleFile(opts.larkAppId, opts.chatId);
     if (roleContent) {
       roleBlock = `<role context="group" chat_id="${xmlEscape(opts.chatId)}">\n${roleContent}\n</role>`;
     }
@@ -297,7 +297,7 @@ export function buildNewTopicPrompt(
 export function buildFollowUpContent(
   content: string,
   sessionId: string,
-  opts?: { attachments?: LarkAttachment[]; mentions?: LarkMention[]; isAdoptMode?: boolean; cliId?: CliId; cliPathOverride?: string; locale?: Locale; sender?: ResolvedSender; workingDir?: string; chatId?: string },
+  opts?: { attachments?: LarkAttachment[]; mentions?: LarkMention[]; isAdoptMode?: boolean; cliId?: CliId; cliPathOverride?: string; locale?: Locale; sender?: ResolvedSender; larkAppId?: string; chatId?: string },
 ): string {
   const parts: string[] = [`<user_message>\n${content}\n</user_message>`];
 
@@ -310,8 +310,8 @@ export function buildFollowUpContent(
   if (attachHint) parts.push(attachHint);
 
   // Inject per-chat role for follow-up messages (same as buildNewTopicPrompt)
-  if (opts?.workingDir && opts?.chatId) {
-    const roleContent = resolveRoleFile(opts.workingDir, opts.chatId);
+  if (opts?.larkAppId && opts?.chatId) {
+    const roleContent = resolveRoleFile(opts.larkAppId, opts.chatId);
     if (roleContent) {
       parts.push(`<role context="group" chat_id="${xmlEscape(opts.chatId)}">\n${roleContent}\n</role>`);
     }
@@ -470,7 +470,7 @@ export function buildReforkPrompt(
     cliPathOverride: opts?.cliPathOverride,
     locale,
     sender: opts?.sender,
-    workingDir: ds.workingDir,
+    larkAppId: ds.larkAppId,
     chatId: ds.session.chatId,
   });
 }
@@ -912,7 +912,7 @@ export async function executeScheduledTask(
   sessionStore.updateSession(session);
   messageQueue.ensureQueue(anchor);
 
-  const prompt = buildNewTopicPrompt(task.prompt, session.sessionId, bot.config.cliId, bot.config.cliPathOverride, undefined, undefined, undefined, undefined, { name: bot.botName, openId: bot.botOpenId }, localeForBot(larkAppId), undefined, { workingDir: bot.config.workingDir, chatId: task.chatId });
+  const prompt = buildNewTopicPrompt(task.prompt, session.sessionId, bot.config.cliId, bot.config.cliPathOverride, undefined, undefined, undefined, undefined, { name: bot.botName, openId: bot.botOpenId }, localeForBot(larkAppId), undefined, { larkAppId, chatId: task.chatId });
 
   const ds: DaemonSession = {
     session,

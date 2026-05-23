@@ -244,7 +244,6 @@ export const messages: Record<string, string> = {
   'role.nothing_to_delete': 'No role configured for this chat.',
   'role.set_empty': 'Role content cannot be empty. Usage: /role set <Markdown content>',
   'role.no_chat': 'Cannot determine chat info. Please retry.',
-  'role.no_working_dir': 'Cannot determine working directory. Check bot configuration.',
   'role.help': '/role usage:\n• /role — View current role\n• /role set <Markdown content> — Set role\n• /role delete — Delete role',
 
   // ─── Card handler responses ──────────────────────────────────────────────

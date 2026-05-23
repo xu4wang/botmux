@@ -1,6 +1,6 @@
 // Roles page: hierarchical group → bot role editor.
 // Displays groups as collapsible sections with bots nested inside.
-// Each bot has its own ROLE.md file selectable for editing.
+// Each bot has its own per-group role definition selectable for editing.
 import { escapeHtml, t } from './ui.js';
 
 interface BotInfo {

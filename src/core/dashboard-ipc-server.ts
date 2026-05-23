@@ -15,7 +15,6 @@ import { getCliDisplayName } from '../im/lark/card-builder.js';
 import { locateLimiter } from './dashboard-locate.js';
 import { dashboardEventBus } from './dashboard-events.js';
 import { validateWorkingDir } from './working-dir.js';
-import { getBot } from '../bot-registry.js';
 import { resolveRoleFile, writeRoleFile, deleteRoleFile } from './role-resolver.js';
 import {
   composeRowFromActive,
@@ -294,7 +293,7 @@ ipcRoute('GET', '/api/groups', async (_req, res) => {
     // matrix can show toggle state without a second round-trip.
     const enriched = chats.map(c => {
       const oncall = oncallStore.getOncallStatus(cachedLarkAppId, c.chatId);
-      const hasRole = resolveRoleFile(getBot(cachedLarkAppId)?.config?.workingDir ?? '', c.chatId) !== null;
+      const hasRole = resolveRoleFile(cachedLarkAppId, c.chatId) !== null;
       return { ...c, oncallChat: oncall ?? null, firstSeenAt: seenMap.get(c.chatId) ?? null, hasRole };
     });
     jsonRes(res, 200, { chats: enriched });
@@ -389,10 +388,7 @@ ipcRoute('DELETE', '/api/oncall/:chatId', async (_req, res, p) => {
 
 ipcRoute('GET', '/api/roles/:chatId', async (_req, res, p) => {
   if (!cachedLarkAppId) return jsonRes(res, 503, { error: 'larkAppId_not_set' });
-  const bot = getBot(cachedLarkAppId);
-  const workingDir = bot?.config?.workingDir;
-  if (!workingDir) return jsonRes(res, 400, { error: 'no_working_dir' });
-  const content = resolveRoleFile(workingDir, p.chatId);
+  const content = resolveRoleFile(cachedLarkAppId, p.chatId);
   jsonRes(res, 200, {
     chatId: p.chatId,
     content,
@@ -403,16 +399,13 @@ ipcRoute('GET', '/api/roles/:chatId', async (_req, res, p) => {
 
 ipcRoute('PUT', '/api/roles/:chatId', async (req, res, p) => {
   if (!cachedLarkAppId) return jsonRes(res, 503, { error: 'larkAppId_not_set' });
-  const bot = getBot(cachedLarkAppId);
-  const workingDir = bot?.config?.workingDir;
-  if (!workingDir) return jsonRes(res, 400, { error: 'no_working_dir' });
   let body: { content?: unknown };
   try { body = await readJsonBody<{ content?: string }>(req); }
   catch { return jsonRes(res, 400, { ok: false, error: 'bad_json' }); }
   const content = typeof body.content === 'string' ? body.content.trim() : '';
   if (!content) return jsonRes(res, 400, { ok: false, error: 'content_required' });
   try {
-    writeRoleFile(workingDir, p.chatId, content);
+    writeRoleFile(cachedLarkAppId, p.chatId, content);
     jsonRes(res, 200, { ok: true });
   } catch (e) {
     jsonRes(res, 500, { ok: false, error: String(e) });
@@ -421,10 +414,7 @@ ipcRoute('PUT', '/api/roles/:chatId', async (req, res, p) => {
 
 ipcRoute('DELETE', '/api/roles/:chatId', async (_req, res, p) => {
   if (!cachedLarkAppId) return jsonRes(res, 503, { error: 'larkAppId_not_set' });
-  const bot = getBot(cachedLarkAppId);
-  const workingDir = bot?.config?.workingDir;
-  if (!workingDir) return jsonRes(res, 400, { error: 'no_working_dir' });
-  const existed = deleteRoleFile(workingDir, p.chatId);
+  const existed = deleteRoleFile(cachedLarkAppId, p.chatId);
   jsonRes(res, 200, { ok: true, existed });
 });
 
