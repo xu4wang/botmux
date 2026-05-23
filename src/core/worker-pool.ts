@@ -815,6 +815,10 @@ function setupWorkerHandlers(ds: DaemonSession, worker: ChildProcess): void {
           );
           ds.streamCardId = await cb.sessionReply(sessionAnchorId(ds), streamCardJson, 'interactive', ds.larkAppId);
           persistStreamCardState(ds);
+          // Re-sync worker's display mode (it starts fresh in 'hidden')
+          if (ds.worker && ds.displayMode && ds.displayMode !== 'hidden') {
+            ds.worker.send({ type: 'set_display_mode', mode: ds.displayMode } as DaemonToWorker);
+          }
           // New card is live — recall any cards frozen by previous turns.
           // Done after `streamCardId` is committed so we never delete the old
           // card without a successor visible to the user.
@@ -1299,6 +1303,7 @@ function deliverFinalOutput(
 /** Test-only alias so the retry pipeline can be exercised without a real
  *  fork. Intentionally underscored to discourage non-test callers. */
 export const __testOnly_deliverFinalOutput = deliverFinalOutput;
+export const __testOnly_setupWorkerHandlers = setupWorkerHandlers;
 
 // ─── Fork adopt worker ──────────────────────────────────────────────────────
 
