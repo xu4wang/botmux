@@ -116,7 +116,7 @@ describe('handleTeamRoute', () => {
     await call(makeReq('POST', '/api/pairing/start'), res, '/api/pairing/start');
     const { pairingId, code } = json(res);
     const browserToken = cookieValue(res, 'bmx_pair');
-    claimPairing(dataDir, code, { openId: 'ou_1', unionId: 'on_1', name: '张三' });
+    claimPairing(dataDir, code, { openId: 'ou_1', unionId: 'on_1', name: '张三', larkAppId: 'cli_login' });
     res = makeRes();
     await call(makeReq('POST', '/api/pairing/consume', { cookie: 'bmx_pair=' + browserToken, body: { pairingId } }), res, '/api/pairing/consume');
     return cookieValue(res, 'bmx_session');
@@ -248,13 +248,15 @@ describe('handleTeamRoute', () => {
     expect(res.statusCode).toBe(400);
     expect(json(res).error).toBe('unknown_bot');
     expect(captured).toBeNull(); // never proxied
-    // valid roster bot → creates, invites the requesting user
+    // valid roster bot → creates; passes the user's open_id + their paired bot
+    // (createTeamGroup decides scope-safe auto-invite, not the route)
     res = makeRes();
     await callWithGroup(makeReq('POST', '/api/team/group', { cookie: c, body: { name: '排障', larkAppIds: ['cli_a'] } }), res, '/api/team/group', fakeCreate);
     expect(res.statusCode).toBe(200);
     expect(json(res).chatId).toBe('oc_new');
     expect(captured.larkAppIds).toEqual(['cli_a']);
-    expect(captured.userOpenIds).toEqual(['ou_1']); // 张三 invited so they're in the group
+    expect(captured.userOpenId).toBe('ou_1');          // user's open_id forwarded
+    expect(captured.preferredCreator).toBe('cli_login'); // the bot they paired with
   });
 
   it('web 拉群 requires a session (401) and rejects empty selection (400)', async () => {

@@ -242,7 +242,8 @@ $('btn-group').onclick = async () => {
     const inv = [];
     if ((r.body.invalidBotIds||[]).length) inv.push('未能加入的机器人: ' + r.body.invalidBotIds.join(', '));
     if ((r.body.invalidUserIds||[]).length) inv.push('未能加入的用户: ' + r.body.invalidUserIds.join(', '));
-    $('grp-out').innerHTML = '<span class="ok">群已创建</span> · <a href="' + applink + '" target="_blank">在飞书打开</a> <span class="muted">(' + esc(r.body.chatId) + ')</span>' + (inv.length ? '<p class="hint err">' + esc(inv.join('；')) + '</p>' : '');
+    const selfNote = r.body.autoInviteUnavailable ? '<p class="hint err">你未被自动拉入（你配对的机器人不在所选机器人里或不在线）。请让群内的机器人或成员把你拉进去。</p>' : '';
+    $('grp-out').innerHTML = '<span class="ok">群已创建</span> · <a href="' + applink + '" target="_blank">在飞书打开</a> <span class="muted">(' + esc(r.body.chatId) + ')</span>' + selfNote + (inv.length ? '<p class="hint err">' + esc(inv.join('；')) + '</p>' : '');
   } else {
     $('grp-out').innerHTML = '<span class="err">建群失败：' + esc(r.body?.error || r.status) + '</span>';
   }

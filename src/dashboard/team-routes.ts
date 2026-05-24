@@ -42,8 +42,8 @@ function deleteTeamRoleFile(dataDir: string, larkAppId: string): void {
 export interface TeamRouteDeps {
   dataDir?: string;
   /** Injected by dashboard.ts (needs daemon proxy + creator selection). */
-  createTeamGroup?: (args: { name: string; larkAppIds: string[]; userOpenIds?: string[] }) => Promise<{
-    ok: boolean; chatId?: string; invalidBotIds?: string[]; invalidUserIds?: string[]; error?: string;
+  createTeamGroup?: (args: { name: string; larkAppIds: string[]; userOpenId?: string; preferredCreator?: string }) => Promise<{
+    ok: boolean; chatId?: string; invalidBotIds?: string[]; invalidUserIds?: string[]; error?: string; autoInviteUnavailable?: boolean;
   }>;
 }
 
@@ -206,9 +206,10 @@ export async function handleTeamRoute(
     const rosterIds = new Set(buildTeamRoster(dataDir, session.teamId).bots.map(b => b.larkAppId));
     const unknown = larkAppIds.filter(id => !rosterIds.has(id));
     if (unknown.length) { jsonRes(res, 400, { ok: false, error: 'unknown_bot', unknown }); return true; }
-    // Invite the requesting user too, so they land in the group.
-    const userOpenIds = session.identity.openId ? [session.identity.openId] : [];
-    const r = await deps.createTeamGroup({ name, larkAppIds, userOpenIds });
+    // Pass the user's open_id + the bot they paired with; createTeamGroup only
+    // forwards the open_id as an invitee when that bot is the creator (open_id
+    // is per-app scoped), else flags autoInviteUnavailable.
+    const r = await deps.createTeamGroup({ name, larkAppIds, userOpenId: session.identity.openId, preferredCreator: session.identity.pairedLarkAppId });
     jsonRes(res, r.ok ? 200 : 502, r);
     return true;
   }

@@ -20,6 +20,8 @@ export interface WebSessionIdentity {
   unionId?: string;
   openId?: string;
   name?: string;
+  /** Bot app the user paired with; their open_id is scoped to THIS app. */
+  pairedLarkAppId?: string;
 }
 
 export interface WebSession {

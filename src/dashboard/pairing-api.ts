@@ -80,7 +80,7 @@ export function pairingConsume(
   }
   if (!member) return { status: 403, body: { ok: false, reason: 'not_a_member' } };
 
-  const sess = createWebSession(dataDir, { unionId: c.claimedBy.unionId, openId: c.claimedBy.openId, name: c.claimedBy.name }, teamId);
+  const sess = createWebSession(dataDir, { unionId: c.claimedBy.unionId, openId: c.claimedBy.openId, name: c.claimedBy.name, pairedLarkAppId: c.claimedBy.larkAppId }, teamId);
   return {
     status: 200,
     body: { ok: true, user: { name: c.claimedBy.name }, teamId },

@@ -701,7 +701,7 @@ export async function handleCommand(
         // Resolve the sender's canonical union_id (best-effort) so the web
         // session is keyed stably across apps; degrade to open_id-only.
         const who = await resolveUserUnionId(larkAppId, message.senderId);
-        const result = claimPairing(config.session.dataDir, code, { openId: message.senderId, unionId: who.unionId, name: who.name });
+        const result = claimPairing(config.session.dataDir, code, { openId: message.senderId, unionId: who.unionId, name: who.name, larkAppId });
         if (result.ok) await sessionReply(rootId, t('pair.ok', undefined, loc));
         else if (result.reason === 'expired') await sessionReply(rootId, t('pair.expired', undefined, loc));
         else if (result.reason === 'already_claimed') await sessionReply(rootId, t('pair.already', undefined, loc));

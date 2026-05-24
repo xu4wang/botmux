@@ -37,6 +37,8 @@ export interface PairingClaimer {
   openId: string;
   unionId?: string;
   name?: string;
+  /** The bot app the user ran `/pair` with — open_id is scoped to THIS app. */
+  larkAppId?: string;
 }
 
 interface PairingEntry {
@@ -123,7 +125,12 @@ export function claimPairing(dataDir: string, code: string, claimer: PairingClai
   if (entry.expiresAt <= now) return { ok: false, reason: 'expired' };
   if (entry.status !== 'pending') return { ok: false, reason: 'already_claimed' };
   entry.status = 'claimed';
-  entry.claimedBy = { openId: claimer.openId, ...(claimer.unionId ? { unionId: claimer.unionId } : {}), ...(claimer.name ? { name: claimer.name } : {}) };
+  entry.claimedBy = {
+    openId: claimer.openId,
+    ...(claimer.unionId ? { unionId: claimer.unionId } : {}),
+    ...(claimer.name ? { name: claimer.name } : {}),
+    ...(claimer.larkAppId ? { larkAppId: claimer.larkAppId } : {}),
+  };
   writeFileAtomic(dataDir, data);
   return { ok: true, pairingId: entry.pairingId };
 }

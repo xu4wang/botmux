@@ -14,6 +14,7 @@ import {
 import { DaemonRegistry } from './dashboard/registry.js';
 import { Aggregator, subscribeDaemon } from './dashboard/aggregator.js';
 import { pickCreatorForGroup } from './dashboard/operator-selector.js';
+import { planGroupCreator } from './dashboard/team-group.js';
 import { handleWorkflowApi, jsonRes } from './dashboard/workflow-api.js';
 import { handleDashboardTriggerApi } from './dashboard/trigger-api.js';
 import { handleConnectorApi } from './dashboard/connector-api.js';
@@ -168,28 +169,44 @@ async function proxyToDaemon(
  *  selected bots, proxy to its /api/groups/create, invite the requesting user.
  *  Surfaces invalidBotIds/invalidUserIds so the UI never implies a non-added
  *  bot/user joined. */
-async function createTeamGroup(args: { name: string; larkAppIds: string[]; userOpenIds?: string[] }): Promise<{
-  ok: boolean; chatId?: string; invalidBotIds?: string[]; invalidUserIds?: string[]; error?: string;
+async function createTeamGroup(args: { name: string; larkAppIds: string[]; userOpenId?: string; preferredCreator?: string }): Promise<{
+  ok: boolean; chatId?: string; invalidBotIds?: string[]; invalidUserIds?: string[]; error?: string; autoInviteUnavailable?: boolean;
 }> {
   const selectedIds = Array.from(new Set(args.larkAppIds.filter(Boolean)));
   if (selectedIds.length === 0) return { ok: false, error: 'no_bots_selected' };
-  const pick = pickCreatorForGroup(selectedIds, (id) => {
-    const d = registry.getByAppId(id);
-    return d ? { larkAppId: d.larkAppId, resolvedAllowedUsers: d.resolvedAllowedUsers ?? [] } : undefined;
-  });
-  if (!pick) return { ok: false, error: 'no_online_daemon' };
-  const upstream = await proxyToDaemon(pick.creatorLarkAppId, '/api/groups/create', {
-    method: 'POST',
-    headers: { 'content-type': 'application/json' },
-    body: JSON.stringify({ name: args.name, larkAppIds: selectedIds, userOpenIds: args.userOpenIds ?? [] }),
-  });
-  const text = await upstream.text();
-  let parsed: any = null;
-  try { parsed = JSON.parse(text); } catch { /* leave null */ }
-  if (!upstream.ok || !parsed?.ok || typeof parsed.chatId !== 'string') {
-    return { ok: false, error: parsed?.error ?? `group_create_http_${upstream.status}` };
+  // Only auto-invite the web user when their paired bot is the creator (open_id
+  // is scoped to that app); otherwise create the group but don't forward a
+  // wrong-scope open_id — UI will flag autoInviteUnavailable.
+  const plan = planGroupCreator(
+    selectedIds,
+    args.preferredCreator,
+    (id) => !!registry.getByAppId(id),
+    (ids) => {
+      const p = pickCreatorForGroup(ids, (id) => {
+        const d = registry.getByAppId(id);
+        return d ? { larkAppId: d.larkAppId, resolvedAllowedUsers: d.resolvedAllowedUsers ?? [] } : undefined;
+      });
+      return p ? p.creatorLarkAppId : null;
+    },
+  );
+  if (!plan.creatorLarkAppId) return { ok: false, error: 'no_online_daemon' };
+  const userOpenIds = plan.inviteUser && args.userOpenId ? [args.userOpenId] : [];
+  try {
+    const upstream = await proxyToDaemon(plan.creatorLarkAppId, '/api/groups/create', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ name: args.name, larkAppIds: selectedIds, userOpenIds }),
+    });
+    const text = await upstream.text();
+    let parsed: any = null;
+    try { parsed = JSON.parse(text); } catch { /* leave null */ }
+    if (!upstream.ok || !parsed?.ok || typeof parsed.chatId !== 'string') {
+      return { ok: false, error: parsed?.error ?? `group_create_http_${upstream.status}` };
+    }
+    return { ok: true, chatId: parsed.chatId, invalidBotIds: parsed.invalidBotIds ?? [], invalidUserIds: parsed.invalidUserIds ?? [], autoInviteUnavailable: !plan.inviteUser };
+  } catch {
+    return { ok: false, error: 'group_create_proxy_failed' };
   }
-  return { ok: true, chatId: parsed.chatId, invalidBotIds: parsed.invalidBotIds ?? [], invalidUserIds: parsed.invalidUserIds ?? [] };
 }
 
 function lifecycleBotIds(connector: ConnectorDefinition): string[] {
