@@ -288,7 +288,7 @@ function makeDeps(ds?: DaemonSession): CommandHandlerDeps {
 
 describe('DAEMON_COMMANDS set', () => {
   it('should contain all expected commands', () => {
-    const expected = ['/close', '/restart', '/status', '/help', '/cd', '/repo', '/skip', '/schedule', '/role', '/login', '/adopt', '/oncall', '/group', '/g'];
+    const expected = ['/close', '/restart', '/status', '/help', '/cd', '/repo', '/skip', '/schedule', '/role', '/pair', '/login', '/adopt', '/oncall', '/group', '/g'];
     for (const cmd of expected) {
       expect(DAEMON_COMMANDS.has(cmd), `Expected DAEMON_COMMANDS to contain ${cmd}`).toBe(true);
     }
@@ -305,7 +305,7 @@ describe('DAEMON_COMMANDS set', () => {
   });
 
   it('should have the correct size', () => {
-    expect(DAEMON_COMMANDS.size).toBe(14);
+    expect(DAEMON_COMMANDS.size).toBe(15);
   });
 });
 

@@ -494,6 +494,29 @@ export async function resolveAllowedUsersWithMap(
   return { resolved: openIds, map };
 }
 
+/**
+ * Best-effort resolve a user's open_id → canonical union_id (+ display name)
+ * for pairing-login. Requires `contact:user.base:readonly` scope; on failure
+ * (no scope / API error) returns {} so callers degrade to open_id-only identity.
+ */
+export async function resolveUserUnionId(larkAppId: string, openId: string): Promise<{ unionId?: string; name?: string }> {
+  if (!openId) return {};
+  try {
+    const c = getBotClient(larkAppId);
+    const res = await (c as any).contact.v3.user.get({
+      path: { user_id: openId },
+      params: { user_id_type: 'open_id' },
+    });
+    if (res.code === 0 && res.data?.user) {
+      return { unionId: res.data.user.union_id ?? undefined, name: res.data.user.name ?? undefined };
+    }
+    logger.debug(`resolveUserUnionId non-zero code: ${res.code} ${res.msg}`);
+  } catch (err: any) {
+    logger.debug(`resolveUserUnionId failed: ${err?.message ?? err}`);
+  }
+  return {};
+}
+
 export async function resolveAllowedUsers(larkAppId: string, raw: string[]): Promise<string[]> {
   return (await resolveAllowedUsersWithMap(larkAppId, raw)).resolved;
 }

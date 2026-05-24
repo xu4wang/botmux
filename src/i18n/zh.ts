@@ -265,6 +265,11 @@ export const messages: Record<string, string> = {
   'role.cap_cleared': '✅ 能力标签已清除。',
   'role.cap_set_empty': '能力标签不能为空。用法：/role cap set <描述>',
   'role.help': '/role 用法：\n• /role — 查看当前生效 Role\n• /role set <Markdown> — 设置本群 Role（覆盖团队级）\n• /role delete — 删除本群 Role\n• /role team [set <Markdown>|delete] — 团队级 Role（跨群默认）\n• /role cap [set <一句话>|clear] — 能力标签（花名册展示）',
+  'pair.usage': '用法：/pair <配对码>（在团队平台网页点"登录"会显示配对码）。',
+  'pair.ok': '✅ 登录配对成功，请回到网页继续。',
+  'pair.expired': '配对码已过期，请在网页重新发起登录。',
+  'pair.already': '该配对码已被使用，请在网页重新发起登录。',
+  'pair.not_found': '配对码无效，请检查后重试（区分有效期，过期需重新发起）。',
 
   // ─── Card handler responses ──────────────────────────────────────────────
   'card.action.adopt_no_restart': '⚠️ adopt 模式不支持重启（不会触动你自己的 tmux pane / CLI 进程）',

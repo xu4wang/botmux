@@ -12,7 +12,8 @@ import * as scheduler from './scheduler.js';
 import { scanProjects, scanMultipleProjects } from '../services/project-scanner.js';
 import { buildRepoSelectCard, buildAdoptSelectCard, buildSessionClosedCard, getCliDisplayName } from '../im/lark/card-builder.js';
 import { createCliAdapterSync } from '../adapters/cli/registry.js';
-import { deleteMessage, sendMessage, listChatBotMembers } from '../im/lark/client.js';
+import { deleteMessage, sendMessage, listChatBotMembers, resolveUserUnionId } from '../im/lark/client.js';
+import { claimPairing } from '../services/pairing-store.js';
 import { logger } from '../utils/logger.js';
 import { killWorker, forkWorker, forkAdoptWorker, getCurrentCliVersion } from './worker-pool.js';
 import { expandHome, getSessionWorkingDir, getProjectScanDir, getProjectScanDirs, rememberLastCliInput } from './session-manager.js';
@@ -30,7 +31,7 @@ import { t, localeForBot, type Locale } from '../i18n/index.js';
 
 // ─── Exported constants ──────────────────────────────────────────────────────
 
-export const DAEMON_COMMANDS = new Set(['/close', '/restart', '/status', '/help', '/cd', '/repo', '/skip', '/schedule', '/role', '/login', '/adopt', '/oncall', '/group', '/g']);
+export const DAEMON_COMMANDS = new Set(['/close', '/restart', '/status', '/help', '/cd', '/repo', '/skip', '/schedule', '/role', '/pair', '/login', '/adopt', '/oncall', '/group', '/g']);
 
 /**
  * Slash commands that are forwarded verbatim to the underlying CLI (e.g.
@@ -690,6 +691,22 @@ export async function handleCommand(
         const roleArgs = message.content.replace(/^\/role\s*/, '');
         await handleRoleCommand(roleArgs, rootId, chatId, larkAppId, message.senderId, deps);
         logger.info(`[${logTag}] Role command handled`);
+        break;
+      }
+
+      case '/pair': {
+        const code = message.content.replace(/^\/pair\s*/, '').trim();
+        if (!larkAppId) { await sessionReply(rootId, t('role.no_chat', undefined, loc)); break; }
+        if (!code) { await sessionReply(rootId, t('pair.usage', undefined, loc)); break; }
+        // Resolve the sender's canonical union_id (best-effort) so the web
+        // session is keyed stably across apps; degrade to open_id-only.
+        const who = await resolveUserUnionId(larkAppId, message.senderId);
+        const result = claimPairing(config.session.dataDir, code, { openId: message.senderId, unionId: who.unionId, name: who.name });
+        if (result.ok) await sessionReply(rootId, t('pair.ok', undefined, loc));
+        else if (result.reason === 'expired') await sessionReply(rootId, t('pair.expired', undefined, loc));
+        else if (result.reason === 'already_claimed') await sessionReply(rootId, t('pair.already', undefined, loc));
+        else await sessionReply(rootId, t('pair.not_found', undefined, loc));
+        logger.info(`[${logTag}] Pair command handled: ${result.ok ? 'ok' : result.reason}`);
         break;
       }
 

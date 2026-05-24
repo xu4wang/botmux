@@ -262,6 +262,11 @@ export const messages: Record<string, string> = {
   'role.cap_cleared': '✅ Capability label cleared.',
   'role.cap_set_empty': 'Capability label cannot be empty. Usage: /role cap set <description>',
   'role.help': '/role usage:\n• /role — View effective role\n• /role set <Markdown> — Set chat role (overrides team)\n• /role delete — Delete chat role\n• /role team [set <Markdown>|delete] — Team-level role (cross-chat default)\n• /role cap [set <one-liner>|clear] — Capability label (shown in roster)',
+  'pair.usage': 'Usage: /pair <code> (the code is shown when you click "Log in" on the team platform web UI).',
+  'pair.ok': '✅ Login paired. Return to the web page to continue.',
+  'pair.expired': 'Pairing code expired. Start login again on the web page.',
+  'pair.already': 'That pairing code was already used. Start login again on the web page.',
+  'pair.not_found': 'Invalid pairing code. Check it and retry (expired codes need a new login).',
 
   // ─── Card handler responses ──────────────────────────────────────────────
   'card.action.adopt_no_restart': '⚠️ Restart is disabled in adopt mode (it would not touch your tmux pane / CLI process anyway).',
