@@ -103,6 +103,31 @@ describe('connector-api write routes', () => {
     expect(JSON.stringify(await json(await fetch(`${baseUrl}/api/connectors/${encodeURIComponent(id)}`)))).not.toContain(rotated.secret);
   });
 
+  it('requires lifecycle extractors for new-group connectors and preserves botIds', async () => {
+    const bad = await fetch(`${baseUrl}/api/connectors`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        name: 'Auto war-room',
+        target: { mode: 'new-group', kind: 'turn', botId: 'app1', botIds: ['app2'] },
+      }),
+    });
+    expect(bad.status).toBe(400);
+    expect((await json(bad)).error).toBe('lifecycle_extractors_required');
+
+    const created = await json(await fetch(`${baseUrl}/api/connectors`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        name: 'Auto war-room',
+        target: { mode: 'new-group', kind: 'turn', botId: 'app1', botIds: ['app2'] },
+        lifecycleExtractors: { dedupKey: '$.alert.id', status: '$.alert.state' },
+      }),
+    }));
+    expect(created.connector.target.botIds).toEqual(['app1', 'app2']);
+    expect(created.connector.lifecycleExtractors).toEqual({ dedupKey: '$.alert.id', status: '$.alert.state' });
+  });
+
   it('manages standalone webhook secrets as metadata-only reads', async () => {
     const created = await json(await fetch(`${baseUrl}/api/webhook-secrets`, {
       method: 'POST',

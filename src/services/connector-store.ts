@@ -28,6 +28,7 @@ export interface ConnectorDefinition {
     mode: ConnectorTargetMode;
     kind: ConnectorTargetKind;
     botId: string;
+    botIds?: string[];
     chatId?: string;
     allowChats?: string[];
     workflowId?: string;

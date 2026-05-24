@@ -68,6 +68,22 @@ function emptyStats(connectorId: string): TriggerLogStats {
   return { connectorId, total: 0, ok: 0, error: 0, actions: {}, errorCodes: {} };
 }
 
+function normalizeLifecycleExtractors(v: unknown): ConnectorDefinition['lifecycleExtractors'] {
+  if (!v || typeof v !== 'object' || Array.isArray(v)) return null;
+  const r = v as Record<string, unknown>;
+  if (typeof r.dedupKey !== 'string' || !r.dedupKey.trim()) return null;
+  if (typeof r.status !== 'string' || !r.status.trim()) return null;
+  const rawMap = record(r.statusMap);
+  const statusMap = Object.fromEntries(
+    Object.entries(rawMap).filter((e): e is [string, string] => typeof e[1] === 'string'),
+  );
+  return {
+    dedupKey: r.dedupKey.trim(),
+    status: r.status.trim(),
+    ...(Object.keys(statusMap).length > 0 ? { statusMap } : {}),
+  };
+}
+
 function normalizeConnectorInput(
   raw: unknown,
   opts: { id?: string; prior?: ConnectorDefinition | null; secretRef?: string },
@@ -97,10 +113,19 @@ function normalizeConnectorInput(
   if (!['turn', 'workflow'].includes(targetKind)) return { ok: false, error: 'bad_target_kind' };
   const botId = typeof target.botId === 'string' && target.botId.trim() ? target.botId.trim() : prior?.target.botId;
   if (!botId) return { ok: false, error: 'target_bot_required' };
+  const botIds = hasOwn(target, 'botIds')
+    ? Array.from(new Set(stringList(target.botIds).map(x => x.trim()).filter(Boolean)))
+    : prior?.target.botIds;
   const chatId = typeof target.chatId === 'string' && target.chatId.trim() ? target.chatId.trim() : prior?.target.chatId;
   if (targetMode === 'fixed' && !chatId) return { ok: false, error: 'fixed_chat_required' };
   const workflowId = typeof target.workflowId === 'string' && target.workflowId.trim() ? target.workflowId.trim() : prior?.target.workflowId;
   if (targetKind === 'workflow' && !workflowId) return { ok: false, error: 'workflow_id_required' };
+  const lifecycleExtractors = c.lifecycleExtractors === undefined
+    ? (prior?.lifecycleExtractors ?? null)
+    : normalizeLifecycleExtractors(c.lifecycleExtractors);
+  if (targetMode === 'new-group' && !lifecycleExtractors) {
+    return { ok: false, error: 'lifecycle_extractors_required' };
+  }
 
   const secretRef =
     opts.secretRef ||
@@ -136,6 +161,7 @@ function normalizeConnectorInput(
       mode: targetMode as ConnectorDefinition['target']['mode'],
       kind: targetKind as ConnectorDefinition['target']['kind'],
       botId,
+      ...(botIds && botIds.length > 0 ? { botIds: botIds.includes(botId) ? botIds : [botId, ...botIds] } : {}),
       ...(chatId ? { chatId } : {}),
       ...(hasOwn(target, 'allowChats') ? { allowChats: stringList(target.allowChats) } : prior?.target.allowChats ? { allowChats: prior.target.allowChats } : {}),
       ...(workflowId ? { workflowId } : {}),
@@ -155,7 +181,7 @@ function normalizeConnectorInput(
       storeHeaders: bool(loggingPolicy.storeHeaders, prior?.loggingPolicy.storeHeaders ?? true),
       retentionDays: positiveInt(loggingPolicy.retentionDays, prior?.loggingPolicy.retentionDays ?? 14, 1, 365),
     },
-    lifecycleExtractors: c.lifecycleExtractors === undefined ? (prior?.lifecycleExtractors ?? null) : null,
+    lifecycleExtractors,
     ...(rateLimitCleared ? {} : rateLimit && Object.keys(rateLimit).length > 0 ? {
       rateLimit: {
         windowSeconds: positiveInt(rateLimit.windowSeconds, prior?.rateLimit?.windowSeconds ?? 60, 1, 86_400),

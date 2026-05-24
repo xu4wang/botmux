@@ -40,6 +40,8 @@ export type TriggerErrorCode =
   | 'dry_run'
   | 'invalid_signature'
   | 'chat_not_allowed'
+  | 'group_create_failed'
+  | 'lifecycle_extract_failed'
   | 'rate_limited'
   | 'replay'
   | 'session_not_found'

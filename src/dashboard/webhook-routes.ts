@@ -4,11 +4,30 @@ import { getConnector, type ConnectorDefinition } from '../services/connector-st
 import { getWebhookSecret } from '../services/webhook-key.js';
 import type { TriggerRequest, TriggerResponse } from '../services/trigger-types.js';
 import { appendTriggerLog } from '../services/trigger-log-store.js';
+import { extractWebhookLifecycle } from '../services/webhook-lifecycle-extractors.js';
+import {
+  activateWebhookLifecycleGroup,
+  beginWebhookLifecycleFiring,
+  failWebhookLifecycleGroup,
+  resolveWebhookLifecycleGroup,
+  type WebhookLifecycleRecord,
+} from '../services/webhook-lifecycle-store.js';
 import { jsonRes } from './workflow-api.js';
 import { dispatchTriggerRequest, newTriggerId, type TriggerApiDeps } from './trigger-api.js';
 
 const replayNonces = new Map<string, number>();
 const rateBuckets = new Map<string, { windowStart: number; count: number }>();
+
+export type WebhookRouteDeps = TriggerApiDeps & {
+  createLifecycleGroup?: (
+    connector: ConnectorDefinition,
+    args: { dedupKey: string },
+  ) => Promise<{ chatId: string; creatorLarkAppId?: string }>;
+  closeLifecycleGroup?: (
+    connector: ConnectorDefinition,
+    record: WebhookLifecycleRecord,
+  ) => Promise<{ ok: boolean; error?: string }>;
+};
 
 function headerValue(req: IncomingMessage, name: string): string | undefined {
   const v = req.headers[name.toLowerCase()];
@@ -131,11 +150,26 @@ function webhookError(
   jsonRes(res, status, { ok: false, errorCode, error });
 }
 
+function webhookOkLog(
+  connectorId: string,
+  action: 'ignored',
+  message: string,
+): TriggerResponse {
+  const triggerId = newTriggerId();
+  appendTriggerLog({
+    triggerId,
+    connectorId,
+    action,
+    status: 'ok',
+  });
+  return { ok: true, triggerId, action, message };
+}
+
 export async function handleWebhookRoute(
   req: IncomingMessage,
   res: ServerResponse,
   url: URL,
-  deps: TriggerApiDeps,
+  deps: WebhookRouteDeps,
 ): Promise<boolean> {
   const m = url.pathname.match(/^\/webhook\/([^/]+)$/);
   if (!m) return false;
@@ -186,12 +220,115 @@ export async function handleWebhookRoute(
     return true;
   }
 
+  const parsed = parsePayload(rawBody);
   if (connector.target.mode === 'new-group') {
-    webhookError(res, 501, connectorId, 'workflow_trigger_not_implemented', 'new-group lifecycle is reserved for P2');
+    const extracted = extractWebhookLifecycle(parsed.payload, connector.lifecycleExtractors);
+    if (!extracted.ok) {
+      webhookError(res, 400, connectorId, 'lifecycle_extract_failed', extracted.error);
+      return true;
+    }
+    const { dedupKey, status } = extracted.lifecycle;
+
+    if (status === 'resolved') {
+      const resolved = await resolveWebhookLifecycleGroup(connector.id, dedupKey);
+      let closeResult: { ok: boolean; error?: string } | undefined;
+      if (resolved.action === 'close' && resolved.record?.chatId) {
+        closeResult = deps.closeLifecycleGroup
+          ? await deps.closeLifecycleGroup(connector, resolved.record)
+          : { ok: false, error: 'closeLifecycleGroup hook not configured' };
+      }
+      const body = webhookOkLog(connector.id, 'ignored', `lifecycle ${resolved.action}`);
+      jsonRes(res, closeResult?.ok === false ? 502 : 200, {
+        ...body,
+        lifecycle: { dedupKey, status, action: resolved.action, chatId: resolved.record?.chatId },
+        ...(closeResult?.ok === false ? { ok: false, errorCode: 'trigger_failed', error: closeResult.error } : {}),
+      });
+      return true;
+    }
+
+    const begun = await beginWebhookLifecycleFiring(connector.id, dedupKey);
+    if (begun.action === 'creating') {
+      jsonRes(res, 202, {
+        ...webhookOkLog(connector.id, 'ignored', 'lifecycle group creation already in progress'),
+        lifecycle: { dedupKey, status, action: 'creating' },
+      });
+      return true;
+    }
+
+    let chatId = begun.action === 'reuse' ? begun.record.chatId : undefined;
+    if (begun.action === 'create') {
+      if (!deps.createLifecycleGroup) {
+        await failWebhookLifecycleGroup(connector.id, dedupKey, begun.record.lifecycleId);
+        webhookError(res, 501, connector.id, 'group_create_failed', 'createLifecycleGroup hook not configured');
+        return true;
+      }
+      let created: { chatId: string; creatorLarkAppId?: string };
+      try {
+        created = await deps.createLifecycleGroup(connector, { dedupKey });
+      } catch (e: any) {
+        await failWebhookLifecycleGroup(connector.id, dedupKey, begun.record.lifecycleId);
+        webhookError(res, 502, connector.id, 'group_create_failed', e?.message ?? String(e));
+        return true;
+      }
+      const activated = await activateWebhookLifecycleGroup(
+        connector.id,
+        dedupKey,
+        begun.record.lifecycleId,
+        created.chatId,
+        { creatorLarkAppId: created.creatorLarkAppId },
+      );
+      if (activated.status === 'pending_resolved') {
+        const closeResult = deps.closeLifecycleGroup && activated.record
+          ? await deps.closeLifecycleGroup(connector, activated.record)
+          : { ok: true };
+        jsonRes(res, closeResult.ok ? 200 : 502, {
+          ...webhookOkLog(connector.id, 'ignored', 'lifecycle resolved before group activation'),
+          lifecycle: { dedupKey, status: 'resolved', action: 'closed', chatId: created.chatId },
+          ...(closeResult.ok ? {} : { ok: false, errorCode: 'trigger_failed', error: closeResult.error }),
+        });
+        return true;
+      }
+      if (activated.status !== 'active' || !activated.record?.chatId) {
+        webhookError(res, 409, connector.id, 'replay', 'lifecycle record was replaced before activation');
+        return true;
+      }
+      chatId = activated.record.chatId;
+    }
+
+    if (!chatId) {
+      webhookError(res, 500, connector.id, 'trigger_failed', 'lifecycle group has no chatId');
+      return true;
+    }
+
+    const trigger: TriggerRequest = {
+      source: {
+        type: 'webhook',
+        connectorId: connector.id,
+        requestId: nonce,
+        receivedAt: new Date().toISOString(),
+      },
+      target: {
+        kind: connector.target.kind,
+        botId: connector.target.botId,
+        chatId,
+        workflowId: connector.target.workflowId,
+      },
+      envelope: {
+        format: 'botmux.webhook.v1',
+        sourceName: connector.promptEnvelope.sourceName || connector.name,
+        trusted: false,
+        headers: pickAllowedHeaders(req, connector.promptEnvelope.headerAllowlist),
+        payload: parsed.payload,
+        ...(connector.promptEnvelope.includeRawText ? { rawText: parsed.rawText } : {}),
+      },
+      options: { dedupKey, status },
+    };
+
+    const result = await dispatchTriggerRequest(trigger, deps);
+    jsonRes(res, result.status, { ...result.body, lifecycle: { dedupKey, action: begun.action, chatId } });
     return true;
   }
 
-  const parsed = parsePayload(rawBody);
   const chatId = connector.target.mode === 'fixed'
     ? connector.target.chatId
     : dynamicChatId(req, url, parsed.payload);
