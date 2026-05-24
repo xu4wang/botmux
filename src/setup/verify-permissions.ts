@@ -47,6 +47,11 @@ export const BOTMUX_REQUIRED_SCOPES: RequiredScope[] = [
   { name: 'im:message.group_at_msg:readonly', desc: '群消息接收', critical: true },
   { name: 'im:resource', desc: '消息附件下载', critical: true },
   { name: 'im:chat:read', desc: '群信息读取', critical: true },
+  // /group 多 bot 建群解析靠 chatMembers.isInChat 判断每个 bot 是否在群。该 API
+  // 接受 im:chat / im:chat:readonly / im:chat.members:read / im:chat.group_info:readonly
+  // 任一即可（OR），但实际可申请的只有 im:chat.members:read，故只校验它。缺它时
+  // isInChat 抛 Access denied 被吞，bot 静默掉出 roster，/group fail-closed 建不了群。
+  { name: 'im:chat.members:read', desc: '群成员读取（/group 建群解析、判断 bot 是否在群）', critical: true },
   { name: 'contact:user.base:readonly', desc: '用户基本信息', critical: true },
   // event-dispatcher.checkRequiredScopes 历史上一直对这一项 DM 管理员（"多 bot
   // 协作收不到事件"），等价于 critical 处理；保留 critical 标记是为了让启动
