@@ -2,7 +2,11 @@ import { describe, expect, it } from 'vitest';
 import {
   applyBotConfigEdits,
   assertUniqueBotProcessNames,
+  assertOwnerWhenChatGroups,
   botProcessName,
+  findInvalidAllowedUserEntries,
+  hasOwnerEntry,
+  isValidAllowedUserEntry,
   normalizeBotConfig,
   parseBotConfigsJson,
   parseBotSelection,
@@ -76,7 +80,7 @@ describe('applyBotConfigEdits', () => {
       cliChoice: '4',
       cliPathOverride: '/opt/new/codex',
       workingDir: '~/new',
-      allowedUsers: 'alice,bob',
+      allowedUsers: 'alice@example.com,ou_bob',
     });
 
     expect(updated).toEqual({
@@ -86,7 +90,7 @@ describe('applyBotConfigEdits', () => {
       cliId: 'codex',
       cliPathOverride: '/opt/new/codex',
       workingDir: '~/new',
-      allowedUsers: ['alice', 'bob'],
+      allowedUsers: ['alice@example.com', 'ou_bob'],
       oncallChats: [{ chatId: 'oc_1', workingDir: '~/repo' }],
     });
   });
@@ -104,6 +108,23 @@ describe('applyBotConfigEdits', () => {
 
     const cleared = applyBotConfigEdits(edited, { allowedChatGroups: '-' });
     expect(cleared.allowedChatGroups).toBeUndefined();
+  });
+
+  it('rejects bare email prefixes in allowedUsers (only full email or ou_ accepted)', () => {
+    expect(() => applyBotConfigEdits({
+      larkAppId: 'app', larkAppSecret: 'secret', cliId: 'claude-code',
+    }, { allowedUsers: 'alice' })).toThrow(/完整邮箱|open_id/);
+
+    expect(() => applyBotConfigEdits({
+      larkAppId: 'app', larkAppSecret: 'secret', cliId: 'claude-code',
+    }, { allowedUsers: 'ou_abc, bob' })).toThrow(/bob/);
+  });
+
+  it('accepts full emails and open_ids in allowedUsers', () => {
+    const edited = applyBotConfigEdits({
+      larkAppId: 'app', larkAppSecret: 'secret', cliId: 'claude-code',
+    }, { allowedUsers: 'alice@example.com, ou_abc' });
+    expect(edited.allowedUsers).toEqual(['alice@example.com', 'ou_abc']);
   });
 
   it('keeps fields unchanged on empty input and clears optional fields with dash', () => {
@@ -294,5 +315,47 @@ describe('removeBotConfig', () => {
       removed: { larkAppId: 'app_a' },
       bots: [],
     });
+  });
+});
+
+describe('allowedUsers entry validation', () => {
+  it('isValidAllowedUserEntry accepts ou_ open_ids and full emails, rejects prefixes', () => {
+    expect(isValidAllowedUserEntry('ou_abc123')).toBe(true);
+    expect(isValidAllowedUserEntry('alice@example.com')).toBe(true);
+    expect(isValidAllowedUserEntry('alice')).toBe(false);
+    expect(isValidAllowedUserEntry('alice@company')).toBe(false); // no TLD
+    expect(isValidAllowedUserEntry('')).toBe(false);
+  });
+
+  it('findInvalidAllowedUserEntries surfaces only the bad entries', () => {
+    expect(findInvalidAllowedUserEntries(['ou_a', 'alice@example.com', 'bob', 'carol']))
+      .toEqual(['bob', 'carol']);
+    expect(findInvalidAllowedUserEntries(['ou_a', 'alice@example.com'])).toEqual([]);
+  });
+
+  it('hasOwnerEntry is true only when an ou_/email entry exists', () => {
+    expect(hasOwnerEntry(['ou_a'])).toBe(true);
+    expect(hasOwnerEntry(['alice@example.com'])).toBe(true);
+    expect(hasOwnerEntry(['alice'])).toBe(false);
+    expect(hasOwnerEntry([])).toBe(false);
+    expect(hasOwnerEntry(undefined)).toBe(false);
+  });
+});
+
+describe('assertOwnerWhenChatGroups', () => {
+  it('throws when allowedChatGroups is set but no owner in allowedUsers', () => {
+    expect(() => assertOwnerWhenChatGroups({ allowedChatGroups: ['oc_team'] }))
+      .toThrow(/owner/);
+    expect(() => assertOwnerWhenChatGroups({ allowedChatGroups: ['oc_team'], allowedUsers: [] }))
+      .toThrow(/owner/);
+  });
+
+  it('passes when an owner exists or no chat groups configured', () => {
+    expect(() => assertOwnerWhenChatGroups({ allowedChatGroups: ['oc_team'], allowedUsers: ['ou_admin'] }))
+      .not.toThrow();
+    expect(() => assertOwnerWhenChatGroups({ allowedChatGroups: ['oc_team'], allowedUsers: ['admin@example.com'] }))
+      .not.toThrow();
+    expect(() => assertOwnerWhenChatGroups({})).not.toThrow();
+    expect(() => assertOwnerWhenChatGroups({ allowedUsers: [] })).not.toThrow();
   });
 });

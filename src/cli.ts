@@ -37,6 +37,9 @@ import {
   parseBotSelection,
   removeBotConfig,
   resolveCliId,
+  assertOwnerWhenChatGroups,
+  findInvalidAllowedUserEntries,
+  hasOwnerEntry,
   type BotConfigEditInput,
 } from './setup/bot-config-editor.js';
 import type { CliId } from './adapters/cli/types.js';
@@ -457,6 +460,37 @@ async function obtainCredentials(rl: ReturnType<typeof createInterface>): Promis
 }
 
 /**
+ * 手动建 bot 时（没有扫码人 open_id）必须指定至少一个 owner.
+ * 循环追问直到给出合法条目（完整邮箱或 ou_ open_id），拒绝裸邮箱前缀与空输入.
+ * setup 不允许没有 owner —— 没 owner 的配置一旦叠加 allowedChatGroups 即成权限黑洞.
+ */
+async function promptRequiredOwner(rl: ReturnType<typeof createInterface>): Promise<string[]> {
+  printInputHelp('管理员 (owner)', [
+    '必填。至少一个能操作机器人的管理员，支持完整邮箱（如 alice@example.com）或 open_id（ou_xxx），多个值用逗号分隔。',
+    '第一个 open_id（或可解析的邮箱）将作为 owner —— /restart、/close、/grant 等敏感操作只对 allowedUsers 开放。',
+    '注意：必须是完整邮箱，邮箱前缀（如 alice）无法解析、不接受。',
+  ]);
+  for (;;) {
+    const raw = (await ask(rl, '管理员 (owner): ')).trim();
+    const entries = raw.split(',').map(s => s.trim()).filter(Boolean);
+    if (entries.length === 0) {
+      console.log('   ❌ 必须至少指定一个管理员（不能为空）。');
+      continue;
+    }
+    const invalid = findInvalidAllowedUserEntries(entries);
+    if (invalid.length > 0) {
+      console.log(`   ❌ 以下不是完整邮箱或 open_id（邮箱前缀不接受）: ${invalid.join(', ')}`);
+      continue;
+    }
+    if (!hasOwnerEntry(entries)) {
+      console.log('   ❌ 至少需要一个 open_id 或完整邮箱作为 owner。');
+      continue;
+    }
+    return entries;
+  }
+}
+
+/**
  * 收集一个机器人完整配置 (凭证 + CLI/工作目录/allowedUsers).
  *
  * 顺序: 拿凭证 → tenant_access_token 验证 → 通过才返回 bot 对象. 验证失败
@@ -501,10 +535,15 @@ async function promptBotConfig(rl: ReturnType<typeof createInterface>): Promise<
     // 在哪儿, 不用去 README 查字段名.
     workingDir: workingDir.trim() || '~',
   };
-  // 不再问 allowedUsers — 扫码场景默认填扫码人自己 (registerApp 返回里有 open_id);
-  // 想改成多人共用 / 不限制, 用户后续手动编辑 ~/.botmux/bots.json 的 allowedUsers
-  // 字段即可. 手动 fallback 场景没 open_id, 字段直接不写 (== 不限制).
-  if (creds.userOpenId) bot.allowedUsers = [creds.userOpenId];
+  // 扫码场景默认填扫码人自己 (registerApp 返回里有 open_id), 天然就是 owner.
+  // 手动 fallback 场景没 open_id —— 必须显式指定 owner, 否则配置无 owner:
+  // allowedUsers 为空时虽然"全开放", 但一旦后续加了 allowedChatGroups 就会变成
+  // "群成员能对话却没人能做敏感操作 / 用 /grant". setup 阶段强制收口, 不允许没 owner.
+  if (creds.userOpenId) {
+    bot.allowedUsers = [creds.userOpenId];
+  } else {
+    bot.allowedUsers = await promptRequiredOwner(rl);
+  }
 
   if (!ensureBotWorkingDirsExist(bot, '默认工作目录')) return null;
 
@@ -593,7 +632,8 @@ async function promptEditBotConfig(
   input.workingDir = await ask(rl, `默认工作目录 [${formatOptionalValue(bot.workingDir)}]: `);
 
   printInputHelp('允许的用户', [
-    '可选。限制哪些飞书用户可以操作机器人，支持邮箱前缀或 open_id，多个值用逗号分隔。',
+    '可选。限制哪些飞书用户可以操作机器人，支持完整邮箱（如 alice@example.com）或 open_id（ou_xxx），多个值用逗号分隔。',
+    '注意：必须是完整邮箱，邮箱前缀（如 alice）无法解析、会被丢弃。',
     '留空保留当前值；输入 - 清空限制。',
   ]);
   input.allowedUsers = await ask(rl, `允许的用户 [${formatOptionalValue(bot.allowedUsers)}]: `);
@@ -606,6 +646,8 @@ async function promptEditBotConfig(
   input.allowedChatGroups = await ask(rl, `允许的群聊组 [${formatOptionalValue(bot.allowedChatGroups)}]: `);
 
   const edited = applyBotConfigEdits(bot, input);
+  // 配了 allowedChatGroups 就必须有 owner，否则敏感操作对所有人关闭。抛错由调用方捕获并中止写盘。
+  assertOwnerWhenChatGroups(edited);
   if (edited.larkAppId !== bot.larkAppId) {
     console.log('\n⚠️  LARK_APP_ID 变更后，旧 appId 下的历史会话/群聊状态数据不会自动迁移。');
     const confirm = (await ask(rl, `确认将 LARK_APP_ID 从 ${bot.larkAppId} 改为 ${edited.larkAppId}? (y/N): `)).trim().toLowerCase();

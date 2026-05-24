@@ -31,6 +31,31 @@ export function resolveCliId(input: string | undefined): CliId | undefined {
   );
 }
 
+/** 完整邮箱（含 @ 和域名）。用于区分"完整邮箱"与"邮箱前缀"——后者解析时会被静默丢弃。 */
+const FULL_EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+
+/**
+ * 合法的 allowedUsers 条目 = open_id（ou_*）或**完整邮箱**。
+ * 裸邮箱前缀（如 "alice"）不合法：解析器只认 ou_ 或完整邮箱，前缀会被丢弃 → 配置无 owner。
+ */
+export function isValidAllowedUserEntry(entry: string): boolean {
+  const s = entry.trim();
+  return s.startsWith('ou_') || FULL_EMAIL_RE.test(s);
+}
+
+/** 返回非法的 allowedUsers 条目（既不是 ou_ 也不是完整邮箱，典型是裸邮箱前缀）。 */
+export function findInvalidAllowedUserEntries(entries: string[]): string[] {
+  return entries.map(e => e.trim()).filter(e => e && !isValidAllowedUserEntry(e));
+}
+
+/**
+ * 是否存在能解析成 owner 的 allowedUsers 条目（ou_ 或完整邮箱）。
+ * owner = resolvedAllowedUsers 里第一个 ou_；完整邮箱会在启动时解析成 ou_，故二者都可作 owner。
+ */
+export function hasOwnerEntry(allowedUsers: string[] | undefined): boolean {
+  return !!allowedUsers?.some(isValidAllowedUserEntry);
+}
+
 export interface BotConfigEditInput {
   name?: string;
   larkAppId?: string;
@@ -41,6 +66,22 @@ export interface BotConfigEditInput {
   workingDir?: string;
   allowedUsers?: string;
   allowedChatGroups?: string;
+}
+
+/**
+ * 校验：配置了 allowedChatGroups 就必须有 owner。
+ * 否则群成员只拿到 canTalk，没人在 allowedUsers 里 → canOperate 对所有人关闭（连 owner 都没有），
+ * /restart、/close、获取写链接、/grant 等敏感操作全不可用。setup 写盘前调用，抛错由调用方捕获中止写盘。
+ */
+export function assertOwnerWhenChatGroups(
+  config: { allowedUsers?: string[]; allowedChatGroups?: string[] },
+): void {
+  if ((config.allowedChatGroups?.length ?? 0) > 0 && !hasOwnerEntry(config.allowedUsers)) {
+    throw new Error(
+      '配置了 allowedChatGroups 时必须同时在 allowedUsers 配置至少一个 owner（完整邮箱或 open_id），' +
+      '否则群成员能对话但没人能执行 /restart、/close 等敏感操作，/grant 也不可用。',
+    );
+  }
 }
 
 export interface RemoveBotConfigResult<T> {
@@ -215,7 +256,14 @@ export function applyBotConfigEdits<T extends Record<string, any>>(
     if (allowedUsers === '-') {
       delete out.allowedUsers;
     } else if (allowedUsers) {
-      out.allowedUsers = allowedUsers.split(',').map(s => s.trim()).filter(Boolean);
+      const entries = allowedUsers.split(',').map(s => s.trim()).filter(Boolean);
+      const invalid = findInvalidAllowedUserEntries(entries);
+      if (invalid.length > 0) {
+        throw new Error(
+          `allowedUsers 条目必须是完整邮箱（如 alice@example.com）或 open_id（ou_xxx），不能是邮箱前缀: ${invalid.join(', ')}`,
+        );
+      }
+      out.allowedUsers = entries;
     }
   }
 
