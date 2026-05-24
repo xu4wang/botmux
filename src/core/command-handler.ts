@@ -43,6 +43,8 @@ export const PASSTHROUGH_COMMANDS = new Set([
   // 只读 / 低副作用，飞书卡片里能直接吐文本：
   '/context', '/cost', '/mcp', '/diff',
   '/code-review', '/security-review', '/review',
+  // Codex：/btw 向当前会话追加一条旁注/引导消息
+  '/btw',
 ]);
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
