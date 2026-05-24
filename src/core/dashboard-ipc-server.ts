@@ -17,7 +17,16 @@ import { dashboardEventBus } from './dashboard-events.js';
 import { validateWorkingDir } from './working-dir.js';
 import { resolveRoleFile, writeRoleFile, deleteRoleFile } from './role-resolver.js';
 import { triggerSessionTurn } from './trigger-session.js';
+import { triggerWorkflowFromEnvelope } from '../workflows/trigger-from-envelope.js';
+import type { TriggerInput, TriggerResult } from '../workflows/trigger-run.js';
 import { validateTriggerRequest } from '../services/trigger-types.js';
+
+// Workflow runner is wired by the daemon (it owns the heavy triggerWorkflowRun
+// deps). Until set, workflow-targeted triggers report not-implemented.
+let workflowRunner: ((input: TriggerInput) => Promise<TriggerResult>) | null = null;
+export function setWorkflowRunner(fn: (input: TriggerInput) => Promise<TriggerResult>): void {
+  workflowRunner = fn;
+}
 import {
   composeRowFromActive,
   composeRowFromClosed,
@@ -294,7 +303,15 @@ ipcRoute('POST', '/api/trigger', async (req, res) => {
   const valid = validateTriggerRequest(body);
   if (!valid.ok) return jsonRes(res, valid.status, valid.body);
   try {
-    const result = await triggerSessionTurn(valid.request, { larkAppId: cachedLarkAppId, activeSessions });
+    let result;
+    if (valid.request.target.kind === 'workflow') {
+      if (!workflowRunner) {
+        return jsonRes(res, 501, { ok: false, errorCode: 'workflow_trigger_not_implemented', error: 'workflow runner not wired on this daemon' });
+      }
+      result = await triggerWorkflowFromEnvelope(valid.request, { larkAppId: cachedLarkAppId, runWorkflow: workflowRunner });
+    } else {
+      result = await triggerSessionTurn(valid.request, { larkAppId: cachedLarkAppId, activeSessions });
+    }
     const status = result.ok
       ? 200
       : result.errorCode === 'bot_not_in_chat'

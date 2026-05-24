@@ -35,22 +35,13 @@ export async function dispatchTriggerRequest(
   body: TriggerRequest,
   deps: TriggerApiDeps,
 ): Promise<{ status: number; body: TriggerResponse }> {
-  if (body.target.kind === 'workflow') {
-    return {
-      status: 501,
-      body: {
-        ok: false,
-        errorCode: 'workflow_trigger_not_implemented',
-        error: 'target.kind=workflow is reserved for the workflow thin layer',
-      },
-    };
-  }
-
+  // Both turn and workflow are proxied by botId to the owning daemon's
+  // /api/trigger; the daemon IPC handler dispatches turn vs workflow.
   const botId = body.target.botId;
   if (!botId) {
     return {
       status: 400,
-      body: { ok: false, errorCode: 'target_required', error: 'turn target requires target.botId' },
+      body: { ok: false, errorCode: 'target_required', error: `${body.target.kind} target requires target.botId` },
     };
   }
 
