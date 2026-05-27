@@ -494,10 +494,9 @@ export function ensureCliSkills(cliId: CliId, cliPathOverride?: string): void {
   const adapter = createCliAdapterSync(cliId, cliPathOverride);
   if (adapter.pluginDir) {
     // 动态注入：skill 写进插件目录，spawn 时用 --plugin-dir 注入，仅本次会话可见。
-    // 不再写全局 skillsDir，并清掉早期版本残留在 ~/.claude/skills 的 botmux-* 目录，
-    // 避免泄漏进用户独立开的 CLI 会话。
+    // 不再写全局 skillsDir。（全局 ~/.claude/skills 的历史残留清理改由
+    // cleanupGlobalBotmuxSkillsOnce 在启动时独立于 cliId 执行。）
     ensurePluginSkills(cliId, adapter.pluginDir);
-    removeGlobalBotmuxSkills('~/.claude/skills');
   } else {
     ensureSkills(cliId, adapter.skillsDir);
   }
@@ -623,8 +622,22 @@ export function cleanupLegacyMcpConfig(cliId: CliId): void {
  * Both steps are idempotent and best-effort.
  */
 export function ensureCliEnv(cliId: CliId, cliPathOverride?: string): void {
+  cleanupGlobalBotmuxSkillsOnce();
   ensureCliSkills(cliId, cliPathOverride);
   cleanupLegacyMcpConfig(cliId);
+}
+
+let globalBotmuxSkillsCleaned = false;
+/** One-time, CLI-independent cleanup of botmux skills that older versions
+ *  installed into the global `~/.claude/skills`. Claude now injects skills via
+ *  `--plugin-dir`, so any leftover `botmux-*` there leaks into the user's
+ *  standalone `claude` regardless of which CLI THIS daemon's bot uses — so the
+ *  cleanup must NOT be gated on `adapter.pluginDir` (which only fires for a
+ *  Claude bot). Runs at daemon startup via ensureCliEnv. */
+function cleanupGlobalBotmuxSkillsOnce(): void {
+  if (globalBotmuxSkillsCleaned) return;
+  globalBotmuxSkillsCleaned = true;
+  removeGlobalBotmuxSkills('~/.claude/skills');
 }
 
 // ─── Claude Code folder-trust pre-acceptance ─────────────────────────────────
