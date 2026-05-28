@@ -19,7 +19,7 @@ import { listMemberships, addMembership } from '../src/services/federation-membe
 import { getDeploymentIdentity } from '../src/services/deployment-identity.js';
 import { consumeInvite } from '../src/services/invite-store.js';
 import { DEFAULT_TEAM_ID } from '../src/services/team-store.js';
-import { registerDeployment } from '../src/services/federation-store.js';
+import { registerDeployment, listFederatedDeployments } from '../src/services/federation-store.js';
 import { setBotOwner, getBotOwner } from '../src/services/bot-owner-store.js';
 import { claimPairing } from '../src/services/pairing-store.js';
 
@@ -242,6 +242,26 @@ describe('handleFederationSpokeApi', () => {
     expect(res.statusCode).toBe(404);
     expect(json(res).error).toBe('team_not_found');
     expect(createTeamGroup).not.toHaveBeenCalled();
+  });
+
+  it('hosted member remove: hub kicks a joined deployment; cannot remove self; unknown → 404', async () => {
+    writeBots([{ larkAppId: 'cli_a', botOpenId: null, botName: 'A', cliId: 'claude' }]);
+    registerDeployment(dataDir, 'default', { deploymentId: 'dep_spoke', name: 'S', bots: [{ larkAppId: 'cli_sp', botName: 'SP', cliId: 'codex' }] });
+    // remove the joined member → gone
+    let res = makeRes();
+    await handleFederationSpokeApi(makeReq('DELETE', '/api/team/hosted/default/members/dep_spoke'), res, url('/api/team/hosted/default/members/dep_spoke'), { dataDir });
+    expect(json(res).ok).toBe(true);
+    expect(listFederatedDeployments(dataDir, 'default').some(d => d.deploymentId === 'dep_spoke')).toBe(false);
+    // removing self (this deployment) → refused
+    const me = getDeploymentIdentity(dataDir).deploymentId;
+    res = makeRes();
+    await handleFederationSpokeApi(makeReq('DELETE', '/api/team/hosted/default/members/' + me), res, url('/api/team/hosted/default/members/' + me), { dataDir });
+    expect(json(res).error).toBe('cannot_remove_self');
+    // unknown member → 404
+    res = makeRes();
+    await handleFederationSpokeApi(makeReq('DELETE', '/api/team/hosted/default/members/dep_nope'), res, url('/api/team/hosted/default/members/dep_nope'), { dataDir });
+    expect(res.statusCode).toBe(404);
+    expect(json(res).error).toBe('member_not_found');
   });
 
   it('local-invite accepts a teamId; unknown team → 404', async () => {

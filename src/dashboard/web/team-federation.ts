@@ -109,7 +109,11 @@ function renderTeamBody(t: Team, filtered: RosterBot[]): string {
     if (!depBots.length) continue;
     const mine = dep.id === myDeploymentId;
     const tag = mine ? '本部署' : (dep.stale ? '远端·离线？' : '远端');
-    h += `<div style="margin:10px 0 2px"><b>${escapeHtml(dep.name)}</b> <span class="muted" style="font-size:12px">（${tag}）· ${depBots.length} 个</span></div>`;
+    // In a team I host, I can remove a joined member deployment (not myself).
+    const rm = (t.kind === 'local' && !mine)
+      ? ` <button class="tf-rmmember ghost" data-team="${escapeHtml(t.teamId)}" data-dep="${escapeHtml(dep.id)}" data-name="${escapeHtml(dep.name)}" style="font-size:12px">移除</button>`
+      : '';
+    h += `<div style="margin:10px 0 2px"><b>${escapeHtml(dep.name)}</b> <span class="muted" style="font-size:12px">（${tag}）· ${depBots.length} 个</span>${rm}</div>`;
     h += '<table style="width:100%;border-collapse:collapse;font-size:14px"><tbody>';
     for (const b of depBots) {
       const app = escapeHtml(b.larkAppId);
@@ -182,6 +186,13 @@ function wireTeams(): void {
     };
   });
   el.querySelectorAll<HTMLButtonElement>('.tf-role').forEach(btn => { btn.onclick = () => openRoleModal(btn.dataset.app!, btn.dataset.name || ''); });
+  el.querySelectorAll<HTMLButtonElement>('.tf-rmmember').forEach(btn => {
+    btn.onclick = async () => {
+      if (!confirm(`把「${btn.dataset.name}」移出这个团队？它的机器人将从本团队花名册消失（不影响对方自己的部署）。`)) return;
+      await jsend('DELETE', `/api/team/hosted/${encodeURIComponent(btn.dataset.team!)}/members/${encodeURIComponent(btn.dataset.dep!)}`);
+      loadLocal();
+    };
+  });
   el.querySelectorAll<HTMLButtonElement>('.tf-grp').forEach(btn => {
     btn.onclick = async () => {
       const k = btn.dataset.tk!; const t = teamByKey(k); if (!t) return;

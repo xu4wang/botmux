@@ -25,7 +25,7 @@ import type { FederatedBot } from '../services/federation-store.js';
 import { listFederatedDeployments } from '../services/federation-store.js';
 import { ensureDefaultTeam, DEFAULT_TEAM_ID, listTeams, createTeam, deleteTeam, getTeam } from '../services/team-store.js';
 import { createInvite, deleteInvitesForTeam } from '../services/invite-store.js';
-import { removeTeamFederation } from '../services/federation-store.js';
+import { removeTeamFederation, removeDeployment } from '../services/federation-store.js';
 import { loadBotConfigs, registerBot, getBot, type BotConfig } from '../bot-registry.js';
 import { setBotCapability, clearBotCapability } from '../services/bot-profile-store.js';
 import { setBotOwner } from '../services/bot-owner-store.js';
@@ -180,8 +180,9 @@ export async function handleFederationSpokeApi(
     '/api/team/hosted']);
   const REMOTE = new Set(['/api/team/join-remote', '/api/team/remote-roster', '/api/team/sync-remote', '/api/team/leave-remote', '/api/team/remote-group']);
   const localBotEdit = path.match(/^\/api\/team\/local-bots\/([^/]+)\/(capability|role)$/);
+  const memberDel = path.match(/^\/api\/team\/hosted\/([^/]+)\/members\/([^/]+)$/);
   const hostedDel = path.match(/^\/api\/team\/hosted\/([^/]+)$/);
-  if (!LOCAL.has(path) && !REMOTE.has(path) && !localBotEdit && !hostedDel) return false;
+  if (!LOCAL.has(path) && !REMOTE.has(path) && !localBotEdit && !memberDel && !hostedDel) return false;
   const dataDir = deps.dataDir ?? config.session.dataDir;
   const fetcher = deps.fetcher ?? fetch;
   const method = req.method ?? 'GET';
@@ -360,6 +361,15 @@ export async function handleFederationSpokeApi(
     if (listTeams(dataDir).length >= 100) { jsonRes(res, 400, { ok: false, error: 'too_many_teams' }); return true; } // guardrail (team-internal trust, not a security boundary)
     const t = createTeam(dataDir, name);
     jsonRes(res, 200, { ok: true, teamId: t.id, name: t.name });
+    return true;
+  }
+  // Remove a member deployment from a team I host (hub kicks a joined spoke).
+  if (memberDel && method === 'DELETE') {
+    const teamId = decodeURIComponent(memberDel[1]);
+    const deploymentId = decodeURIComponent(memberDel[2]);
+    if (deploymentId === getDeploymentIdentity(dataDir).deploymentId) { jsonRes(res, 400, { ok: false, error: 'cannot_remove_self' }); return true; }
+    const removed = removeDeployment(dataDir, teamId, deploymentId);
+    jsonRes(res, removed ? 200 : 404, { ok: removed, ...(removed ? {} : { error: 'member_not_found' }) });
     return true;
   }
   if (hostedDel && method === 'DELETE') {
