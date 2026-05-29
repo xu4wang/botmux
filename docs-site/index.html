@@ -1393,7 +1393,13 @@ Claude Code · Codex · Cursor · Gemini · OpenCode · CoCo(Trae) · Aiden · A
     function parentUrl(){ try{ return (window.magic && window.magic.parentHref) ? window.magic.parentHref : location.href; }catch(e){ return location.href; } }
     function deepLinkId(){ const h = (parentUrl().split('#')[1] || '').replace(/^\//,''); return h; }
     function shareUrl(){ return parentUrl().split('#')[0] + '#/' + CUR; }
-    function go(id){ render(id); closeSidebar(); }
+    function go(id){
+      render(id);
+      // 同步外层地址栏：iframe 写自身 hash 不影响母页，唯一能动外层 URL 的是 magic.navigate
+      // （仅 hash 变化，浏览器不会重载）
+      try{ if(window.magic && typeof window.magic.navigate==='function'){ window.magic.navigate(parentUrl().split('#')[0] + '#/' + id); } }catch(e){}
+      closeSidebar();
+    }
     window.go = go;
 
     document.getElementById('brandHome').addEventListener('click',()=>go('intro'));
