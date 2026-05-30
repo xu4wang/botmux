@@ -504,7 +504,10 @@ export function persistStreamCardState(ds: DaemonSession): void {
     s.currentTurnTitle === ds.currentTurnTitle &&
     sameUsageLimit(s.usageLimit, ds.usageLimit) &&
     s.lastUserPrompt === ds.lastUserPrompt &&
-    s.lastCliInput === ds.lastCliInput
+    s.lastCliInput === ds.lastCliInput &&
+    s.pendingResponseCardId === ds.pendingResponseCardId &&
+    s.pendingResponseCardState === ds.pendingResponseCardState &&
+    s.lastPatchedResponseCardId === ds.lastPatchedResponseCardId
   ) return;
   s.streamCardId = cardId;
   s.streamCardNonce = ds.streamCardNonce;
@@ -514,6 +517,9 @@ export function persistStreamCardState(ds: DaemonSession): void {
   s.usageLimit = ds.usageLimit;
   s.lastUserPrompt = ds.lastUserPrompt;
   s.lastCliInput = ds.lastCliInput;
+  s.pendingResponseCardId = ds.pendingResponseCardId;
+  s.pendingResponseCardState = ds.pendingResponseCardState;
+  s.lastPatchedResponseCardId = ds.lastPatchedResponseCardId;
   // Clear legacy field so it doesn't drift
   s.streamExpanded = undefined;
   sessionStore.updateSession(s);
@@ -602,6 +608,9 @@ export async function restoreActiveSessions(activeSessions: Map<string, DaemonSe
         usageLimit: session.usageLimit,
         lastUserPrompt: session.lastUserPrompt,
         lastCliInput: session.lastCliInput,
+        pendingResponseCardId: session.pendingResponseCardId,
+        pendingResponseCardState: session.pendingResponseCardState,
+        lastPatchedResponseCardId: session.lastPatchedResponseCardId,
       };
       const anchor = sessionAnchorId(ds);
       messageQueue.ensureQueue(anchor);
@@ -651,6 +660,9 @@ export async function restoreActiveSessions(activeSessions: Map<string, DaemonSe
       usageLimit: session.usageLimit,
       lastUserPrompt: session.lastUserPrompt,
       lastCliInput: session.lastCliInput,
+      pendingResponseCardId: session.pendingResponseCardId,
+      pendingResponseCardState: session.pendingResponseCardState,
+      lastPatchedResponseCardId: session.lastPatchedResponseCardId,
     };
     const anchor = sessionAnchorId(ds);
     messageQueue.ensureQueue(anchor);
@@ -836,6 +848,9 @@ export async function resumeSession(
     usageLimit: session.usageLimit,
     lastUserPrompt: session.lastUserPrompt,
     lastCliInput: session.lastCliInput,
+    pendingResponseCardId: session.pendingResponseCardId,
+    pendingResponseCardState: session.pendingResponseCardState,
+    lastPatchedResponseCardId: session.lastPatchedResponseCardId,
   };
 
   messageQueue.ensureQueue(anchor);

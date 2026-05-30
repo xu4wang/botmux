@@ -59,6 +59,11 @@ export interface Session {
   /** Whether the quote-target sender is a bot (vs a human) — drives the
    *  @ hard-gate's context-aware error text. */
   quoteTargetSenderIsBot?: boolean;
+  /** Pending placeholder card used when streaming cards are disabled. The first
+   *  botmux send for the turn PATCHes this card instead of posting a new one. */
+  pendingResponseCardId?: string;
+  pendingResponseCardState?: 'open' | 'patched';
+  lastPatchedResponseCardId?: string;
   /** Persisted streaming-card state — allows the existing card to be PATCHed
    *  (rather than a fresh POST) after daemon restart. */
   streamCardId?: string;

@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 
-import { buildDetouredPendingResponseCard, buildMergedPendingResponseCard, buildPendingResponseCard } from '../src/im/lark/card-builder.js';
+import { buildDetouredPendingResponseCard, buildPendingResponseCard } from '../src/im/lark/card-builder.js';
 
 describe('pending response card', () => {
   it('builds a processing card without manual quote text', () => {
@@ -18,13 +18,6 @@ describe('pending response card', () => {
     const card = JSON.parse(buildPendingResponseCard('en'));
     expect(card.header.title.content).toBe('Processing');
     expect(JSON.stringify(card.body)).toContain('Processing your request');
-  });
-
-  it('builds a merged card for superseded pending requests', () => {
-    const card = JSON.parse(buildMergedPendingResponseCard());
-
-    expect(card.header.title.content).toBe('已合并');
-    expect(JSON.stringify(card)).toContain('已收到后续消息，合并处理中');
   });
 
   it('builds a detoured card for replies sent elsewhere', () => {

@@ -87,7 +87,7 @@ describe('pending response state', () => {
     expect(session.pendingResponseCardState).toBe('open');
   });
 
-  it('serializes pending response work per session', async () => {
+  it('cleans up queue entries after work settles', async () => {
     const queue = createPendingResponseQueue();
     const events: string[] = [];
     let releaseFirst!: () => void;
@@ -103,8 +103,10 @@ describe('pending response state', () => {
 
     await Promise.resolve();
     expect(events).toEqual(['first:start']);
+    expect(queue.size()).toBe(1);
     releaseFirst();
     await Promise.all([first, second]);
     expect(events).toEqual(['first:start', 'first:end', 'second:start']);
+    expect(queue.size()).toBe(0);
   });
 });

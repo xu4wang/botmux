@@ -266,6 +266,37 @@ describe('Bridge final_output delivery (P2 retry)', () => {
     expect(ds.lastBridgeEmittedUuid).toBe('uuid-1');
   });
 
+  it('does not patch a newer pending card when retrying an older final output', async () => {
+    updateMessageMock.mockRejectedValueOnce(new Error('transient pending patch')).mockResolvedValueOnce(undefined);
+    const sessionReply = vi.fn(async () => 'om_reply');
+    initWorkerPool({
+      sessionReply,
+      getSessionWorkingDir: () => '/tmp',
+      getActiveCount: () => 1,
+      closeSession: vi.fn(),
+    });
+
+    const ds = makeDs();
+    ds.session.pendingResponseCardId = 'om_a';
+    ds.session.pendingResponseCardState = 'open';
+
+    const { __testOnly_deliverFinalOutput } = await import('../src/core/worker-pool.js') as any;
+    __testOnly_deliverFinalOutput(ds, finalOutputMsg(), 'tag', 0);
+
+    await vi.advanceTimersByTimeAsync(10);
+    expect(updateMessageMock).toHaveBeenCalledWith('app_test', 'om_a', expect.any(String));
+    ds.session.pendingResponseCardId = 'om_b';
+    ds.session.pendingResponseCardState = 'open';
+
+    await vi.advanceTimersByTimeAsync(5000);
+
+    expect(updateMessageMock).toHaveBeenCalledTimes(1);
+    expect(sessionReply).toHaveBeenCalledTimes(1);
+    expect(ds.session.pendingResponseCardId).toBe('om_b');
+    expect(ds.session.pendingResponseCardState).toBe('open');
+    expect(ds.lastBridgeEmittedUuid).toBe('uuid-1');
+  });
+
   it('retries on transient failure and commits after success', async () => {
     const sessionReply = vi
       .fn()

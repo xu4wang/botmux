@@ -60,7 +60,7 @@ import {
   orderedFooterRecipients,
   type BotMentionEntry,
 } from './utils/bot-routing.js';
-import { isLocale, setDefaultLocale, SUPPORTED_LOCALES, type Locale } from './i18n/index.js';
+import { isLocale, localeForBot, setDefaultLocale, SUPPORTED_LOCALES, type Locale } from './i18n/index.js';
 import { readGlobalConfig, setGlobalLocale, globalConfigPath } from './global-config.js';
 
 // Resolve the CLI's UI locale once from the global config file, so subsequent
@@ -1475,6 +1475,9 @@ interface SessionData {
   quoteTargetId?: string;
   quoteTargetSenderOpenId?: string;
   quoteTargetSenderIsBot?: boolean;
+  pendingResponseCardId?: string;
+  pendingResponseCardState?: 'open' | 'patched';
+  lastPatchedResponseCardId?: string;
 }
 
 /**
@@ -1573,6 +1576,10 @@ function loadSessions(): Map<string, SessionData> {
 }
 
 /** Save a single session back to its appropriate file based on larkAppId. */
+function loadSessionFresh(session: SessionData): SessionData | undefined {
+  return loadSessions().get(session.sessionId);
+}
+
 function saveSession(session: SessionData): void {
   const dataDir = resolveDataDir();
   const fileName = session.larkAppId ? `sessions-${session.larkAppId}.json` : 'sessions.json';
@@ -1583,7 +1590,7 @@ function saveSession(session: SessionData): void {
   if (existsSync(fp)) {
     try { data = JSON.parse(readFileSync(fp, 'utf-8')); } catch { /* start fresh */ }
   }
-  data[session.sessionId] = session;
+  data[session.sessionId] = mergePendingResponseState(session, data[session.sessionId]);
 
   // Clean up entries where file key doesn't match the entry's sessionId (data corruption)
   for (const [key, val] of Object.entries(data)) {
@@ -2747,6 +2754,7 @@ function argValues(args: string[], ...flags: string[]): string[] {
 // daemon's bridge fallback path can produce identical cards. cmdSend
 // keeps using `buildCardBodyElements` and `hasMarkdown` from there.
 import { buildCardBodyElements, hasMarkdown, brandFooterSegment } from './im/lark/md-card.js';
+import { claimPendingResponseCard, isPendingResponseCardOpen, markPendingResponseCardPatchedIfCurrent, mergePendingResponseState, shouldUseCardForSend } from './core/pending-response.js';
 import { resolveBrandLabel } from './bot-registry.js';
 import { config } from './config.js';
 import { resolveQuoteTarget, validateMentionDecision } from './services/send-policy.js';
@@ -2863,7 +2871,7 @@ async function cmdSend(rest: string[]): Promise<void> {
   const { registerBot, loadBotConfigs, findOncallChatForAnyBot } = await import('./bot-registry.js');
   try { for (const cfg of loadBotConfigs()) registerBot(cfg); } catch { /* */ }
 
-  const { sendMessage, replyMessage, uploadImage, uploadFile, MessageWithdrawnError } = await import('./im/lark/client.js');
+  const { sendMessage, replyMessage, uploadImage, uploadFile, deleteMessage, MessageWithdrawnError } = await import('./im/lark/client.js');
   const appId = s.larkAppId!;
   // Effective target chat for top-level mode (defaults to session's chat)
   const targetChatId = overrideChatId ?? s.chatId;
@@ -2927,6 +2935,28 @@ async function cmdSend(rest: string[]): Promise<void> {
     (sendTopLevel || isChatScope)
       ? sendMessage(appId, targetChatId, content, msgType)
       : replyMessage(appId, s.rootMessageId, content, msgType, true);
+  const recordBridgeSendMarker = (sentAtMs: number, messageId: string): void => {
+    try {
+      const markerDir = join(resolveDataDir(), 'turn-sends');
+      if (!existsSync(markerDir)) mkdirSync(markerDir, { recursive: true });
+      const line = JSON.stringify({ sentAtMs, messageId }) + '\n';
+      appendFileSync(join(markerDir, `${sid}.jsonl`), line);
+    } catch { /* best-effort: marker miss only causes a redundant fallback message */ }
+  };
+
+  const shouldRecordBridgeMarker = !sendTopLevel && !overrideChatId;
+
+  const dispatchOrPatchPending = async (content: string, msgType: string): Promise<string> => {
+    const pendingCardId = msgType === 'interactive' ? claimPendingResponseCard(s) : undefined;
+    const sentId = await dispatchPrimary(content, msgType);
+    const latest = pendingCardId ? loadSessionFresh(s) : undefined;
+    if (pendingCardId && latest?.pendingResponseCardId === pendingCardId) {
+      deleteMessage(appId, pendingCardId)
+        .then(() => { markPendingResponseCardPatchedIfCurrent(latest, pendingCardId); saveSession(latest); })
+        .catch((err: any) => logger.warn(`[send:${sid.substring(0, 8)}] failed to withdraw pending card after explicit send: ${err?.message ?? err}`));
+    }
+    return sentId;
+  };
 
   // Quote chain (普通群): the primary message replies to the turn's target so
   // Lark renders a 引用 chain. --quote overrides, --no-quote opts out. Thread
@@ -3088,8 +3118,14 @@ async function cmdSend(rest: string[]): Promise<void> {
         });
 
     // Decide: interactive card (renders markdown) vs. post (plain text).
-    // Explicit --card / --text wins; otherwise auto-detect markdown syntax.
-    const useCard = forceCard || (!forceText && hasMarkdown(text));
+    // An open pending response card takes precedence over --text so the
+    // placeholder can close cleanly; otherwise explicit --card / --text wins.
+    const useCard = shouldUseCardForSend({
+      forceCard,
+      forceText,
+      hasMarkdown: hasMarkdown(text),
+      hasOpenPendingResponseCard: isPendingResponseCardOpen(s),
+    });
 
     const mentionMap = new Map<string, string>();
     for (const m of mentions) if (m.name) mentionMap.set(m.name.toLowerCase(), m.open_id);
@@ -3183,7 +3219,7 @@ async function cmdSend(rest: string[]): Promise<void> {
         config: { update_multi: true },
         body: { direction: 'vertical', elements },
       });
-      messageId = await dispatchPrimary(cardJson, 'interactive');
+      messageId = await dispatchOrPatchPending(cardJson, 'interactive');
     } else {
       // Plain-text path: build post content, paragraph per line.
       const postContent: any[][] = text ? text.split('\n').map((line: string) => {
@@ -3227,21 +3263,10 @@ async function cmdSend(rest: string[]): Promise<void> {
       messageId = await dispatchPrimary(postJson, 'post');
     }
 
-    // Bridge fallback marker — append-only jsonl per session. The worker
-    // gates its non-adopt transcript-driven fallback on whether any send
-    // happened within the current Lark turn's window. Only when this send
-    // landed in the session's own thread (not --top-level, not --chat-id
-    // override) does it cancel that turn's fallback.
-    if (!sendTopLevel && !overrideChatId) {
-      try {
-        const markerDir = join(resolveDataDir(), 'turn-sends');
-        if (!existsSync(markerDir)) mkdirSync(markerDir, { recursive: true });
-        // sentAtMs was captured pre-dispatch (see above). messageId is the
-        // confirmed Lark message id from the now-successful dispatch.
-        const line = JSON.stringify({ sentAtMs, messageId }) + '\n';
-        appendFileSync(join(markerDir, `${sid}.jsonl`), line);
-      } catch { /* best-effort: marker miss only causes a redundant fallback message */ }
-    }
+    // Bridge fallback marker — append-only jsonl per session. Same-thread
+    // sends always suppress transcript fallback; detoured sends suppress only
+    // when they closed a pending response card for this turn.
+    if (shouldRecordBridgeMarker) recordBridgeSendMarker(sentAtMs, messageId);
 
     // Send file attachments as separate messages
     const fileIds: string[] = [];

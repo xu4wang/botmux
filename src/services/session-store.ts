@@ -3,6 +3,7 @@ import { join, dirname } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { config } from '../config.js';
 import { logger } from '../utils/logger.js';
+import { mergePendingResponseState } from '../core/pending-response.js';
 import { deleteFrozenCards } from './frozen-card-store.js';
 import type { Session } from '../types.js';
 
@@ -72,13 +73,25 @@ function load(): void {
   loaded = true;
 }
 
+function readExistingSessionsFromDisk(fp: string): Record<string, Session> {
+  if (!existsSync(fp)) return {};
+  try {
+    return JSON.parse(readFileSync(fp, 'utf-8')) as Record<string, Session>;
+  } catch {
+    return {};
+  }
+}
+
 function save(): void {
   ensureDir();
   const fp = getFilePath();
   const tmpFp = `${fp}.${process.pid}.${randomUUID()}.tmp`;
+  const existing = readExistingSessionsFromDisk(fp);
   const obj: Record<string, Session> = {};
   for (const [k, v] of sessions) {
-    obj[k] = v;
+    const merged = mergePendingResponseState(v, existing[k]);
+    sessions.set(k, merged);
+    obj[k] = merged;
   }
   writeFileSync(tmpFp, JSON.stringify(obj, null, 2), 'utf-8');
   renameSync(tmpFp, fp);

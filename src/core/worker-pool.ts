@@ -14,9 +14,10 @@ import { randomBytes } from 'node:crypto';
 import { config } from '../config.js';
 import * as sessionStore from '../services/session-store.js';
 import { persistStreamCardState } from './session-manager.js';
-import { updateMessage, deleteMessage, sendEphemeralCard, MessageWithdrawnError } from '../im/lark/client.js';
+import { updateMessage, deleteMessage, sendEphemeralCard, addReaction, MessageWithdrawnError } from '../im/lark/client.js';
 import { buildStreamingCard, buildPrivateSnapshotCard, buildSessionCard, buildTuiPromptCard, buildTuiPromptResolvedCard, buildRelayedFrozenCard, getCliDisplayName } from '../im/lark/card-builder.js';
 import { loadFrozenCards, saveFrozenCards } from '../services/frozen-card-store.js';
+import { clearPendingResponsePatchMarker, markPendingResponsePatchMarkerPatched, writePendingResponsePatchMarker } from '../services/pending-response-transaction-store.js';
 import { logger } from '../utils/logger.js';
 import { createCliAdapterSync } from '../adapters/cli/registry.js';
 import { botLocale, localeForBot, t as tr } from '../i18n/index.js';
@@ -30,6 +31,7 @@ import { knownBotOpenIdsFromCrossRef, type BotMentionEntry } from '../utils/bot-
 import type { CliId } from '../adapters/cli/types.js';
 import type { DaemonToWorker, WorkerToDaemon, Session, DisplayMode } from '../types.js';
 import { sessionKey, sessionAnchorId, type DaemonSession } from './types.js';
+import { claimPendingResponseCard, COMPLETED_REACTION_EMOJI_TYPE, markPendingResponseCardPatchedIfCurrent, syncPendingResponseState } from './pending-response.js';
 import { buildTerminalUrl } from './terminal-url.js';
 import { usageLimitStateKey, type CliUsageLimitState } from '../utils/cli-usage-limit.js';
 
@@ -1820,10 +1822,14 @@ function deliverFinalOutput(
   msg: Extract<WorkerToDaemon, { type: 'final_output' }>,
   t: string,
   attempt: number,
+  lockedPendingCardId?: string,
+  lockedQuoteTargetId?: string,
 ): void {
   const cb = requireCallbacks();
   const effectiveCliId = ds.session.cliId ?? getBot(ds.larkAppId).config.cliId;
   setTimeout(async () => {
+    let pendingCardId: string | undefined;
+    let pendingQuoteTargetId: string | undefined;
     // Guard: if the user closed the session (or it was torn down for any
     // other reason) between attempts, don't post a stale final answer to
     // a closed thread.
@@ -1856,7 +1862,38 @@ function deliverFinalOutput(
             brand: resolveBrandLabel(ds.larkAppId),
           })
         : buildMarkdownCard(msg.content, recipientOpenId, resolveBrandLabel(ds.larkAppId));
-      await cb.sessionReply(sessionAnchorId(ds), cardJson, 'interactive', ds.larkAppId);
+
+      pendingCardId = lockedPendingCardId ?? claimPendingResponseCard(ds.session);
+      pendingQuoteTargetId = lockedQuoteTargetId ?? ds.session.quoteTargetId;
+      if (pendingCardId) {
+        try {
+          if (ds.session.pendingResponseCardId !== pendingCardId) {
+            await cb.sessionReply(sessionAnchorId(ds), cardJson, 'interactive', ds.larkAppId);
+          } else {
+            writePendingResponsePatchMarker(ds.session.sessionId, pendingCardId);
+            await updateMessage(ds.larkAppId, pendingCardId, cardJson);
+            markPendingResponsePatchMarkerPatched(ds.session.sessionId);
+            markPendingResponseCardPatchedIfCurrent(ds.session, pendingCardId);
+            syncPendingResponseState(ds, ds.session);
+            sessionStore.updateSession(ds.session);
+            clearPendingResponsePatchMarker(ds.session.sessionId);
+            if (pendingQuoteTargetId && ds.session.lastPatchedResponseCardId === pendingCardId) {
+              addReaction(ds.larkAppId, pendingQuoteTargetId, COMPLETED_REACTION_EMOJI_TYPE)
+                .catch((err: any) => logger.warn(`[${t}] failed to add completion reaction to ${pendingQuoteTargetId}: ${err?.message ?? err}`));
+            }
+          }
+        } catch (err: any) {
+          clearPendingResponsePatchMarker(ds.session.sessionId);
+          if (!(err instanceof MessageWithdrawnError)) throw err;
+          logger.warn(`[${t}] Pending response card withdrawn while forwarding final_output; sending a new reply`);
+          await cb.sessionReply(sessionAnchorId(ds), cardJson, 'interactive', ds.larkAppId);
+          markPendingResponseCardPatchedIfCurrent(ds.session, pendingCardId);
+          syncPendingResponseState(ds, ds.session);
+          sessionStore.updateSession(ds.session);
+        }
+      } else {
+        await cb.sessionReply(sessionAnchorId(ds), cardJson, 'interactive', ds.larkAppId);
+      }
       ds.lastBridgeEmittedUuid = msg.lastUuid;
       logger.info(`[${t}] Bridge final_output forwarded (turn ${msg.turnId.substring(0, 8)}, ${msg.content.length} chars, kind=${msg.kind ?? 'bridge'}, attempt ${attempt + 1})`);
     } catch (err: any) {
@@ -1868,6 +1905,7 @@ function deliverFinalOutput(
         cb.closeSession(ds);
         return;
       }
+      if (pendingCardId) clearPendingResponsePatchMarker(ds.session.sessionId);
       const next = attempt + 1;
       if (next >= FINAL_OUTPUT_RETRY_BACKOFF_MS.length) {
         logger.error(`[${t}] Bridge final_output gave up after ${next} attempts (turn ${msg.turnId.substring(0, 8)}): ${err.message}`);
@@ -1876,10 +1914,11 @@ function deliverFinalOutput(
         return;
       }
       logger.warn(`[${t}] Bridge final_output attempt ${next} failed (${err.message}); retrying in ${FINAL_OUTPUT_RETRY_BACKOFF_MS[next]}ms`);
-      deliverFinalOutput(ds, msg, t, next);
+      deliverFinalOutput(ds, msg, t, next, pendingCardId, pendingQuoteTargetId);
     }
   }, FINAL_OUTPUT_RETRY_BACKOFF_MS[attempt] ?? 0);
 }
+
 
 /** Test-only alias so the retry pipeline can be exercised without a real
  *  fork. Intentionally underscored to discourage non-test callers. */

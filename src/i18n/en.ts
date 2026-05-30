@@ -33,6 +33,10 @@ export const messages: Record<string, string> = {
   'card.status.selected': 'Selected',
   'card.status.waiting_screenshot': '_(Waiting for first screenshot…)_',
   'card.status.truncated_prefix': '… (truncated)',
+  'card.pending.title': 'Processing',
+  'card.pending.body': '🔄 Processing your request...',
+  'card.pending.detoured_title': 'Sent',
+  'card.pending.detoured_body': 'The final reply was sent to another target.',
 
   // ─── Card body text ──────────────────────────────────────────────────────
   'card.body.cli_terminated': '{cliName} process has exited.',

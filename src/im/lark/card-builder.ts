@@ -164,6 +164,42 @@ export function buildSessionClosedCard(
   return JSON.stringify(card);
 }
 
+/** Build the lightweight placeholder shown while a no-streaming-card bot works. */
+export function buildPendingResponseCard(locale?: Locale): string {
+  return JSON.stringify({
+    schema: '2.0',
+    config: { update_multi: true },
+    header: {
+      template: 'blue',
+      title: { tag: 'plain_text', content: t('card.pending.title', undefined, locale) },
+    },
+    body: {
+      direction: 'vertical',
+      elements: [
+        { tag: 'markdown', content: t('card.pending.body', undefined, locale) },
+      ],
+    },
+  });
+}
+
+
+export function buildDetouredPendingResponseCard(locale?: Locale): string {
+  return JSON.stringify({
+    schema: '2.0',
+    config: { update_multi: true },
+    header: {
+      template: 'grey',
+      title: { tag: 'plain_text', content: t('card.pending.detoured_title', undefined, locale) },
+    },
+    body: {
+      direction: 'vertical',
+      elements: [
+        { tag: 'markdown', content: t('card.pending.detoured_body', undefined, locale) },
+      ],
+    },
+  });
+}
+
 /**
  * Build a frozen-snapshot card to PATCH onto the source-chat streaming card
  * after `/relay` moves the session elsewhere.

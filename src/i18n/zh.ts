@@ -36,6 +36,10 @@ export const messages: Record<string, string> = {
   'card.status.selected': '已选择',
   'card.status.waiting_screenshot': '_(等待第一张截图…)_',
   'card.status.truncated_prefix': '… (已截断)',
+  'card.pending.title': '处理中',
+  'card.pending.body': '🔄 正在处理你的请求...',
+  'card.pending.detoured_title': '已发送',
+  'card.pending.detoured_body': '最终回复已发送到其他目标。',
 
   // ─── Card body text ──────────────────────────────────────────────────────
   'card.body.cli_terminated': '{cliName} 进程已终止。',
