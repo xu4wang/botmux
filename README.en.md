@@ -72,9 +72,9 @@ Compared to OpenClaw-style approaches built on Agent SDKs:
 
 ## 5-Minute Setup
 
-> 💡 **TL;DR**: `npm i -g botmux` → `botmux setup` and **scan two QR codes** to get a working bot → `botmux start`. The 1st scan creates the app and saves the AppID/AppSecret (event subscriptions + bot capability pre-configured); the 2nd scan lets botmux's built-in Feishu Web login **import permissions, configure the redirect URL, and create + submit a publish version automatically**. Steps 4 (permissions) / 5 (redirect) / 6 (publish) below are all done automatically by setup and folded as a manual fallback; pass `--no-open-platform-auto` to skip the second auto-config step.
+> 💡 **TL;DR**: `npm i -g botmux` → `botmux setup` and **scan two QR codes** to get a working bot → `botmux start`. The 1st scan creates the app and saves the AppID/AppSecret (event subscriptions + bot capability pre-configured); the 2nd scan lets botmux's built-in Feishu Web login **import permissions, configure the redirect URL, and create + submit a publish version automatically**. The entire Open Platform config (create app / permissions / redirect / publish) is handled by setup; pass `--no-open-platform-auto` to skip the second auto-config step and use the manual steps folded at the end.
 
-### Step 1: Install botmux
+### 1. Install botmux
 
 ```bash
 npm install -g botmux
@@ -82,24 +82,22 @@ npm install -g botmux
 
 > Requires **Node.js ≥ 20**, with at least one AI coding CLI installed and authenticated (`claude` / `codex` / `cursor-agent` / `gemini` / `opencode` / `coco` / `agy` on your PATH). Installing **tmux** too is recommended (enables session persistence automatically).
 
-### Step 2: Create the App & Configure (`botmux setup`)
+### 2. Create the App & Configure (`botmux setup`)
 
 Run `botmux setup` and follow the interactive menu:
 
 1. **New config**: type `1` and press Enter (with an existing config, type `2` to add a bot).
-2. **Create the bot**:
-   - Type `1` → **Scan-to-create (recommended)**: scan with the Lark mobile app and a PersonalAgent app is created with AppID/AppSecret persisted automatically, **with event subscriptions + bot capability pre-configured** — no manual browser navigation. Uses the official `@larksuiteoapi/node-sdk` device flow.
-   - Type `2` → **Manual**: go to the [Lark Open Platform](https://open.larkoffice.com/app), create a "Custom App", copy **App ID / App Secret** from "Credentials & Basic Info", and paste them back.
+2. **Create the bot**: type `1` → **Scan-to-create (recommended)**: scan with the Lark mobile app and a PersonalAgent app is created with AppID/AppSecret persisted automatically, **with event subscriptions + bot capability pre-configured** — no manual browser navigation. Uses the official `@larksuiteoapi/node-sdk` device flow. (You can also type `2` to paste AppID/Secret manually — see "Create the app manually" folded below.)
 3. **Pick the CLI**: choose the CLI to bridge (e.g. type `1` for Claude Code).
 4. **Default working dir**: usually the **parent directory** of your git projects (e.g. `~/projects`); new topics scan **downward** for git repos (up to 3 levels). Avoid `~` (too many folders to traverse).
 
+Then comes the **2nd scan**: botmux's built-in Feishu Web login automatically imports permissions, configures the `http://127.0.0.1:9768/callback` redirect URL, and creates + submits a publish version. On failure it falls back and prints the manual steps (folded below) without affecting the config already written; importing only part of the permissions still counts as success — add the rest later on the Open Platform.
+
 > ⚠️ **Currently only Feishu (feishu.cn) tenants are supported.** If scan detects a Lark international (larksuite.com) tenant, setup aborts — the daemon runtime (Lark Client/WSClient/event-dispatcher) hasn't been wired up for the `larksuite.com` domain yet. A follow-up PR will add full Lark support.
 
-At the end, setup validates credentials with a `tenant_access_token` call (only writing `bots.json` on success), writes the full scope JSON to `~/.botmux/lark-scopes.json`, and prints a one-line clipboard copy command plus deep-links to each remaining step.
+At the end, setup validates credentials with a `tenant_access_token` call (only writing `bots.json` on success) and writes the full scope JSON to `~/.botmux/lark-scopes.json` for reference.
 
-![Create App](docs/setup/create-app.png)
-
-### Step 3: Start
+### 3. Start
 
 ```bash
 botmux start
@@ -107,14 +105,34 @@ botmux start
 
 > `start` re-validates credentials before forking workers; missing scopes only WARN, they don't block the daemon. If you later need to verify the event subscription, Lark requires the daemon to be running so it can detect the WebSocket connection.
 
+### 4. Create a Group and Start Chatting
+
+1. Create a **topic-enabled group** in Lark
+2. Open group settings → Group Bots → add the bot you just created
+3. Send a message in the group — the bot responds automatically
+
+![Add bot to group](docs/setup/add-bot-to-group.png)
+
+### 5. Enable Boot-time Autostart (recommended)
+
+After confirming the bot can send/receive messages, run:
+
+```bash
+botmux autostart enable
+```
+
+This registers the daemon with your user init system (macOS launchd / Linux user systemd) — **no sudo needed**. It restarts automatically on reboot. See [CLI Commands § Autostart](#autostart) below.
+
 <details>
-<summary><b>Manual Open Platform config: permissions / redirect / publish (fallback)</b> —— botmux setup does these automatically (during the 2nd scan); expand only if auto-config failed or you want to verify manually</summary>
+<summary><b>Manual Open Platform config: create app / permissions / redirect / publish (fallback)</b> —— handled automatically by botmux setup during the 2nd scan; expand only if auto-config failed or you want to verify manually</summary>
 
 <br>
 
-### Step 4: Add Permissions
+**Create the app manually**: go to the [Lark Open Platform](https://open.larkoffice.com/app), create a "Custom App", copy **App ID / App Secret** from "Credentials & Basic Info", and in `botmux setup`'s "Create the bot" step choose `2` to paste them back.
 
-Run the copy-to-clipboard command setup printed, then go to "Permissions & Scopes" → "Batch Import/Export" and paste. Submit for review — visibility "only me" auto-approves.
+![Create App](docs/setup/create-app.png)
+
+**Add permissions**: run the copy-to-clipboard command setup printed, then go to "Permissions & Scopes" → "Batch Import/Export" and paste. Submit for review — visibility "only me" auto-approves.
 
 ![Permissions](docs/setup/permissions.png)
 
@@ -131,52 +149,27 @@ cat ~/.botmux/lark-scopes.json
 base64 -w0 < ~/.botmux/lark-scopes.json | awk 'BEGIN{printf "\033]52;c;"}{printf "%s",$0}END{printf "\a"}'
 ```
 
-> Scan-created PersonalAgent apps have `im.message.receive_v1` + `card.action.trigger` subscribed and the bot capability enabled out of the box, per botmux maintainer testing. Lark hasn't documented this as stable behavior, so **if the bot receives no messages at all after setup**, see "Step 8: Troubleshoot — bot not receiving messages" below for a manual fallback.
+**Add redirect URL (optional)**: if you plan to use `/login` inside Lark to let botmux act on your behalf for docs / calendar / wiki / sheets, add a redirect URL under "Security Settings" → "Redirect URL": `http://127.0.0.1:9768/callback`. Skip this if you only need bot messaging.
 
-### Step 5: Add Redirect URL (optional)
-
-If you plan to use `/login` inside Lark to let botmux act on your behalf for docs / calendar / wiki / sheets, add a redirect URL under "Security Settings" → "Redirect URL":
-
-```
-http://127.0.0.1:9768/callback
-```
-
-Skip this step if you only need bot messaging.
-
-### Step 6: Publish the App
-
-Go to "Version Management & Release", click "Create Version" and publish. Set availability to "Visible to me only" for automatic approval.
+**Publish**: go to "Version Management & Release", click "Create Version" and publish. Set availability to "Visible to me only" for automatic approval.
 
 ![Publish](docs/setup/publish.png)
 
 </details>
 
-### Step 7: Create a Group and Start Chatting
+<details>
+<summary><b>Troubleshoot — bot not receiving messages</b></summary>
 
-1. Create a **topic-enabled group** in Lark
-2. Go to Group Settings → Bots → Add the bot you just created
-3. Send a message in the group — the bot responds automatically
+<br>
 
-![Add bot to group](docs/setup/add-bot-to-group.png)
+PersonalAgent apps come with event subscription + bot capability configured by default, so normally you don't touch this. If the bot **receives no messages at all** (not even DMs) after following the steps above, verify these two:
 
-### Step 8: Troubleshoot — bot not receiving messages (fallback)
+- **Event subscription**: Open Platform → your app → Events & Callbacks → should subscribe to `im.message.receive_v1` + `card.action.trigger` (subscribed by default; add manually if missing). The delivery method must be "Receive events via long connection" (WebSocket), with the botmux daemon running.
+- **Bot capability**: Open Platform → your app → Features → Bot should be enabled (on by default); name/avatar are editable.
 
-PersonalAgent apps come with event subscriptions and bot capability pre-configured; in normal cases you don't touch this. If the bot **receives no messages at all** after setup (not even DMs), verify these two settings:
+Then restart the daemon: `botmux restart`.
 
-- **Event subscription**: Open Platform → your app → Events & Callbacks → should be subscribed to `im.message.receive_v1` + `card.action.trigger`. If missing, add them manually. Subscription mode must be "Receive via persistent connection" (WebSocket), and the botmux daemon must be running.
-- **Bot capability**: Open Platform → your app → Features → Bot should be enabled (it is by default). Adjust name/avatar if needed.
-
-After verifying, restart: `botmux restart`.
-
-### Step 9: Enable Boot-time Autostart (recommended)
-
-Once the bot is sending and receiving messages cleanly, run:
-
-```bash
-botmux autostart enable
-```
-
-This registers the daemon with your user's init system (launchd on macOS, user systemd on Linux). **No sudo required.** After a reboot — or after logging back in — the daemon comes up on its own. See [CLI Commands § Boot-time Autostart](#boot-time-autostart) below for the full reference.
+</details>
 
 ---
 
