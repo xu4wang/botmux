@@ -110,9 +110,9 @@ export function createCodexAdapter(pathOverride?: string): CliAdapter {
     id: 'codex',
     resolvedBin: bin,
 
-    buildArgs({ sessionId, resume, resumeSessionId, workingDir, model }) {
+    buildArgs({ sessionId, resume, resumeSessionId, workingDir, model, disableCliBypass }) {
       const baseArgs = [
-        '--dangerously-bypass-approvals-and-sandbox',
+        ...(!disableCliBypass ? ['--dangerously-bypass-approvals-and-sandbox'] : []),
         '--no-alt-screen',
       ];
       if (model && model.trim()) {

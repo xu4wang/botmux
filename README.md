@@ -530,6 +530,7 @@ botmux setup
     "name": "claude-main",
     "cliId": "claude-code",
     "model": "sonnet",
+    "disableCliBypass": true,
     "workingDir": "~/projects",
     "allowedUsers": ["alice@company.com"],
     "allowedChatGroups": ["oc_xxx_team"]
@@ -552,6 +553,7 @@ botmux setup
 | `cliId` | 否 | CLI 适配器，默认 `claude-code`（可选：`aiden`、`coco`、`codex`、`codex-app`、`cursor`、`gemini`、`opencode`、`antigravity`、`hermes`） |
 | `model` | 否 | 启动 CLI 时使用的模型名；留空走 CLI 默认。当前会注入到支持模型参数的适配器：`claude-code` / `codex` / `coco` / `cursor` / `gemini` / `opencode`；其它适配器会忽略该字段 |
 | `cliPathOverride` | 否 | CLI 入口的绝对路径，用于套 wrapper / router；典型场景：ccr、claude-w、aiden-x-claude 等自定义入口 |
+| `disableCliBypass` | 否 | 是否禁用 botmux 默认注入的 CLI bypass / 弱沙箱参数。未配置或 `false` 时保持兼容旧逻辑，botmux 会继续添加 `--yolo`、`--dangerously-*`、`--force`、`--permission-mode agentFull` 等参数；设为 `true` 时不再自动添加这些参数。如需自定义 approval/sandbox 策略，可通过 `cliPathOverride` 指向 wrapper 脚本自行传入 |
 | `backendType` | 否 | 会话后端：`pty` 或 `tmux`（默认自动检测） |
 | `workingDir` | 否 | 默认工作目录，支持逗号分隔多个目录。新话题的 repo 选择卡片会**从该目录自身向下**递归查找 git 仓库（最多 3 层），不再向上扫父目录：指向仓库集合根目录（如 `~/projects`）即列出其下所有仓库，指向单个仓库则只列该仓库（及其 linked worktrees） |
 | `defaultWorkingDir` | 否 | 单仓库默认目录：新话题在无 oncall 绑定 / 无同群兄弟 session 时直接进入该目录，跳过 repo 选择卡片。`/cd <path>` 仍可临时切换；下一个新话题回到该默认值。**与 `defaultOncall` 的区别**：不写 `oncallChats`、不修改 `canTalk`/`canOperate` 权限模型 |

@@ -119,14 +119,14 @@ export function createCocoAdapter(pathOverride?: string): CliAdapter {
     id: 'coco',
     resolvedBin: bin,
 
-    buildArgs({ sessionId, resume, model }) {
+    buildArgs({ sessionId, resume, model, disableCliBypass }) {
       const args: string[] = [];
       if (resume) {
         args.push('--resume', sessionId);
       } else {
         args.push('--session-id', sessionId);
       }
-      args.push('--yolo');
+      if (!disableCliBypass) args.push('--yolo');
       if (model && model.trim()) {
         // CoCo expects nested key path for model override. `model=...` exits 1,
         // while `model.name=...` starts correctly.

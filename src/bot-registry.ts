@@ -46,6 +46,11 @@ export interface BotConfig {
    * `modelChoices` for the curated candidates surfaced in `botmux setup`.
    */
   model?: string;
+  /**
+   * If true, botmux does not add CLI-default approval/sandbox bypass flags
+   * such as --yolo or --dangerously-*. Missing/false preserves legacy behavior.
+   */
+  disableCliBypass?: boolean;
   backendType?: 'pty' | 'tmux';
   workingDir?: string;
   workingDirs?: string[];
@@ -467,6 +472,7 @@ export function parseBotConfigsFromText(jsonText: string): BotConfig[] {
       model: typeof entry.model === 'string' && entry.model.trim()
         ? entry.model.trim()
         : undefined,
+      disableCliBypass: entry.disableCliBypass === true,
       backendType: entry.backendType,
       workingDir: workingDirs?.[0] ?? entry.workingDir,
       workingDirs,

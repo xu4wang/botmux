@@ -47,6 +47,8 @@ export interface CliAdapter {
      *  `--model` flag (or equivalent) inject it here; adapters whose CLI has no
      *  such concept simply ignore the field. Empty / undefined → CLI default. */
     model?: string;
+    /** When true, do not add adapter-default flags that bypass CLI approvals or disable sandboxing. */
+    disableCliBypass?: boolean;
   }): string[];
 
   /** When true, the adapter passes the initial prompt via CLI args (e.g. -i).

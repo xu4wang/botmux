@@ -425,6 +425,7 @@ When `~/.botmux/bots.json` already exists, `botmux setup` can add a bot, reconfi
     "name": "claude-main",
     "cliId": "claude-code",
     "model": "sonnet",
+    "disableCliBypass": true,
     "workingDir": "~/projects",
     "allowedUsers": ["alice@company.com"],
     "allowedChatGroups": ["oc_xxx_team"]
@@ -447,6 +448,7 @@ When `~/.botmux/bots.json` already exists, `botmux setup` can add a bot, reconfi
 | `cliId` | No | CLI adapter, defaults to `claude-code` (options: `aiden`, `coco`, `codex`, `codex-app`, `cursor`, `gemini`, `opencode`, `antigravity`, `hermes`) |
 | `model` | No | Model name used when spawning the CLI. Currently honored by: `claude-code`, `codex`, `coco`, `cursor`, `gemini`, `opencode`; other adapters ignore the field. Leave empty to use the CLI default. `botmux setup` proposes per-CLI candidates plus a free-form Other option. |
 | `cliPathOverride` | No | Absolute path to the CLI entry, for wrappers / routers; typical use: `ccr`, `claude-w`, `aiden-x-claude`, etc. |
+| `disableCliBypass` | No | Whether to disable botmux's default CLI bypass / weak-sandbox flag injection. Missing or `false` keeps the legacy behavior: botmux still adds flags such as `--yolo`, `--dangerously-*`, `--force`, or `--permission-mode agentFull`. When `true`, botmux stops adding those flags. For a custom approval/sandbox policy, point `cliPathOverride` at a wrapper script that passes the desired CLI-specific args |
 | `backendType` | No | Session backend: `pty` or `tmux` (auto-detected by default) |
 | `workingDir` | No | Default working directory, supports comma-separated. The new-topic repo-select card scans for git repos **from this directory downward** (recursive, up to 3 levels), no longer climbing to the parent: point it at a repos root (e.g. `~/projects`) to list every repo beneath it, or at a single repo to list just that repo (and its linked worktrees) |
 | `defaultWorkingDir` | No | Single-repo default: new topics with no oncall binding and no peer-session inheritance spawn directly here, skipping the repo-select card. `/cd <path>` still switches mid-session; the next new topic falls back to this default. **Difference from `defaultOncall`:** does NOT write `oncallChats` and does NOT change the `canTalk` / `canOperate` permission model |
