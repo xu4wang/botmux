@@ -54,6 +54,7 @@ Compared to OpenClaw-style approaches built on Agent SDKs:
 | Multi-CLI Support | 6 CLIs, switch with one config (Claude Code / Codex / Cursor / Gemini / OpenCode / Antigravity) | Tied to a single SDK, cannot switch CLIs |
 | Web Terminal | Interactive full terminal, mobile shortcut toolbar, phone/desktop/Lark tri-screen sync | Usually web chat UI or read-only output |
 | Multi-Bot Collaboration | Multiple bots in same group via @mention routing, isolated processes, different CLIs sparring | Usually single bot |
+| Multi-Topic Collaboration | A lead bot auto-splits the task, opens multiple topics, and dispatches several bots to work in parallel (coder + reviewer), with a Lark task list as the shared progress board | Usually manual one-by-one assignment, no unified progress board |
 | Terminal Access | tmux attach directly into the CLI process, same as local dev experience | No direct terminal access |
 | Installation | `npm install -g botmux`, 5-min Lark setup | Easy to install, but more configuration needed |
 
@@ -196,6 +197,34 @@ On mobile/tablet, a floating shortcut toolbar provides Esc, Ctrl+C, Tab, arrow k
 ### Multi-Bot Collaboration
 
 Run multiple Lark bots on a single machine, each mapped to a different CLI. In the same group chat, messages are routed via @mention — each bot gets its own isolated CLI process. With a single bot in the group, it responds automatically without @. In a regular (non-topic) group, `@<bot1> @<bot2> /t xxx` spawns one independent thread per mentioned bot anchored at the same message. Send `@<bot1> @<bot2> /introduce` once so they register each other's open_id; afterwards each bot can explicitly @-mention the others from within its own session (see [§ Slash Commands](#slash-commands)).
+
+### Multi-Topic Collaboration
+
+The next level up from "Multi-Bot Collaboration": a lead bot (the **orchestrator**) splits one large task into multiple **sub-projects**, **automatically opens several topics** in the group, dispatches a team of bots into each topic to drive it in parallel (commonly "one writes the code + one reviews"), uses a single **Lark task list** as the shared progress board everyone reads from, and finally collects the results and aggregates them. A single regular group becomes a parallel workbench, and you can see overall progress at a glance from the Lark task panel.
+
+**How it runs** — the `botmux-orchestrate` skill walks the orchestrator through the full flow:
+
+> Split into sub-projects → propose a "sub-project ↔ bot" assignment → send it to you for **a single approval** (confirmable via card) → create the Lark task list → open each topic and dispatch → collect the reports → aggregate
+
+Under the hood, dispatching is done by `botmux dispatch`: it seeds a topic in the group and @-mentions the chosen bots, spawning an independent session for each.
+
+```bash
+botmux dispatch --title "Implement login module" \
+  --bot "ou_xxx:Alice:coder" --bot "ou_yyy:Bob:reviewer" \
+  --repo /path/to/repo --brief-file /tmp/brief.md
+```
+
+- `--repo <dir>` — presets each sub-bot's working directory (absolute path, must exist on the sub-bot's machine), so the session spawns straight into it and **skips the "select repo" card**.
+- `--standby` — **must be paired with `--repo`** (and cannot be combined with `--into`): sends `/repo` once to bring the bot up in the given directory on standby without a brief; activate it later with `--into ... --brief(-file)`.
+- `--into <topic root>` — return to an existing topic and append one message (activate standby bots / add coordination); still requires `--bot`, and outside standby mode must carry `--brief` or `--brief-file`.
+
+When a sub-bot finishes, it reports progress/completion back with `botmux report` from inside its own sub-topic. This routes the report into the orchestrator's **own** session (which still holds full context) instead of @-mentioning the orchestrator inside the sub-topic — where it has no session and the @ would spawn a fresh, context-less one. The orchestrator then aggregates the collected reports.
+
+**Collaboration boundaries:**
+
+- **"Own" bots in the same deployment trust each other** — the orchestrator can run operate-level commands like `/repo` directly against them (same conversation permissions as your own bots). Authorization for external bots is two-tiered: `/grant @bot` only grants "talk / be spawned by chat-scope" permission (talk-only — it does not touch `allowedUsers` and cannot run operate-level commands); to let an external bot run operate-level commands like `/repo`, add it to `allowedUsers` (or grant operate-level access later). `/introduce` only handles discovery / registering open_id and **grants no permissions**.
+- Sub-bots must already be in the group and @-mentionable (i.e. have the `im:message.group_at_msg.include_bot` permission).
+- A single topic can hold multiple bots, and they @-mention each other to collaborate within the topic (e.g. the coder @-mentions the reviewer once the code is done).
 
 ### Tmux Persistence
 
@@ -498,6 +527,8 @@ When `~/.botmux/bots.json` already exists, `botmux setup` can add a bot, reconfi
 | `botmux autostart disable` | Unregister boot-time autostart |
 | `botmux autostart status` | Show autostart status |
 | `botmux dashboard` | Print a fresh Web Dashboard URL (rotates the token; previous URL becomes invalid) |
+| `botmux dispatch` | Open a sub-project topic and @-mention the chosen bots to spawn their sessions (the dispatch command for [Multi-Topic Collaboration](#multi-topic-collaboration); supports `--title`, repeatable `--bot`, `--brief` / `--brief-file`, `--repo`, `--standby`, `--into`, with `--chat-id` / `--session-id` as advanced overrides; see `botmux dispatch --help`) |
+| `botmux report` | From inside a dispatched sub-project session, report progress/completion back to the orchestrator's own session ([Multi-Topic Collaboration](#multi-topic-collaboration); routes the report into the orchestrator's context-rich thread instead of @-mentioning it in the sub-topic; `--content-file` to read the report from a file; see `botmux report --help`) |
 
 ### Boot-time Autostart
 
