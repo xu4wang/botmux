@@ -183,7 +183,9 @@ export function findSubBotTopic(input: {
   registry: Record<string, { orchChatId?: string; bots?: string[] }>;
   activeSeeds: Set<string>;
 }): string | null {
-  for (const [seed, entry] of Object.entries(input.registry)) {
+  // Newest-first: a bot dispatched into several topics over time is, right now,
+  // working in the most-recent one — point there, not at a stale earlier topic.
+  for (const [seed, entry] of Object.entries(input.registry).reverse()) {
     if (entry.orchChatId && entry.orchChatId !== input.chatId) continue;
     if (!input.activeSeeds.has(seed)) continue;
     if ((entry.bots ?? []).includes(input.mentionOpenId)) return seed;

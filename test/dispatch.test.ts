@@ -167,6 +167,15 @@ describe('findSubBotTopic', () => {
     expect(findSubBotTopic({ mentionOpenId: 'ou_other', chatId: 'oc_main', registry, activeSeeds })).toBeNull();
   });
 
+  it('prefers the most-recently dispatched active topic for the same bot', () => {
+    const reg = {
+      'om_old': { orchChatId: 'oc_main', bots: ['ou_coder'] },
+      'om_new': { orchChatId: 'oc_main', bots: ['ou_coder'] },
+    };
+    const active = new Set(['om_old', 'om_new']);
+    expect(findSubBotTopic({ mentionOpenId: 'ou_coder', chatId: 'oc_main', registry: reg, activeSeeds: active })).toBe('om_new');
+  });
+
   it('does not fire across a different chat', () => {
     // ou_coder is also in seedC, but that topic is in oc_else, not oc_main
     expect(findSubBotTopic({ mentionOpenId: 'ou_coder', chatId: 'oc_zzz', registry, activeSeeds })).toBeNull();
