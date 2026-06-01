@@ -26,6 +26,7 @@ import { createInterface } from 'node:readline';
 import { createRequire } from 'node:module';
 import { createHmac, randomBytes } from 'node:crypto';
 import { validateWorkingDir } from './core/working-dir.js';
+import { parseDispatchBotSpec, buildDispatchMessages, buildRepoPrimeText, buildReportContent, eligibleAutoMentionAliases, offTopicSubBotTopic } from './core/dispatch.js';
 import { enableAutostart, disableAutostart, autostartStatus, refreshAutostart } from './autostart.js';
 import { tmuxEnv } from './setup/ensure-tmux.js';
 import { writeBotsJsonAtomic as writeBotsAtomic } from './setup/bots-store.js';
@@ -1462,6 +1463,7 @@ interface SessionData {
   webPort?: number;
   larkAppId?: string;
   ownerOpenId?: string;
+  creatorOpenId?: string;
   lastCallerOpenId?: string;
   /** Chat-scope quote chain — see Session.quoteTargetId in types.ts. */
   quoteTargetId?: string;
@@ -2294,6 +2296,7 @@ botmux v${getVersion()} — IM ↔ AI 编程 CLI 桥接
        --card | --text                 强制卡片 / 纯文本（默认按 md 语法自动判断）
        --top-level                     发顶层消息（不回复进当前话题）
        --chat-id <oc_xxx>              指定目标群（默认当前话题所在群）
+       --anyway                        跳过「@ 到活跃子 bot」护栏强发（见下）
     @ 硬门：每条回复须三选一 --mention/--mention-back/--no-mention，否则报错不发。
     按内容价值选：有实质结论要对方看/确认/决策→--mention-back(或--mention点名)；
     纯记录/低优先级进度/简短确认→--no-mention；没信息量的"收到"不如不发。
@@ -2797,7 +2800,7 @@ async function cmdSend(rest: string[]): Promise<void> {
     if (!existsSync(contentFile)) { console.error(`文件不存在: ${contentFile}`); process.exit(1); }
     content = readFileSync(contentFile, 'utf-8');
   } else {
-    const pos = positionals(rest, ['--card', '--text', '--top-level', '--no-quote', '--mention-back', '--no-mention']);
+    const pos = positionals(rest, ['--card', '--text', '--top-level', '--no-quote', '--mention-back', '--no-mention', '--anyway']);
     if (pos.length > 0) {
       content = pos.join(' ');
     } else {
@@ -2862,6 +2865,49 @@ async function cmdSend(rest: string[]): Promise<void> {
   // reply_in_thread, otherwise Lark would force every reply into a fresh
   // topic — defeating the whole point of chat-scope routing.
   const isChatScope = s.scope === 'chat';
+
+  // ── Footgun guard: orchestrator → sub-bot ──
+  // A dispatched sub-bot's session lives in its sub-topic; @-ing it from the main
+  // chat spawns a fresh, context-less one. The check is computed ONCE and applied
+  // at BOTH mention sources: explicit --mention/--mention-back (blocked here) AND
+  // the prose @Name auto-injection further down (dropped there) — so a prose
+  // `@OtherSubBot` can't slip past after this explicit guard already ran.
+  let dispatchReg: Record<string, { orchChatId?: string; bots?: string[] }> = {};
+  try {
+    const regPath = join(resolveDataDir(), 'orchestrate-dispatch.json');
+    if (existsSync(regPath)) dispatchReg = JSON.parse(readFileSync(regPath, 'utf-8'));
+  } catch { /* no/!corrupt registry → no guard */ }
+  const dispatchActiveSeeds = new Set<string>();
+  if (Object.keys(dispatchReg).length > 0) {
+    for (const sess of loadSessions().values()) {
+      if (sess.status === 'active' && sess.scope !== 'chat' && sess.rootMessageId) {
+        dispatchActiveSeeds.add(sess.rootMessageId);
+      }
+    }
+  }
+  // Sub-topic seed if `openId` is a dispatched sub-bot in an active topic that is
+  // NOT reachable in the current conversation; else null. The bot I'm replying to
+  // here (quoteTargetSenderOpenId) is reachable, so it's never treated as off-topic.
+  const offTopicSubBotSeed = (openId: string): string | null =>
+    offTopicSubBotTopic({ mentionOpenId: openId, quoteTargetSenderOpenId: s.quoteTargetSenderOpenId, chatId: targetChatId, registry: dispatchReg, activeSeeds: dispatchActiveSeeds });
+  // Explicit --mention / --mention-back of an off-topic sub-bot → block + point to
+  // the right command (--anyway overrides). Prose @Name injection is filtered
+  // (dropped, not blocked) at its own site below.
+  if (!rest.includes('--anyway')) {
+    for (const m of mentions) {
+      const seed = offTopicSubBotSeed(m.open_id);
+      if (seed) {
+        console.error(
+          `⚠️ ${m.open_id}${m.name ? `（${m.name}）` : ''} 是 botmux dispatch 派进子话题 ${seed} 的子 bot——\n` +
+          `它的会话在那条子话题里：在主群 @ 它收不到，反而会另起一个无上下文的新会话。\n` +
+          `要跟它说，把消息发进它的子话题：\n` +
+          `  botmux dispatch --into ${seed} --bot ${m.open_id} --brief "..."\n` +
+          `（确属新会话/有意为之，加 --anyway 强发。）`);
+        process.exit(2);
+      }
+    }
+  }
+
   // Oncall addressing only meaningful for replies inside the session's own
   // chat — skip when publishing top-level or to a different chat. Treat
   // oncall as chat-level: in multi-daemon setups this session's bot may not
@@ -2963,10 +3009,28 @@ async function cmdSend(rest: string[]): Promise<void> {
           .filter((name): name is string => !!name)
           .map(name => name.toLowerCase()),
       );
+      // Bots actively in THIS conversation (thread root for thread-scope, chat for
+      // chat-scope). Used to gate the type-generic `cliId` alias so prose "@codex"
+      // resolves to the codex bot collaborating HERE, not every same-type bot
+      // (the fan-out that pulled all Codex-named bots into a topic). See
+      // eligibleAutoMentionAliases.
+      const convoBotAppIds = new Set<string>();
+      for (const sess of loadSessions().values()) {
+        if (sess.status !== 'active' || !sess.larkAppId) continue;
+        const here = isChatScope
+          ? sess.chatId === s.chatId
+          : (!!s.rootMessageId && sess.rootMessageId === s.rootMessageId);
+        if (here) convoBotAppIds.add(sess.larkAppId);
+      }
       for (const entry of sortedEntries) {
         if (!entry.botName || entry.larkAppId === appId) continue;
-        const names = [entry.botName, entry.cliId]
-          .filter((name): name is string => !!name && !selfAliases.has(name.toLowerCase()));
+        const names = eligibleAutoMentionAliases({
+          botName: entry.botName,
+          cliId: entry.cliId ?? undefined,
+          larkAppId: entry.larkAppId ?? undefined,
+          selfAliases,
+          convoBotAppIds,
+        });
         for (const name of names) {
           const escName = name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
           // Boundary: lookbehind blocks only ASCII word chars (so `user@Claude`
@@ -2986,6 +3050,16 @@ async function cmdSend(rest: string[]): Promise<void> {
             break;
           }
           if (alreadyMentioned.has(senderScopedId)) break;
+          // Footgun guard at the auto-injection source: don't turn a prose
+          // `@OtherSubBot` into a real @ for a dispatched sub-bot that's off-topic
+          // here — that would spawn a context-less session in the main chat (the
+          // explicit guard above only saw --mention/--mention-back). Drop the
+          // injection (don't block the whole send); --anyway forces it through.
+          const injOffSeed = rest.includes('--anyway') ? null : offTopicSubBotSeed(senderScopedId);
+          if (injOffSeed) {
+            console.error(`[botmux send] 跳过正文 @${entry.botName} 自动注入：它是 dispatch 派进子话题 ${injOffSeed} 的子 bot、不在本会话——避免在主群另起无上下文会话（要强发加 --anyway）。`);
+            break;
+          }
           mentions.push({ open_id: senderScopedId, name: entry.botName });
           alreadyMentioned.add(senderScopedId);
           break;
@@ -3190,6 +3264,306 @@ async function cmdSend(rest: string[]): Promise<void> {
     }));
   } catch (err: any) {
     console.error(`发送失败: ${err.message}`);
+    process.exit(1);
+  }
+}
+
+// ─── Dispatch subcommand (Phase 0: open a sub-project thread + assign bots) ───
+
+async function cmdDispatch(rest: string[]): Promise<void> {
+  if (rest.includes('--help') || rest.includes('-h')) {
+    console.log(`botmux dispatch — 开子项目话题、把 bot 拉进去协作（含 repo 预设 / 待命 / 追加）
+
+用法:
+  新开话题派活:
+    botmux dispatch --title "子项目标题" --bot <open_id[:名字[:角色]]> [--bot ...] \\
+        [--brief "简报" | --brief-file <path>] [--repo <工作目录>] [--standby]
+  往已有话题追加（激活待命 bot / 追加协调）:
+    botmux dispatch --into <话题根消息id> --bot <spec> [--bot ...] (--brief ... | --brief-file ...)
+
+说明:
+  新开话题: 发一条顶层「子项目」种子消息，在它线程里把 bot @ 进来各起独立会话。
+  --repo:   先用 /repo 给每个子 bot 定好工作目录——spawn 时不弹「选仓库」卡、不用手点。
+  --standby: 配合 --repo——只把 bot 拉起来定好目录待命（不派简报），之后用 --into 派具体任务。
+  --into:   不建种子，直接回到已有话题线程 @ bot 追加一条。
+  返回 JSON（含 seedMessageId / threadRootId），供编排者登记 子项目↔话题。
+
+选项:
+  --title <t>           子项目标题（新开话题时必填）
+  --bot <spec>          指派的 bot，可重复；spec = open_id[:名字[:角色]]
+  --brief <text>        子项目简报 / 追加内容
+  --brief-file <path>   从文件读取简报
+  --repo <path>         预设子 bot 工作目录（绝对路径，需在子 bot 所在机器上存在）
+  --standby             仅 --repo 待命，不派简报
+  --into <root_id>      回到已有话题线程追加（与 --title/种子互斥）
+  --chat-id <id>        覆盖目标群（默认当前会话所在群）
+  --session-id <id>     指定来源会话（默认自动推断）`);
+    return;
+  }
+
+  process.env.SESSION_DATA_DIR ??= resolveDataDir();
+  const sessionIdArg = argValue(rest, '--session-id');
+  const title = argValue(rest, '--title') ?? '';
+  const briefFile = argValue(rest, '--brief-file');
+  const overrideChatId = argValue(rest, '--chat-id');
+  const repo = argValue(rest, '--repo');
+  const intoRoot = argValue(rest, '--into');
+  const standby = rest.includes('--standby');
+  const botSpecs = argValues(rest, '--bot');
+
+  let brief = argValue(rest, '--brief') ?? '';
+  if (briefFile) {
+    if (!existsSync(briefFile)) { console.error(`文件不存在: ${briefFile}`); process.exit(1); }
+    brief = readFileSync(briefFile, 'utf-8');
+  }
+
+  // Append the report-back protocol so the dispatched sub-bot reports via
+  // `botmux report` (which routes to the orchestrator's OWN session) rather than
+  // @-ing the orchestrator in its sub-topic — which has no orchestrator session
+  // and would spawn a fresh, context-less one. Skipped for --standby (no brief).
+  if (brief.trim()) {
+    brief = brief.trimEnd() +
+      '\n\n— 完成回报 —\n' +
+      '干完后在本话题运行 `botmux report "子项目完成 + 产出位置/摘要"` 把结果回报给主编排会话；' +
+      '不要在本话题 @ 主bot（那会另起一个没有上下文的新会话）。';
+  }
+
+  // ── Flag validation ──
+  if (botSpecs.length === 0) {
+    console.error('至少要用 --bot 指派一个 bot。用法见 botmux dispatch --help');
+    process.exit(1);
+  }
+  if (standby && !repo) {
+    console.error('--standby 需要配合 --repo（先定好工作目录把 bot 拉起待命）。');
+    process.exit(1);
+  }
+  if (standby && intoRoot) {
+    console.error('--standby 与 --into 不能同用。');
+    process.exit(1);
+  }
+  if (!standby && !brief.trim()) {
+    console.error('缺少简报。用 --brief 或 --brief-file 指定（仅 --standby 模式可省略）。');
+    process.exit(1);
+  }
+  if (!intoRoot && !title.trim()) {
+    console.error('新开话题需要 --title。往已有话题追加请用 --into <root_id>。');
+    process.exit(1);
+  }
+
+  let bots;
+  try {
+    bots = botSpecs.map(parseDispatchBotSpec);
+  } catch (err: any) {
+    console.error(`--bot 解析失败: ${err.message}`);
+    process.exit(1);
+  }
+
+  let built;
+  try {
+    built = buildDispatchMessages({ title: title.trim() || '子项目', brief, bots });
+  } catch (err: any) {
+    console.error(`dispatch 构建失败: ${err.message}`);
+    process.exit(1);
+  }
+
+  const sid = sessionIdArg ?? findAncestorSessionId();
+  if (!sid) {
+    console.error('无法推断 session-id。请在 Lark 话题内的 CLI 会话中运行，或传 --session-id <id>。');
+    process.exit(1);
+  }
+  const sessions = loadSessions();
+  const s = sessions.get(sid);
+  if (!s) { console.error(`未找到 session ${sid}`); process.exit(1); }
+  if (!s.larkAppId) { console.error(`session ${sid} 缺少 larkAppId`); process.exit(1); }
+
+  const targetChatId = overrideChatId ?? s.chatId;
+  if (!targetChatId) { console.error(`session ${sid} 缺少 chatId，且未提供 --chat-id`); process.exit(1); }
+
+  const { registerBot, loadBotConfigs } = await import('./bot-registry.js');
+  try { for (const cfg of loadBotConfigs()) registerBot(cfg); } catch { /* */ }
+  const { sendMessage, replyMessage } = await import('./im/lark/client.js');
+  const appId = s.larkAppId!;
+  const briefJson = JSON.stringify({ zh_cn: { title: '', content: built.threadContent } });
+
+  try {
+    // --into: append into an existing thread (activate standby bots / coordinate).
+    if (intoRoot) {
+      const kickoffId = await replyMessage(appId, intoRoot, briefJson, 'post', true);
+      console.log(JSON.stringify({
+        success: true, mode: 'into', threadRootId: intoRoot,
+        kickoffMessageId: kickoffId, chatId: targetChatId, bots: built.mentionedOpenIds,
+      }));
+      return;
+    }
+
+    // New-thread mode.
+    // 1. Seed (thread root) — top-level header; gives the thread something to hang off.
+    const seedId = await sendMessage(appId, targetChatId, built.seedText, 'text');
+
+    // Record the orchestrator's coords for this sub-topic, keyed by the seed
+    // (which becomes every dispatched sub-bot's session.rootMessageId). The
+    // sub-bot's `botmux report` looks this up to route its report back into the
+    // orchestrator's OWN session. Lives in the shared data dir so every bot's
+    // daemon (one-per-bot) can read it. Best-effort — report-back degrades to a
+    // clear error if absent.
+    try {
+      const regPath = join(resolveDataDir(), 'orchestrate-dispatch.json');
+      let reg: Record<string, unknown> = {};
+      try { if (existsSync(regPath)) reg = JSON.parse(readFileSync(regPath, 'utf-8')); } catch { /* corrupt → reset */ }
+      reg[seedId] = {
+        orchRoot: s.rootMessageId ?? '',
+        orchChatId: s.chatId,
+        orchScope: s.scope ?? 'thread',
+        orchAppId: s.larkAppId,
+        title: title.trim(),
+        bots: built.mentionedOpenIds,
+      };
+      writeFileSync(regPath, JSON.stringify(reg, null, 2));
+    } catch { /* registry is best-effort */ }
+
+    // 2. Optional repo prime — a plain TEXT message "@bot /repo <path>" (like a
+    //    human types) so each sub-bot spawns idle in that dir (no repo-select
+    //    card). Text goes through resolveMentions cleanly; a structured post
+    //    drops the /repo arg in the live event. `/repo` is an existing command,
+    //    so this needs no change on the receiving bot's daemon.
+    let primeId: string | undefined;
+    if (repo) {
+      const prime = buildRepoPrimeText({ path: repo, bots });
+      primeId = await replyMessage(appId, seedId, prime.text, 'text', true);
+    }
+
+    // 3. Brief kickoff — reply_in_thread @-ing the bots so each spawns its own
+    //    thread-scoped session. Skipped in --standby (bots wait for a later --into).
+    let kickoffId: string | undefined;
+    if (!standby) {
+      kickoffId = await replyMessage(appId, seedId, briefJson, 'post', true);
+    }
+
+    console.log(JSON.stringify({
+      success: true,
+      mode: standby ? 'standby' : 'dispatch',
+      seedMessageId: seedId,
+      threadRootId: seedId,
+      primeMessageId: primeId,
+      kickoffMessageId: kickoffId,
+      repo: repo ?? null,
+      chatId: targetChatId,
+      bots: built.mentionedOpenIds,
+    }));
+  } catch (err: any) {
+    console.error(`dispatch 失败: ${err.message}`);
+    process.exit(1);
+  }
+}
+
+/**
+ * `botmux report` — a dispatched sub-bot reports progress/completion back to the
+ * orchestrator that dispatched it.
+ *
+ * In 多话题协作模式 the sub-bot lives in its own sub-topic, where the orchestrator
+ * has no session; @-ing the orchestrator there would spawn a fresh, context-less
+ * one (申晗's #1 bug). Instead this routes the report INTO the orchestrator's own
+ * thread (recorded by `botmux dispatch` in orchestrate-dispatch.json) and @-s the
+ * orchestrator there, so its existing, context-rich session is the one that wakes.
+ *
+ * Coords: orchestrator open_id = the sub-bot session's quoteTargetSenderOpenId
+ * (the dispatcher of the turn that opened this sub-topic); orchestrator thread =
+ * the registry entry keyed by this sub-bot's session.rootMessageId (== the seed).
+ */
+async function cmdReport(rest: string[]): Promise<void> {
+  if (rest.includes('--help') || rest.includes('-h')) {
+    console.log(`botmux report — 把子项目进展/完成回报给派活的主编排会话
+
+用法:
+  botmux report "子项目X 完成，产出在 …"
+  botmux report --content-file <path>
+
+说明:
+  「多话题协作模式」里你（子 bot）干完后不要在本话题 @ 主bot——本话题没有主bot的会话，
+  @ 会另起一个无上下文的新会话。本命令把回报发回主编排会话所在的话题、并 @ 主编排 bot，
+  使其带完整上下文继续聚合。仅在被 botmux dispatch 派活的子项目会话里可用。
+
+选项:
+  --content-file <path>  从文件读取回报内容
+  --session-id <id>      指定来源会话（默认自动推断）`);
+    return;
+  }
+
+  process.env.SESSION_DATA_DIR ??= resolveDataDir();
+  const sessionIdArg = argValue(rest, '--session-id');
+
+  let content = '';
+  const contentFile = argValue(rest, '--content-file');
+  if (contentFile) {
+    if (!existsSync(contentFile)) { console.error(`文件不存在: ${contentFile}`); process.exit(1); }
+    content = readFileSync(contentFile, 'utf-8');
+  } else {
+    const pos = positionals(rest);
+    content = pos.length ? pos.join(' ') : await readStdin();
+  }
+  if (!content.trim()) {
+    console.error('没有回报内容。用法: botmux report "子项目X 完成 + 产出位置"');
+    process.exit(1);
+  }
+
+  const sid = sessionIdArg ?? findAncestorSessionId();
+  if (!sid) {
+    console.error('无法推断 session-id。请在被 dispatch 派活的会话里运行，或传 --session-id <id>。');
+    process.exit(1);
+  }
+  const sessions = loadSessions();
+  const s = sessions.get(sid);
+  if (!s) { console.error(`未找到 session ${sid}`); process.exit(1); }
+  if (!s.larkAppId) { console.error(`session ${sid} 缺少 larkAppId`); process.exit(1); }
+
+  // Resolve the orchestrator coords: its thread/chat from the dispatch registry
+  // (keyed by this sub-bot's thread root), its open_id from this session.
+  const regPath = join(resolveDataDir(), 'orchestrate-dispatch.json');
+  let reg: Record<string, any> = {};
+  try { if (existsSync(regPath)) reg = JSON.parse(readFileSync(regPath, 'utf-8')); } catch { /* */ }
+  const entry = s.rootMessageId ? reg[s.rootMessageId] : undefined;
+  // The orchestrator's open_id (sub-bot-app-scoped) is whoever created this
+  // session = the dispatcher. Prefer `creatorOpenId` (set on EVERY creation path,
+  // incl. a no-`/repo` foreign-bot kickoff auto-create where ownerOpenId is
+  // nulled), then `ownerOpenId` (older sessions / `/repo` prime). NEVER
+  // quoteTargetSenderOpenId alone: it tracks the *last* sender who @-ed this
+  // sub-bot, so in a coder+reviewer topic it drifts to the reviewer (observed
+  // live: the coder's report @-ed the reviewer, not the orchestrator). Keep it as
+  // a last-ditch fallback only for pre-existing sessions that predate both fields.
+  const orchOpenId = s.creatorOpenId ?? s.ownerOpenId ?? s.quoteTargetSenderOpenId;
+  if (!entry || !orchOpenId) {
+    console.error(
+      '当前会话不是被 botmux dispatch 派活的子项目会话（缺少主编排坐标）。\n' +
+      '若确需回报，请改用 `botmux send` 或显式 @ 对应的人/ bot。');
+    process.exit(1);
+  }
+
+  const { registerBot, loadBotConfigs } = await import('./bot-registry.js');
+  try { for (const cfg of loadBotConfigs()) registerBot(cfg); } catch { /* */ }
+  const { sendMessage, replyMessage } = await import('./im/lark/client.js');
+  const appId = s.larkAppId!;
+
+  const paras = buildReportContent({ orchOpenId, content });
+  const postJson = JSON.stringify({ zh_cn: { title: '', content: paras } });
+
+  try {
+    let msgId: string;
+    if (entry.orchScope === 'chat' || !entry.orchRoot) {
+      // Orchestrator runs at chat scope (普通群整群一个会话) → post to the chat.
+      msgId = await sendMessage(appId, entry.orchChatId, postJson, 'post');
+    } else {
+      // Orchestrator lives in its own thread → reply into it so its existing
+      // session (anchored on orchRoot) is the one that receives the report.
+      msgId = await replyMessage(appId, entry.orchRoot, postJson, 'post', true);
+    }
+    console.log(JSON.stringify({
+      success: true,
+      reportedTo: entry.orchRoot || entry.orchChatId,
+      orchestrator: orchOpenId,
+      messageId: msgId,
+    }));
+  } catch (err: any) {
+    console.error(`report 失败: ${err.message}`);
     process.exit(1);
   }
 }
@@ -3950,6 +4324,8 @@ switch (command) {
     break;
   }
   case 'send':     await cmdSend(process.argv.slice(3)); break;
+  case 'dispatch': await cmdDispatch(process.argv.slice(3)); break;
+  case 'report': await cmdReport(process.argv.slice(3)); break;
   case 'create-group': await cmdCreateGroup(process.argv.slice(3)); break;
   case 'bots':     await cmdBots(process.argv[3] ?? 'list', process.argv.slice(4)); break;
   case 'history':  await cmdHistory(process.argv.slice(3)); break;

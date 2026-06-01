@@ -30,6 +30,13 @@ export interface Session {
   webPort?: number;
   larkAppId?: string;
   ownerOpenId?: string;       // topic creator's open_id — for @mention in replies
+  /** open_id of whoever created this session (the first sender), app-scoped to
+   *  this bot. UNLIKE ownerOpenId, this is set even for bot-started (foreign-bot)
+   *  sessions and is NEVER overwritten by later activity — so it stably points at
+   *  the dispatch orchestrator for `botmux report` even when there is no `/repo`
+   *  prime (foreign-bot auto-create nulls ownerOpenId) and the reply-chain
+   *  quoteTargetSenderOpenId has drifted to a peer reviewer. */
+  creatorOpenId?: string;
   /** Lark `union_id` of the session owner. Stable across apps within a tenant
    *  (unlike `ownerOpenId`, which is app-scoped: the same Lark user has a
    *  different `open_id` in each bot's namespace). Used by cross-daemon

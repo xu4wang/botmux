@@ -8,6 +8,7 @@ import { createGroupWithBots } from '../services/group-creator.js';
 import * as oncallStore from '../services/oncall-store.js';
 import * as brandStore from '../services/brand-store.js';
 import * as cardPrefsStore from '../services/card-prefs-store.js';
+import * as grantPrefsStore from '../services/grant-prefs-store.js';
 import * as chatFirstSeenStore from '../services/chat-first-seen-store.js';
 import * as scheduler from './scheduler.js';
 import { listActiveSessions, findActiveBySessionId, closeSession, getActiveSessionsRegistry, transferSession } from './worker-pool.js';
@@ -603,6 +604,7 @@ ipcRoute('GET', '/api/bot-default-oncall', async (_req, res) => {
   if (!cachedLarkAppId) return jsonRes(res, 503, { error: 'larkAppId_not_set' });
   const { defaultOncall, autoboundChats } = oncallStore.getBotDefaultOncall(cachedLarkAppId);
   const cardPrefs = cardPrefsStore.getBotCardPrefs(cachedLarkAppId);
+  const grantPrefs = grantPrefsStore.getBotGrantPrefs(cachedLarkAppId);
   jsonRes(res, 200, {
     larkAppId: cachedLarkAppId,
     botName: getBotName(),
@@ -615,6 +617,8 @@ ipcRoute('GET', '/api/bot-default-oncall', async (_req, res) => {
     autoStartOnGroupJoin: cardPrefs.autoStartOnGroupJoin,
     autoStartOnGroupJoinPrompt: cardPrefs.autoStartOnGroupJoinPrompt,
     autoStartOnNewTopic: cardPrefs.autoStartOnNewTopic,
+    restrictGrantCommands: grantPrefs.restrictGrantCommands,
+    messageQuotaDefaultLimit: grantPrefs.messageQuotaDefaultLimit,
   });
 });
 
@@ -642,6 +646,32 @@ ipcRoute('PUT', '/api/bot-card-prefs', async (req, res) => {
   if (Object.keys(patch).length === 0) return jsonRes(res, 400, { ok: false, error: 'no_valid_fields' });
 
   const r = await cardPrefsStore.updateBotCardPrefs(cachedLarkAppId, patch);
+  if (!r.ok) return jsonRes(res, 400, { ok: false, error: r.reason });
+  jsonRes(res, 200, { ok: true, ...r.prefs });
+});
+
+// Per-bot 授权偏好。Body 任意子集：
+//   • restrictGrantCommands: boolean       — 限制被授权人只能纯对话
+//   • messageQuotaDefaultLimit: number|null — 默认消息额度（null = 关闭，正整数 = 启用）
+ipcRoute('PUT', '/api/bot-grant-prefs', async (req, res) => {
+  if (!cachedLarkAppId) return jsonRes(res, 503, { error: 'larkAppId_not_set' });
+  let raw: unknown;
+  try { raw = await readJsonBody(req); }
+  catch { return jsonRes(res, 400, { ok: false, error: 'bad_json' }); }
+  // 顶层必须是对象：JSON `null` / 数字 / 字符串等都拒（null 解引用会抛 → 500）。
+  if (typeof raw !== 'object' || raw === null || Array.isArray(raw)) {
+    return jsonRes(res, 400, { ok: false, error: 'no_valid_fields' });
+  }
+  const body = raw as { restrictGrantCommands?: unknown; messageQuotaDefaultLimit?: unknown };
+
+  const patch: { restrictGrantCommands?: boolean; messageQuotaDefaultLimit?: number | null } = {};
+  if (typeof body.restrictGrantCommands === 'boolean') patch.restrictGrantCommands = body.restrictGrantCommands;
+  // null（含 JSON null）= 关闭默认额度；number = 设定（store 内再校验正整数）。
+  if (body.messageQuotaDefaultLimit === null) patch.messageQuotaDefaultLimit = null;
+  else if (typeof body.messageQuotaDefaultLimit === 'number') patch.messageQuotaDefaultLimit = body.messageQuotaDefaultLimit;
+  if (Object.keys(patch).length === 0) return jsonRes(res, 400, { ok: false, error: 'no_valid_fields' });
+
+  const r = await grantPrefsStore.updateBotGrantPrefs(cachedLarkAppId, patch);
   if (!r.ok) return jsonRes(res, 400, { ok: false, error: r.reason });
   jsonRes(res, 200, { ok: true, ...r.prefs });
 });

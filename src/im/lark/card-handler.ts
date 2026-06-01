@@ -10,7 +10,7 @@ import { canOperate } from './event-dispatcher.js';
 import { sendUserMessage, updateMessage, deleteMessage, replyMessage, sendMessage, sendEphemeralCard, getMessageDetail, isHumanOpenId } from './client.js';
 import { buildSessionCard, buildStreamingCard, buildTuiPromptCard, buildTuiPromptProcessingCard, buildTuiPromptResolvedCard, buildSessionClosedCard, buildGrantResultCard, buildGrantNotifyCard, getCliDisplayName, truncateContent } from './card-builder.js';
 import { addChatGrant, addGlobalGrant } from '../../services/grant-store.js';
-import { checkNonce, clearPending, markDenied } from './grant-pending.js';
+import { checkNonce, clearPending, markDenied, getPendingQuota } from './grant-pending.js';
 import { recordObservedBots } from '../../services/observed-bots-store.js';
 import {
   handleWorkflowApprovalAction,
@@ -172,12 +172,14 @@ export async function handleCardAction(data: CardActionData, deps: CardHandlerDe
     const names: string[] = Array.isArray(value.target_names) ? value.target_names : [];
     const idToName = new Map<string, string>();
     targets.forEach((tt, i) => idToName.set(tt, names[i] ?? ''));
+    // 额度挂在 pending 上（/grant @x N 解析所得；多目标共用同一额度）；clearPending 前先读出来。
+    const quota = getPendingQuota(larkAppId, grantChatId, targets[0]);
     const granted: string[] = [];
     const failed: Array<{ openId: string; reason: string }> = [];
     for (const tt of targets) {
       const res = kind === 'global'
-        ? await addGlobalGrant(larkAppId, tt)
-        : await addChatGrant(larkAppId, grantChatId, tt);
+        ? await addGlobalGrant(larkAppId, tt, quota)
+        : await addChatGrant(larkAppId, grantChatId, tt, quota);
       if (res.ok) { clearPending(larkAppId, grantChatId, tt); granted.push(tt); }
       else { failed.push({ openId: tt, reason: res.reason }); logger.warn(`Grant action "${value.action}" store failed for ${tt}: ${res.reason}`); }
     }
@@ -235,7 +237,7 @@ export async function handleCardAction(data: CardActionData, deps: CardHandlerDe
         logger.debug(`grant notify thread-mode probe failed, defaulting to thread reply: ${err}`);
       }
       try {
-        await replyMessage(larkAppId, cardMessageId, buildGrantNotifyCard(kind, target, loc), 'interactive', replyInThread);
+        await replyMessage(larkAppId, cardMessageId, buildGrantNotifyCard(kind, target, loc, quota), 'interactive', replyInThread);
       } catch (err) {
         logger.warn(`grant notify failed (grant still applied): ${err}`);
       }

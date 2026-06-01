@@ -18,6 +18,7 @@ import { join } from 'node:path';
 import { drainTranscript, joinAssistantText, findJsonlContainingFingerprint, findJsonlsContainingExactContent, findLatestJsonl, extractLastAssistantTurn, stringifyUserContent, extractTurnStartText, splitTranscriptEventsByCutoff, type TranscriptEvent } from './services/claude-transcript.js';
 import { BridgeTurnQueue, makeFingerprint, normaliseForFingerprint } from './services/bridge-turn-queue.js';
 import { shouldSuppressBridgeEmit, type BridgeSendMarker } from './services/bridge-fallback-gate.js';
+import { shouldWriteNow } from './utils/input-gate.js';
 import {
   shouldRunQuietRotation,
   evaluatePidResolverPullback,
@@ -62,6 +63,7 @@ import { IdleDetector } from './utils/idle-detector.js';
 import { ScreenAnalyzer } from './utils/screen-analyzer.js';
 import { captureToPng } from './utils/screenshot-renderer.js';
 import { snapshotToPng, snapshotToText } from './utils/transient-snapshot.js';
+import { chooseWebTerminalSeed } from './utils/web-terminal-seed.js';
 import { detectCliUsageLimit, usageLimitStateKey, type CliUsageLimitState } from './utils/cli-usage-limit.js';
 import { uploadImageBuffer } from './utils/lark-upload.js';
 import { redactChildEnv } from './utils/child-env.js';
@@ -2634,12 +2636,16 @@ function sendToPty(content: string): void {
   // CoCo parks queued submits and writes the user event at dequeue time; Codex
   // parks them but steers into the active turn — CodexBridgeQueue's
   // HOL-block-drop attributes the (possibly merged) result correctly.
-  const typeAheadAllowed = cliAdapter.supportsTypeAhead;
-  if (isPromptReady || isFlushing || typeAheadAllowed) {
+  // Type-ahead lets the message write while the CLI is BUSY — but only once the
+  // TUI has booted. During startup / tmux re-attach (awaitingFirstPrompt) even a
+  // type-ahead write is dropped (no input box yet) — markPromptReady()'s flush
+  // delivers queued messages instead. See input-gate.ts; this fixes dispatch's
+  // brief reaching Codex before its first idle and never landing.
+  if (shouldWriteNow({ isPromptReady, isFlushing, supportsTypeAhead: cliAdapter.supportsTypeAhead === true, awaitingFirstPrompt })) {
     log(`Writing to PTY: "${content.substring(0, 80)}"`);
     flushPending();  // fire-and-forget async; no-op if already flushing
   } else {
-    log(`Queued message (${pendingMessages.length} pending): "${content.substring(0, 80)}" — ${cliName()} is busy`);
+    log(`Queued message (${pendingMessages.length} pending): "${content.substring(0, 80)}" — ${cliName()} ${awaitingFirstPrompt ? 'still booting' : 'is busy'}`);
   }
 }
 
@@ -3262,9 +3268,20 @@ function startWebServer(host: string, preferredPort?: number): Promise<number> {
           }
         });
       } else {
-        // ── Non-tmux mode: shared scrollback relay ──
-        if (scrollback.length > 0) {
-          ws.send(scrollback);
+        // ── Shared relay (PtyBackend OR tmux pipe mode) ──
+        // History seed: prefer tmux's authoritative capture-pane in pipe mode
+        // (clean grid + scrollback) over replaying the raw cumulative byte
+        // stream, which scrolls stale Ink redraw/spinner frames into scrollback
+        // at any size mismatch and produces the stacked-footer history garble.
+        // See chooseWebTerminalSeed for the full rationale.
+        const seed = chooseWebTerminalSeed({
+          canCapture: isPipeMode && backend instanceof TmuxPipeBackend,
+          capture: () => (backend as TmuxPipeBackend).captureCurrentScreen(),
+          scrollback,
+          onError: log,
+        });
+        if (seed.length > 0) {
+          ws.send(seed);
         }
 
         ws.on('message', (raw) => {

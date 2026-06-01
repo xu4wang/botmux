@@ -32,7 +32,7 @@ import { startTerminalProxy, type TerminalProxyHandle } from './core/terminal-pr
 import type { CliId } from './adapters/cli/types.js';
 import * as scheduler from './core/scheduler.js';
 import { scanProjects, scanMultipleProjects } from './services/project-scanner.js';
-import { buildRepoSelectCard, buildStreamingCard, getCliDisplayName } from './im/lark/card-builder.js';
+import { buildQuotaExhaustedCard, buildRepoSelectCard, buildStreamingCard, getCliDisplayName } from './im/lark/card-builder.js';
 import { t as tr, botLocale, localeForBot } from './i18n/index.js';
 import { createCliAdapterSync } from './adapters/cli/registry.js';
 import {
@@ -55,6 +55,8 @@ import { DAEMON_COMMANDS, SESSIONLESS_DAEMON_COMMANDS, PASSTHROUGH_COMMANDS, han
 import type { CommandHandlerDeps } from './core/command-handler.js';
 import { findInheritablePeer } from './core/inherit-peer.js';
 import { isCallbackUrl, handleCallbackUrl } from './utils/user-token.js';
+import { consumeQuota, removeChatGrant, removeGlobalGrant } from './services/grant-store.js';
+import { abortCharge, commitCharge, beginCharge } from './services/quota-dedup.js';
 import {
   getSessionWorkingDir,
   getProjectScanDir,
@@ -76,6 +78,7 @@ import { handleCardAction } from './im/lark/card-handler.js';
 import type { CardHandlerDeps } from './im/lark/card-handler.js';
 import {
   executeWorkflowCommand,
+  parseWorkflowCommand,
   resolveBotSnapshot,
   type WorkflowCommandResult,
 } from './im/lark/workflow-slash-command.js';
@@ -87,7 +90,7 @@ import {
 } from './im/lark/workflow-progress-card.js';
 import { EventLog as WorkflowEventLog } from './workflows/events/append.js';
 import { replay as replayWorkflow } from './workflows/events/replay.js';
-import { isBotMentioned, probeBotOpenId, startLarkEventDispatcher, writeBotInfoFile, canOperate, isKnownPeerBot, checkRequiredScopes, type RoutingContext } from './im/lark/event-dispatcher.js';
+import { isBotMentioned, probeBotOpenId, startLarkEventDispatcher, writeBotInfoFile, canOperate, evaluateTalk, grantCommandRestriction, isKnownPeerBot, checkRequiredScopes, type RoutingContext, type TalkEvaluation } from './im/lark/event-dispatcher.js';
 import { learnFromMentions, resolveSender, flushIdentityCacheSync } from './im/lark/identity-cache.js';
 import { renderSenderTag } from './core/session-manager.js';
 import { markSessionActivity } from './core/session-activity.js';
@@ -317,6 +320,131 @@ async function sessionReply(anchor: string, content: string, msgType: string = '
 
   // Thread-scope (or unknown / legacy): reply in thread.
   return replyMessage(appId, anchor, content, msgType, true);
+}
+
+async function revokeQuotaGrant(
+  larkAppId: string,
+  chatId: string,
+  senderOpenId: string,
+  ev: TalkEvaluation,
+): Promise<void> {
+  const result = ev.reason === 'chatGrant'
+    ? await removeChatGrant(larkAppId, chatId, senderOpenId)
+    : ev.reason === 'globalGrant'
+      ? await removeGlobalGrant(larkAppId, senderOpenId)
+      : { ok: true as const, removed: false };
+  if (!result.ok) {
+    logger.warn(`[quota:${larkAppId}] revoke after quota exhaustion failed: reason=${result.reason} user=${senderOpenId.substring(0, 12)} reasonType=${ev.reason}`);
+  }
+}
+
+async function notifyQuotaExhausted(
+  larkAppId: string,
+  anchor: string,
+  senderOpenId: string,
+  limit: number | undefined,
+): Promise<void> {
+  if (typeof limit !== 'number') return;
+  try {
+    await sessionReply(
+      anchor,
+      buildQuotaExhaustedCard(senderOpenId, limit, localeForBot(larkAppId)),
+      'interactive',
+      larkAppId,
+    );
+  } catch (err) {
+    logger.warn(`[quota:${larkAppId}] quota exhausted notify failed: ${err}`);
+  }
+}
+
+export async function enforceMessageQuotaForCliInput(
+  larkAppId: string,
+  chatId: string,
+  senderOpenId: string | undefined,
+  messageId: string,
+  anchor: string,
+): Promise<boolean> {
+  const ev = evaluateTalk(larkAppId, chatId, senderOpenId);
+  if (!ev.allowed) {
+    logger.debug(`[quota:${larkAppId}] dropping message ${messageId.substring(0, 12)} from non-allowed sender ${senderOpenId?.substring(0, 12) ?? '?'}`);
+    return false;
+  }
+  if (!ev.quotaKey) return true;
+  if (!senderOpenId) return false;
+  // 去重三态：'done' = 同条已成功扣费 → 放行（不重复扣）；'pending' = 同条扣费 in-flight 未定论
+  // → fail-closed drop（绝不在定论前放行第二投）；'fresh' = 首次见 → 继续扣费。
+  const charge = beginCharge(larkAppId, messageId);
+  if (charge === 'done') return true;
+  if (charge === 'pending') return false;
+
+  let quota;
+  try {
+    quota = await consumeQuota(larkAppId, ev.quotaKey);
+  } catch (err) {
+    logger.warn(`[quota:${larkAppId}] consume failed; dropping message ${messageId.substring(0, 12)}: ${err}`);
+    abortCharge(larkAppId, messageId);
+    return false;
+  }
+
+  // 无额度记录（无限授权）：放行；标 done 去重后续重投。
+  if (!quota.tracked) {
+    commitCharge(larkAppId, messageId);
+    return true;
+  }
+  // 已超额：fail-closed drop。**绝不 commit 成 done**（否则同条重投会被 'done' 直接放行，
+  // 在 revoke 自愈失败/竞态时绕过硬上限）——abortCharge 让重投重新走扣费判定（仍会被拒，
+  // 或在授权已收回时被上面的 evaluateTalk 闸拦掉）。
+  if (!quota.allow) {
+    abortCharge(larkAppId, messageId);
+    await revokeQuotaGrant(larkAppId, chatId, senderOpenId, ev);
+    await notifyQuotaExhausted(larkAppId, anchor, senderOpenId, quota.limit);
+    return false;
+  }
+  // 扣费成功才定论为 done。
+  commitCharge(larkAppId, messageId);
+  if (quota.exhausted) {
+    await revokeQuotaGrant(larkAppId, chatId, senderOpenId, ev);
+    await notifyQuotaExhausted(larkAppId, anchor, senderOpenId, quota.limit);
+  }
+  return true;
+}
+
+export function grantRestrictedCommandText(
+  larkAppId: string,
+  chatId: string | undefined,
+  senderOpenId: string | undefined,
+  cmd: string,
+): string | undefined {
+  return grantCommandRestriction(larkAppId, chatId, senderOpenId).blocked
+    ? tr('cmd.grant_restricted', { cmd }, localeForBot(larkAppId))
+    : undefined;
+}
+
+export function grantRestrictedSlashCommandText(
+  larkAppId: string,
+  chatId: string | undefined,
+  senderOpenId: string | undefined,
+  cmd: string,
+): string | undefined {
+  if (!/^\/[a-z][a-z0-9_-]*$/.test(cmd)) return undefined;
+  return grantRestrictedCommandText(larkAppId, chatId, senderOpenId, cmd);
+}
+
+async function replyGrantRestrictionIfNeeded(
+  larkAppId: string,
+  chatId: string | undefined,
+  senderOpenId: string | undefined,
+  anchor: string,
+  cmd: string,
+): Promise<boolean> {
+  const text = grantRestrictedCommandText(larkAppId, chatId, senderOpenId, cmd);
+  if (!text) return false;
+  await sessionReply(anchor, text, 'text', larkAppId);
+  return true;
+}
+
+function forceTopicCommandLabel(content: string): '/t' | '/topic' {
+  return /^\/topic(?:\s|$)/i.test(content.trimStart()) ? '/topic' : '/t';
 }
 
 // ─── PID file ────────────────────────────────────────────────────────────────
@@ -1701,8 +1829,18 @@ async function handleNewTopic(data: any, ctx: RoutingContext): Promise<void> {
   // (already thread-scope) it's just a prefix strip — no routing change.
   // Empty prompt is allowed: the user can fill it in while the repo card is
   // pending (pendingFollowUps in handleThreadReply picks up subsequent text).
+  const senderOpenId: string | undefined = data.sender?.sender_id?.open_id;
   const forceTopic = parseForceTopicInvocation(cmdContent);
   if (forceTopic) {
+    if (await replyGrantRestrictionIfNeeded(
+      larkAppId,
+      chatId,
+      senderOpenId,
+      anchor,
+      forceTopicCommandLabel(cmdContent),
+    )) {
+      return;
+    }
     if (scope === 'chat') {
       scope = 'thread';
       anchor = messageId;
@@ -1713,11 +1851,16 @@ async function handleNewTopic(data: any, ctx: RoutingContext): Promise<void> {
     logger.info(`[/t] Force-topic invocation: prompt="${forceTopic.prompt.substring(0, 60)}" (scope=${scope}, anchor=${anchor.substring(0, 12)})`);
   }
 
-  const senderOpenId: string | undefined = data.sender?.sender_id?.open_id;
+  // senderOpenId 已在上方（force-topic grant 限制前）声明；这里只补 master 新增的 senderUnionId。
   const senderUnionId: string | undefined = data.sender?.sender_id?.union_id;
   const botCfg = getBot(larkAppId).config;
   logger.info(`New session: "${content.substring(0, 60)}" (scope=${scope}, anchor=${anchor.substring(0, 12)}, resources: ${resources.length}, active: ${getActiveCount()}, messageId: ${messageId}, chatId: ${chatId})`);
 
+  if (parseWorkflowCommand(cmdContent)) {
+    if (await replyGrantRestrictionIfNeeded(larkAppId, chatId, senderOpenId, anchor, '/workflow')) {
+      return;
+    }
+  }
   if (await handleWorkflowCommandIfAny(cmdContent, anchor, chatId, larkAppId, senderOpenId)) {
     return;
   }
@@ -1726,6 +1869,11 @@ async function handleNewTopic(data: any, ctx: RoutingContext): Promise<void> {
   const invocation = parseSlashCommandInvocation(cmdContent);
   if (invocation) {
     const { cmd, content: commandContent } = invocation;
+    const restrictedText = grantRestrictedSlashCommandText(larkAppId, chatId, senderOpenId, cmd);
+    if (restrictedText) {
+      await sessionReply(anchor, restrictedText, 'text', larkAppId);
+      return;
+    }
     if (PASSTHROUGH_COMMANDS.has(cmd)) {
       await sessionReply(anchor, tr('daemon.cmd_requires_session', { cmd }, localeForBot(larkAppId)), 'text', larkAppId);
       return;
@@ -1798,6 +1946,10 @@ async function handleNewTopic(data: any, ctx: RoutingContext): Promise<void> {
       await handleCommand(cmd, anchor, { ...parsed, content: commandContent }, commandDeps, larkAppId);
       return;
     }
+  }
+
+  if (!await enforceMessageQuotaForCliInput(larkAppId, chatId, senderOpenId, messageId, anchor)) {
+    return;
   }
 
   // Download attachments
@@ -2218,6 +2370,8 @@ async function handleThreadReply(data: any, ctx: RoutingContext): Promise<void> 
   const content = parsed.content.trim();
   // Strip leading @<bot> mentions so "@bot /restart" is recognized as a command.
   const cmdContent = stripLeadingMentions(content, parsed.mentions);
+  const threadSenderOpenId = parsed.senderId || data?.sender?.sender_id?.open_id;
+  const threadChatId = ctxChatId ?? data?.message?.chat_id;
 
   // Intercept OAuth callback URLs (from /login flow)
   if (isCallbackUrl(content)) {
@@ -2231,12 +2385,30 @@ async function handleThreadReply(data: any, ctx: RoutingContext): Promise<void> 
     }
   }
 
+  const threadForceTopic = parseForceTopicInvocation(cmdContent);
+  if (threadForceTopic) {
+    if (await replyGrantRestrictionIfNeeded(
+      larkAppId,
+      threadChatId,
+      threadSenderOpenId,
+      anchor,
+      forceTopicCommandLabel(cmdContent),
+    )) {
+      return;
+    }
+  }
+
+  if (parseWorkflowCommand(cmdContent)) {
+    if (await replyGrantRestrictionIfNeeded(larkAppId, threadChatId, threadSenderOpenId, anchor, '/workflow')) {
+      return;
+    }
+  }
   if (await handleWorkflowCommandIfAny(
     cmdContent,
     anchor,
-    ctxChatId ?? data?.message?.chat_id,
+    threadChatId,
     larkAppId,
-    parsed.senderId || data?.sender?.sender_id?.open_id,
+    threadSenderOpenId,
   )) {
     return;
   }
@@ -2245,6 +2417,13 @@ async function handleThreadReply(data: any, ctx: RoutingContext): Promise<void> 
   const invocation = parseSlashCommandInvocation(cmdContent);
   if (invocation) {
     const { cmd, content: commandContent } = invocation;
+    const existingDs = activeSessions.get(sessionKey(anchor, larkAppId));
+    const effectiveThreadChatId = existingDs?.chatId ?? threadChatId;
+    const restrictedText = grantRestrictedSlashCommandText(larkAppId, effectiveThreadChatId, threadSenderOpenId, cmd);
+    if (restrictedText) {
+      await sessionReply(anchor, restrictedText, 'text', larkAppId);
+      return;
+    }
     if (PASSTHROUGH_COMMANDS.has(cmd)) {
       // 语义边界（刻意保留，非疏漏）：passthrough（/model /clear /compact 等）按
       // “发给 CLI 的对话输入”处理，因此不过下面 DAEMON_COMMANDS 的 oncall
@@ -2253,7 +2432,7 @@ async function handleThreadReply(data: any, ctx: RoutingContext): Promise<void> 
       // 已存在的 session 发这些命令（清上下文/换模型，需已有活跃 worker，无法凭空
       // 拉起）。TODO（后续产品决策）：是否把 CLI passthrough 也纳入 canOperate，
       // 收紧到与 daemon 命令同档；这会同时改变真人 oncall 成员的现有行为，应单独评估。
-      const ds = activeSessions.get(sessionKey(anchor, larkAppId));
+      const ds = existingDs;
       if (ds?.worker && !ds.worker.killed) {
         // Mark a new turn so the CLI's response to /model, /clear, /compact, etc.
         // shows up as a fresh streaming card instead of silently PATCH-ing the
@@ -2270,16 +2449,53 @@ async function handleThreadReply(data: any, ctx: RoutingContext): Promise<void> 
     if (DAEMON_COMMANDS.has(cmd)) {
       // canOperate gate for thread-reply daemon commands — required in every chat
       // (see spawn-path gate above). Denies chat-granted users management commands.
-      const existingDs = activeSessions.get(sessionKey(anchor, larkAppId));
-      const threadChatId = existingDs?.chatId ?? ctxChatId ?? data?.message?.chat_id;
-      const threadSenderOpenId = parsed.senderId || data?.sender?.sender_id?.open_id;
-      if (!canOperate(larkAppId, threadChatId, threadSenderOpenId)) {
+      if (!canOperate(larkAppId, effectiveThreadChatId, threadSenderOpenId)) {
         sessionReply(anchor, tr('daemon.cmd_allowed_users_only', { cmd }, localeForBot(larkAppId)), 'text', larkAppId);
         return;
       }
+      // First message of a fresh thread carrying a session-needing daemon command
+      // — e.g. another bot dispatched `/repo <path>` into a brand-new thread.
+      // Without a session, handleCommand gets ds=undefined and `/repo` (and other
+      // session commands) fall through to the repo-select card. Create the session
+      // first, mirroring handleNewTopic's first-message `/repo` pendingRepo setup.
+      // Session-less commands (/group /g) don't need one.
+      if (!existingDs && threadChatId && !SESSIONLESS_DAEMON_COMMANDS.has(cmd)) {
+        const session = sessionStore.createSession(threadChatId, anchor, cmdContent.substring(0, 50), ctxChatType);
+        const now = Date.now();
+        session.larkAppId = larkAppId;
+        session.ownerOpenId = threadSenderOpenId;
+        session.creatorOpenId = threadSenderOpenId;  // stable creator (= dispatch orchestrator for /repo prime) — see Session.creatorOpenId
+        session.ownerUnionId = data?.sender?.sender_id?.union_id;
+        session.lastCallerOpenId = threadSenderOpenId;
+        session.lastMessageAt = new Date(now).toISOString();
+        session.scope = scope;
+        let cmdPending: Partial<DaemonSession> | undefined;
+        if (cmd === '/repo') {
+          const { pinnedWorkingDir } = await resolvePinnedWorkingDir({ scope, anchor, chatId: threadChatId, chatType: ctxChatType, larkAppId });
+          if (pinnedWorkingDir) session.workingDir = pinnedWorkingDir;
+          cmdPending = { pendingRepo: true, pendingPrompt: '', workingDir: pinnedWorkingDir };
+        }
+        sessionStore.updateSession(session);
+        activeSessions.set(sessionKey(anchor, larkAppId), {
+          session,
+          worker: null,
+          workerPort: null,
+          workerToken: null,
+          larkAppId,
+          chatId: threadChatId,
+          chatType: ctxChatType,
+          scope,
+          spawnedAt: Date.parse(session.createdAt) || now,
+          cliVersion: cliVersionCache.get(getBot(larkAppId).config.cliId)?.version ?? 'unknown',
+          lastMessageAt: now,
+          hasHistory: false,
+          ownerOpenId: threadSenderOpenId,
+          ...cmdPending,
+        });
+      }
       // Pass mention-stripped content so /command argument parsing works.
       // chatId lets session-less handlers (e.g. /group) reach the chat roster.
-      handleCommand(cmd, anchor, { ...parsed, content: commandContent, chatId: threadChatId }, commandDeps, larkAppId);
+      await handleCommand(cmd, anchor, { ...parsed, content: commandContent, chatId: threadChatId }, commandDeps, larkAppId);
       return;
     }
   }
@@ -2303,6 +2519,11 @@ async function handleThreadReply(data: any, ctx: RoutingContext): Promise<void> 
       logger.info(`[${larkAppId}] Ignoring ${scope}-scope ${anchor}; another bot already owns it`);
       return;
     }
+  }
+
+  const quotaSenderOpenId = threadSenderOpenId;
+  if (!await enforceMessageQuotaForCliInput(larkAppId, ctxChatId ?? data?.message?.chat_id, quotaSenderOpenId, parsed.messageId, anchor)) {
+    return;
   }
 
   // Download attachments
@@ -2396,6 +2617,10 @@ async function handleThreadReply(data: any, ctx: RoutingContext): Promise<void> 
     const ownerUnionId = isForeignBot ? undefined : senderUId;
     session.larkAppId = larkAppId;
     session.ownerOpenId = ownerOpenId;
+    // creatorOpenId is the raw creating sender — set even for foreign-bot
+    // sessions (unlike ownerOpenId, nulled above) so `botmux report` can find the
+    // dispatch orchestrator on a no-`/repo` kickoff auto-create. See Session.creatorOpenId.
+    session.creatorOpenId = senderOId;
     session.ownerUnionId = ownerUnionId;
     session.lastCallerOpenId = senderOId;
     session.quoteTargetId = parsed.messageId;

@@ -19,7 +19,7 @@ vi.mock('../src/im/lark/client.js', async (importOriginal) => {
 import { mkdtempSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { parseGrantTarget, parseGrantTargets, tryHandleGrantCommand } from '../src/im/lark/grant-command.js';
+import { parseGrantTarget, parseGrantTargets, parseGrantQuota, tryHandleGrantCommand, isGrantTargetOnly } from '../src/im/lark/grant-command.js';
 import { registerBot, getBot, loadBotConfigs } from '../src/bot-registry.js';
 import { addChatGrant } from '../src/services/grant-store.js';
 import * as pending from '../src/im/lark/grant-pending.js';
@@ -47,6 +47,26 @@ describe('parseGrantTarget', () => {
   });
 });
 
+describe('parseGrantQuota', () => {
+  const m = [{ name: '张三' }];
+  it('parses a trailing positive integer after stripping the @mention', () => {
+    expect(parseGrantQuota('/grant @张三 5', m)).toEqual({ ok: true, quota: 5 });
+  });
+  it('no number → ok with undefined quota', () => {
+    expect(parseGrantQuota('/grant @张三', m)).toEqual({ ok: true, quota: undefined });
+  });
+  it('handles mention names containing spaces', () => {
+    expect(parseGrantQuota('/grant @张 三 7', [{ name: '张 三' }])).toEqual({ ok: true, quota: 7 });
+  });
+  it('rejects 0 / negative / decimal / non-numeric / extra tail', () => {
+    expect(parseGrantQuota('/grant @张三 0', m)).toEqual({ ok: false });
+    expect(parseGrantQuota('/grant @张三 -1', m)).toEqual({ ok: false });
+    expect(parseGrantQuota('/grant @张三 2.5', m)).toEqual({ ok: false });
+    expect(parseGrantQuota('/grant @张三 abc', m)).toEqual({ ok: false });
+    expect(parseGrantQuota('/grant @张三 5 oops', m)).toEqual({ ok: false });
+  });
+});
+
 describe('parseGrantTargets (multi)', () => {
   it('returns all non-bot mentions, in order, deduped by open_id', () => {
     const msg = { mentions: [
@@ -63,6 +83,30 @@ describe('parseGrantTargets (multi)', () => {
 
   it('empty when only the bot is mentioned', () => {
     expect(parseGrantTargets({ mentions: [{ id: { open_id: 'ou_bot' }, name: 'Claude' }] }, 'ou_bot')).toEqual([]);
+  });
+
+  // post 形态 mentions 为空 → 回退到 inline `at` 节点解析（否则误判成裸 /grant）。
+  it('post fallback: parses non-bot at-nodes when mentions empty', () => {
+    const postMsg = {
+      content: JSON.stringify({ zh_cn: { content: [[
+        { tag: 'at', user_id: 'ou_bot', user_name: 'Codex' },
+        { tag: 'text', text: ' /grant ' },
+        { tag: 'at', user_id: 'ou_t', user_name: '张三' },
+      ]] } }),
+      mentions: [],
+    };
+    expect(parseGrantTargets(postMsg, 'ou_bot')).toEqual([{ openId: 'ou_t', name: '张三' }]);
+  });
+
+  it('post fallback: bare /grant (only the bot @ed) → empty (whole-chat)', () => {
+    const barePost = {
+      content: JSON.stringify({ zh_cn: { content: [[
+        { tag: 'at', user_id: 'ou_bot', user_name: 'Codex' },
+        { tag: 'text', text: ' /grant' },
+      ]] } }),
+      mentions: [],
+    };
+    expect(parseGrantTargets(barePost, 'ou_bot')).toEqual([]);
   });
 });
 
@@ -149,6 +193,177 @@ describe('tryHandleGrantCommand multi-target (@bot /grant @a @b)', () => {
   });
 });
 
+describe('isGrantTargetOnly (text + post shapes)', () => {
+  const textMsg = (text: string, mentions: any[]) => ({ content: JSON.stringify({ text }), mentions });
+
+  it('text: bot @ after /grant → target only (true)', () => {
+    const m = textMsg('@_user_1 /grant @_user_2', [
+      { key: '@_user_1', id: { open_id: 'ou_op' } },
+      { key: '@_user_2', id: { open_id: 'ou_bot' } },
+    ]);
+    expect(isGrantTargetOnly(m, 'ou_bot')).toBe(true);
+  });
+
+  it('text: bot @ before /grant (leading operator) → not target (false)', () => {
+    const m = textMsg('@_user_1 /grant @_user_2', [
+      { key: '@_user_1', id: { open_id: 'ou_bot' } },
+      { key: '@_user_2', id: { open_id: 'ou_z' } },
+    ]);
+    expect(isGrantTargetOnly(m, 'ou_bot')).toBe(false);
+  });
+
+  it('text: bare /grant with no target mention of bot → false', () => {
+    const m = textMsg('@_user_1 /grant', [{ key: '@_user_1', id: { open_id: 'ou_bot' } }]);
+    expect(isGrantTargetOnly(m, 'ou_bot')).toBe(false);
+  });
+
+  it('text: key-prefix collision — @_user_10 operator, @_user_1 is the target bot → true', () => {
+    // indexOf('@_user_1') would wrongly hit '@_user_10' at pos 0; exact-token boundary fixes it.
+    const m = textMsg('@_user_10 /grant @_user_1', [
+      { key: '@_user_10', id: { open_id: 'ou_op' } },
+      { key: '@_user_1', id: { open_id: 'ou_bot' } },
+    ]);
+    expect(isGrantTargetOnly(m, 'ou_bot')).toBe(true);
+  });
+
+  it('text: key-prefix collision — @_user_1 operator, @_user_10 is the target bot → true', () => {
+    const m = textMsg('@_user_1 /grant @_user_10', [
+      { key: '@_user_1', id: { open_id: 'ou_op' } },
+      { key: '@_user_10', id: { open_id: 'ou_bot' } },
+    ]);
+    expect(isGrantTargetOnly(m, 'ou_bot')).toBe(true);
+  });
+
+  // post 形态：@ 是独立 `at` 节点（不在 text 里），mentions 可能为空 —— guard 仍须兜住。
+  const postMsg = (nodes: any[]) => ({ content: JSON.stringify({ zh_cn: { content: [nodes] } }), mentions: [] });
+
+  it('post: at(bot) after /grant text node → target only (true)', () => {
+    const m = postMsg([
+      { tag: 'at', user_id: 'ou_op', user_name: 'Claude' },
+      { tag: 'text', text: ' /grant ' },
+      { tag: 'at', user_id: 'ou_bot', user_name: 'Codex' },
+    ]);
+    expect(isGrantTargetOnly(m, 'ou_bot')).toBe(true);
+  });
+
+  it('post: at(bot) before /grant (leading operator) → not target (false)', () => {
+    const m = postMsg([
+      { tag: 'at', user_id: 'ou_bot', user_name: 'Codex' },
+      { tag: 'text', text: ' /grant ' },
+      { tag: 'at', user_id: 'ou_z', user_name: '张三' },
+    ]);
+    expect(isGrantTargetOnly(m, 'ou_bot')).toBe(false);
+  });
+
+  it('post: no command keyword → false', () => {
+    const m = postMsg([
+      { tag: 'at', user_id: 'ou_op' },
+      { tag: 'text', text: ' 帮我看下 ' },
+      { tag: 'at', user_id: 'ou_bot' },
+    ]);
+    expect(isGrantTargetOnly(m, 'ou_bot')).toBe(false);
+  });
+
+  it('malformed / missing content / missing botOpenId → false', () => {
+    expect(isGrantTargetOnly({ content: 'not json' }, 'ou_bot')).toBe(false);
+    expect(isGrantTargetOnly({}, 'ou_bot')).toBe(false);
+    expect(isGrantTargetOnly(textMsg('@_user_1 /grant @_user_2', []), undefined)).toBe(false);
+  });
+});
+
+// 多 bot 群里把「另一个 bot」当 /grant 目标授权：`@OperatorBot /grant @ThisBot`。
+// 目标 bot 的 daemon 也会收到这条消息（它被 @ 了），但它只是【目标】、不是被点名执行
+// 命令的操作 bot——必须静默放手：不回 owner_only、不误判成裸 /grant 给整群开授权。
+describe('tryHandleGrantCommand bot-as-target (@operator /grant @thisBot)', () => {
+  // 本 daemon 的 bot = ou_bot，但它作为 /grant 的【目标】出现在命令词之后；
+  // 前导 @ 的是另一个操作 bot ou_op。
+  function targetBotMsg() {
+    return {
+      message_id: 'om_tb', chat_id: 'oc_1',
+      content: JSON.stringify({ text: '@_user_1 /grant @_user_2' }),
+      mentions: [
+        { key: '@_user_1', id: { open_id: 'ou_op' }, name: 'Claude' },   // 操作 bot（前导 @）
+        { key: '@_user_2', id: { open_id: 'ou_bot' }, name: 'Codex' },   // 本 bot，作为目标
+      ],
+    };
+  }
+
+  beforeEach(() => {
+    replyMock.mockClear();
+    pending._resetForTest();
+    const bot = registerBot({ larkAppId: 'btb', larkAppSecret: 's', cliId: 'claude-code', allowedUsers: ['ou_owner'] });
+    bot.botOpenId = 'ou_bot';
+    bot.resolvedAllowedUsers = ['ou_owner'];
+    bot.config.allowedChatGroups = [];
+  });
+  afterEach(() => vi.restoreAllMocks());
+
+  it('owner sender: swallows silently — no card, no whole-chat grant', async () => {
+    const handled = await tryHandleGrantCommand('btb', targetBotMsg(), 'ou_owner');
+    expect(handled).toBe(true);                                  // intercepted, not fed to CLI
+    expect(replyMock).not.toHaveBeenCalled();                    // no card, no reply
+    expect(getBot('btb').config.allowedChatGroups ?? []).toEqual([]);  // chat NOT opened
+  });
+
+  it('non-owner sender: does NOT reply "仅 owner 可使用 /grant"', async () => {
+    const handled = await tryHandleGrantCommand('btb', targetBotMsg(), 'ou_intruder');
+    expect(handled).toBe(true);
+    expect(replyMock).not.toHaveBeenCalled();                    // the reported spurious owner_only must not fire
+  });
+
+  it('post shape, non-owner sender: still swallows silently (no owner_only)', async () => {
+    // 富文本形态 `@OperatorBot /grant @ThisBot`，mentions 为空、@ 在 post 的 at 节点里。
+    const postMsg = {
+      message_id: 'om_ptb', chat_id: 'oc_1',
+      content: JSON.stringify({ zh_cn: { content: [[
+        { tag: 'at', user_id: 'ou_op', user_name: 'Claude' },
+        { tag: 'text', text: ' /grant ' },
+        { tag: 'at', user_id: 'ou_bot', user_name: 'Codex' },
+      ]] } }),
+      mentions: [],
+    };
+    const handled = await tryHandleGrantCommand('btb', postMsg, 'ou_intruder');
+    expect(handled).toBe(true);
+    expect(replyMock).not.toHaveBeenCalled();
+    expect(getBot('btb').config.allowedChatGroups ?? []).toEqual([]);
+  });
+
+  it('post shape, owner sender, this bot IS operator: pops card for target, whole-chat NOT opened', async () => {
+    // `@ThisBot /grant @TargetBot` 富文本：ou_bot 是前导操作 bot，ou_target 是目标。
+    const opPostMsg = {
+      message_id: 'om_pop', chat_id: 'oc_1',
+      content: JSON.stringify({ zh_cn: { content: [[
+        { tag: 'at', user_id: 'ou_bot', user_name: 'Codex' },
+        { tag: 'text', text: ' /grant ' },
+        { tag: 'at', user_id: 'ou_target', user_name: '张三' },
+      ]] } }),
+      mentions: [],
+    };
+    const handled = await tryHandleGrantCommand('btb', opPostMsg, 'ou_owner');
+    expect(handled).toBe(true);
+    const [, , content, msgType] = replyMock.mock.calls.at(-1)!;
+    expect(msgType).toBe('interactive');                        // 弹授权卡，不是整群授权
+    expect(content).toContain('张三');                           // 目标出现在卡里
+    expect(getBot('btb').config.allowedChatGroups ?? []).toEqual([]);  // 整群授权未被误触
+  });
+
+  it('still pops a card when this bot IS the leading operator (regression guard)', async () => {
+    // @ThisBot /grant @someone → ou_bot is the operator, ou_z is the human target.
+    const opMsg = {
+      message_id: 'om_op', chat_id: 'oc_1',
+      content: JSON.stringify({ text: '@_user_1 /grant @_user_2' }),
+      mentions: [
+        { key: '@_user_1', id: { open_id: 'ou_bot' }, name: 'Codex' },  // 本 bot 是操作 bot
+        { key: '@_user_2', id: { open_id: 'ou_z' }, name: '张三' },
+      ],
+    };
+    const handled = await tryHandleGrantCommand('btb', opMsg, 'ou_owner');
+    expect(handled).toBe(true);
+    const [, , , msgType] = replyMock.mock.calls.at(-1)!;
+    expect(msgType).toBe('interactive');                         // card still pops for the operator
+  });
+});
+
 describe('tryHandleGrantCommand whole-chat grant (@bot /grant, no target)', () => {
   let configPath: string;
 
@@ -187,6 +402,20 @@ describe('tryHandleGrantCommand whole-chat grant (@bot /grant, no target)', () =
     const handled = await tryHandleGrantCommand('b2', bareMsg('/grant all'), 'ou_owner');
     expect(handled).toBe(true);
     expect(getBot('b2').config.allowedChatGroups).toEqual(['oc_room']);
+  });
+
+  it('owner: "/grant 5" (forgot to @ someone) does NOT open the whole chat', async () => {
+    const handled = await tryHandleGrantCommand('b2', bareMsg('/grant 5'), 'ou_owner');
+    expect(handled).toBe(true);
+    expect(getBot('b2').config.allowedChatGroups).toBeUndefined();  // 关键：绝不把"漏@的额度命令"误执行成整群开放
+    const [, , , msgType] = replyMock.mock.calls.at(-1)!;
+    expect(msgType ?? 'text').not.toBe('interactive');             // 文本回执（bad_quota），非授权卡
+  });
+
+  it('owner: "/grant random" (junk, no target) does NOT open the whole chat', async () => {
+    const handled = await tryHandleGrantCommand('b2', bareMsg('/grant random'), 'ou_owner');
+    expect(handled).toBe(true);
+    expect(getBot('b2').config.allowedChatGroups).toBeUndefined();
   });
 
   it('owner: bare /revoke removes the whole-chat grant', async () => {

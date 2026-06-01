@@ -10,6 +10,7 @@ import { getBot, getAllBots, isChatOncallBoundForAnyBot, getOwnerOpenId, type Bo
 import { config } from '../../config.js';
 import { getChatInfo, getChatMode, listChatBotMembers, replyMessage, sendUserMessage, isHumanOpenId } from './client.js';
 import { logger } from '../../utils/logger.js';
+import { serializeByAnchor } from '../../utils/anchor-serializer.js';
 import { parseForceTopicInvocation } from '../../core/command-handler.js';
 import { shouldAutoStartOnNewTopic } from '../../core/auto-start.js';
 import { stripLeadingMentions } from './message-parser.js';
@@ -18,7 +19,8 @@ import { BOTMUX_REQUIRED_SCOPES, buildScopeDeepLink } from '../../setup/verify-p
 import { tryHandleGrantCommand } from './grant-command.js';
 import { buildGrantCard } from './card-builder.js';
 import { openPending, isThrottled } from './grant-pending.js';
-import { localeForBot } from '../../i18n/index.js';
+import { localeForBot, t } from '../../i18n/index.js';
+import { chatQuotaKey, globalQuotaKey } from '../../services/grant-store.js';
 
 // ─── Bot identity ─────────────────────────────────────────────────────────
 
@@ -402,6 +404,14 @@ export async function tryHandleIntroduceCommand(
   if (!INTRODUCE_RE.test(stripped)) return false;
   logger.debug(`[${larkAppId}] /introduce from ${senderOpenId ?? 'unknown'} (no auth required)`);
 
+  if (grantCommandRestriction(larkAppId, message.chat_id, senderOpenId).blocked) {
+    const loc = localeForBot(larkAppId);
+    await replyMessage(larkAppId, message.message_id, JSON.stringify({
+      text: t('cmd.grant_restricted', { cmd: '/introduce' }, loc),
+    })).catch(err => logger.debug(`introduce grant_restricted reply failed: ${err}`));
+    return true;
+  }
+
   const selfOpenId = getBot(larkAppId).botOpenId;
   const rawMentions: Array<{ name?: string; id?: { open_id?: string } }> = message.mentions ?? [];
   const all = rawMentions
@@ -495,6 +505,38 @@ export function isBotMentioned(larkAppId: string, message: any, _senderOpenId: s
 // so an unbound sibling doesn't fall back to allowedUsers and reply
 // "⚠️ 无操作权限" when @-mentioned in a shared oncall workspace.
 
+export type TalkReason =
+  | 'allowedUser'
+  | 'oncall'
+  | 'peer'
+  | 'allowedChatGroup'
+  | 'open'
+  | 'chatGrant'
+  | 'globalGrant'
+  | 'none';
+
+export interface TalkEvaluation {
+  allowed: boolean;
+  reason: TalkReason;
+  quotaKey?: string;
+}
+
+export type GrantCommandRestrictionReason = 'chatGrant' | 'globalGrant';
+
+export function grantCommandRestriction(
+  larkAppId: string,
+  chatId: string | undefined,
+  senderOpenId: string | undefined,
+): { blocked: boolean; reason?: GrantCommandRestrictionReason } {
+  const bot = getBot(larkAppId);
+  if (bot.config.restrictGrantCommands !== true) return { blocked: false };
+  const ev = evaluateTalk(larkAppId, chatId, senderOpenId);
+  if (ev.reason === 'chatGrant' || ev.reason === 'globalGrant') {
+    return { blocked: true, reason: ev.reason };
+  }
+  return { blocked: false };
+}
+
 /** per-chat per-user 授权命中判断（仅用于 canTalk —— 不给管理命令权）。 */
 function hasChatGrant(larkAppId: string, chatId: string | undefined, openId: string | undefined): boolean {
   return !!chatId && !!openId && !!getBot(larkAppId).config.chatGrants?.[chatId]?.includes(openId);
@@ -506,28 +548,44 @@ function hasGlobalGrant(larkAppId: string, openId: string | undefined): boolean 
 }
 
 export function canTalk(larkAppId: string, chatId: string | undefined, senderOpenId: string | undefined): boolean {
-  if (chatId && isChatOncallBoundForAnyBot(chatId)) return true;
-  if (isKnownPeerBot(config.session.dataDir, larkAppId, senderOpenId)) return true;
-  if (hasChatGrant(larkAppId, chatId, senderOpenId)) return true;
-  // 全局对话授权（talk-only，人/bot 通用）：命中即在任意群放行，与 chatGrants 同级、不授 operate。
-  if (hasGlobalGrant(larkAppId, senderOpenId)) return true;
+  return evaluateTalk(larkAppId, chatId, senderOpenId).allowed;
+}
+
+export function evaluateTalk(larkAppId: string, chatId: string | undefined, senderOpenId: string | undefined): TalkEvaluation {
   const bot = getBot(larkAppId);
   // allowedChatGroups 是"talk-open 的 chat_id 列表"：当前消息来自其中之一即放行（仅 canTalk）。
   // 成员关系隐含在"能在该 chat 发言"里 —— 退群者发不了言自动失权，新人进群即生效，无需成员快照。
-  if (chatId && bot.config.allowedChatGroups?.includes(chatId)) return true;
   const allowedUsers = bot.resolvedAllowedUsers;
+  if (senderOpenId && allowedUsers.includes(senderOpenId)) return { allowed: true, reason: 'allowedUser' };
+  if (chatId && isChatOncallBoundForAnyBot(chatId)) return { allowed: true, reason: 'oncall' };
+  if (isKnownPeerBot(config.session.dataDir, larkAppId, senderOpenId)) return { allowed: true, reason: 'peer' };
+  if (chatId && bot.config.allowedChatGroups?.includes(chatId)) return { allowed: true, reason: 'allowedChatGroup' };
+
   // globalGrants 与 allowedChatGroups 同样确立"有白名单"语义：只配 globalGrants 也算限制态，
   // 不能 fall through 到"全开放"。
   const hasAllowlist = allowedUsers.length > 0
     || (bot.config.allowedChatGroups?.length ?? 0) > 0
     || (bot.config.globalGrants?.length ?? 0) > 0;
-  if (!hasAllowlist) return true;
-  if (!senderOpenId) return false;
-  return allowedUsers.includes(senderOpenId);
+  if (!hasAllowlist) return { allowed: true, reason: 'open' };
+
+  if (hasChatGrant(larkAppId, chatId, senderOpenId)) {
+    return { allowed: true, reason: 'chatGrant', quotaKey: chatQuotaKey(chatId!, senderOpenId!) };
+  }
+  // 全局对话授权（talk-only，人/bot 通用）：命中即在任意群放行，与 chatGrants 同级、不授 operate。
+  if (hasGlobalGrant(larkAppId, senderOpenId)) {
+    return { allowed: true, reason: 'globalGrant', quotaKey: globalQuotaKey(senderOpenId!) };
+  }
+  return { allowed: false, reason: 'none' };
 }
 
 export function canOperate(larkAppId: string, _chatId: string | undefined, senderOpenId: string | undefined): boolean {
   const bot = getBot(larkAppId);
+  // L1 同部署兄弟 bot 互信 operate：与 canTalk 一致——isKnownPeerBot 只认本部署
+  // bots-info.json 里注册过的自家 bot。这不重开 PR #46 的封堵：人的 talk 授权
+  // （chatGrant/globalGrant）仍不漏成 operate；这里只放行「自家 bot 之间」的 /
+  // 命令（让编排者能对子 bot 跑 /repo /cd 等）。跨团队/外部 bot 仍走 allowedUsers /
+  // 后续的 operate 级 grant。
+  if (isKnownPeerBot(config.session.dataDir, larkAppId, senderOpenId)) return true;
   const allowedUsers = bot.resolvedAllowedUsers;
   // globalGrants（与 allowedChatGroups 同理）确立"有白名单"语义：只配 globalGrants 也算限制态，
   // 否则 canOperate 会 fall through 到"全开放"，把 talk-only 授权变成 operate 全开——正是 PR #46
@@ -835,7 +893,11 @@ export function startLarkEventDispatcher(larkAppId: string, larkAppSecret: strin
               return;
             }
             const ctx = await decideRouting(larkAppId, message);
-            handlers.handleThreadReply(data, { ...ctx, chatId, messageId, chatType, larkAppId })
+            // Serialize per anchor so back-to-back messages to the same thread
+            // (e.g. dispatch's /repo prime + brief kickoff) don't interleave with
+            // the first's async session-spawn. See anchor-serializer.ts.
+            serializeByAnchor(ctx.anchor, () =>
+              handlers.handleThreadReply(data, { ...ctx, chatId, messageId, chatType, larkAppId }))
               .catch(err => logger.error(`Error handling message event: ${err}`));
             return;
           }
@@ -872,7 +934,10 @@ export function startLarkEventDispatcher(larkAppId: string, larkAppSecret: strin
             }
           }
           logger.info(`Bot-to-bot @mention detected (scope=${ctx.scope}): routing to handleThreadReply`);
-          handlers.handleThreadReply(data, { ...ctx, chatId, messageId, chatType, larkAppId })
+          // Serialize per anchor — a sub-bot dispatched a /repo prime + kickoff
+          // back-to-back into this thread must be handled in order, not raced.
+          serializeByAnchor(ctx.anchor, () =>
+            handlers.handleThreadReply(data, { ...ctx, chatId, messageId, chatType, larkAppId }))
             .catch(err => logger.error(`Error handling bot @mention: ${err}`));
           return;
         }
@@ -1033,10 +1098,14 @@ export function startLarkEventDispatcher(larkAppId: string, larkAppSecret: strin
         }
 
         const ctx: RoutingContext = { chatId, messageId, chatType, larkAppId, ...routing };
-        const promise = ownsSession
+        // Serialize per anchor so two messages to the same thread/chat are
+        // processed in arrival order — never concurrently. Without this a fast
+        // second message interleaves with the first's async session-spawn and is
+        // dropped (worker-not-ready → re-fork branch). See anchor-serializer.ts.
+        serializeByAnchor(ctx.anchor, () => ownsSession
           ? handlers.handleThreadReply(data, ctx)
-          : handlers.handleNewTopic(data, ctx);
-        promise.catch(err => logger.error(`Error handling message event: ${err}`));
+          : handlers.handleNewTopic(data, ctx))
+          .catch(err => logger.error(`Error handling message event: ${err}`));
       } catch (err) {
         logger.error(`Error handling message event: ${err}`);
       }

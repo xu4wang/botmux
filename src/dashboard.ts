@@ -748,6 +748,8 @@ const server = createServer(async (req, res) => {
             autoStartOnGroupJoin: j.autoStartOnGroupJoin === true,
             autoStartOnGroupJoinPrompt: typeof j.autoStartOnGroupJoinPrompt === 'string' ? j.autoStartOnGroupJoinPrompt : '',
             autoStartOnNewTopic: j.autoStartOnNewTopic === true,
+            restrictGrantCommands: j.restrictGrantCommands === true,
+            messageQuotaDefaultLimit: typeof j.messageQuotaDefaultLimit === 'number' ? j.messageQuotaDefaultLimit : null,
           };
         } catch (e: any) {
           return { larkAppId: d.larkAppId, botName: d.botName, online: true, error: e?.message ?? String(e) };
@@ -799,6 +801,24 @@ const server = createServer(async (req, res) => {
       for await (const c of req) chunks.push(c as Buffer);
       const raw = Buffer.concat(chunks).toString('utf8') || '{}';
       const upstream = await proxyToDaemon(appId, `/api/bot-card-prefs`, {
+        method: 'PUT',
+        headers: { 'content-type': 'application/json' },
+        body: raw,
+      });
+      res.writeHead(upstream.status, { 'content-type': 'application/json' });
+      res.end(await upstream.text());
+      return;
+    }
+
+    // PUT /api/bots/:appId/grant-prefs — proxy to that bot's daemon. Body carries
+    // any subset of `{ restrictGrantCommands?: boolean, messageQuotaDefaultLimit?: number|null }`.
+    let mBotGrantPrefs: RegExpMatchArray | null;
+    if (req.method === 'PUT' && (mBotGrantPrefs = url.pathname.match(/^\/api\/bots\/([^/]+)\/grant-prefs$/))) {
+      const appId = decodeURIComponent(mBotGrantPrefs[1]);
+      const chunks: Buffer[] = [];
+      for await (const c of req) chunks.push(c as Buffer);
+      const raw = Buffer.concat(chunks).toString('utf8') || '{}';
+      const upstream = await proxyToDaemon(appId, `/api/bot-grant-prefs`, {
         method: 'PUT',
         headers: { 'content-type': 'application/json' },
         body: raw,

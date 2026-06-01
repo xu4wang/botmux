@@ -138,6 +138,7 @@ export async function renderBotDefaultsPage(root: HTMLElement) {
         ${renderRoleSection(b)}
         ${renderBrandSection(b)}
         ${renderCardBehaviorSection(b)}
+        ${renderGrantSection(b)}
       </div>
     </article>`;
   }
@@ -222,6 +223,42 @@ export async function renderBotDefaultsPage(root: HTMLElement) {
       <div class="actions">
         <small data-card-pref-moot class="hint-warn-inline" ${disableStreaming ? '' : 'hidden'}>${t('botDefaults.writableLinkMoot')}</small>
         <span class="oncall-status" data-card-pref-status></span>
+      </div>
+    </section>`;
+  }
+
+  function quotaStateLabel(quota: number | null): string {
+    return quota == null
+      ? t('botDefaults.quotaStateOff')
+      : t('botDefaults.quotaStateOn', { count: quota });
+  }
+
+  // 授权（/grant）相关：命令限制开关（auto-save 复选框）+ 默认消息额度（数字输入 + 保存/关闭按钮，
+  // 空＝关闭无限）。两者都通过 PUT /api/bots/:appId/grant-prefs 落到 bots.json，daemon 内存同步即时生效。
+  function renderGrantSection(b: any): string {
+    const restrict = b.restrictGrantCommands === true;
+    const quota: number | null = typeof b.messageQuotaDefaultLimit === 'number' ? b.messageQuotaDefaultLimit : null;
+    return `<section class="bd-section">
+      <h3 class="bd-section-title">${t('botDefaults.sectionGrant')}</h3>
+      <label class="checkbox-row">
+        <input type="checkbox" data-action="toggle-restrict-grant" ${restrict ? 'checked' : ''}>
+        <strong>${t('botDefaults.restrictGrant')}</strong>
+        <small>${t('botDefaults.restrictGrantHelp')}</small>
+      </label>
+      <div class="bd-row bd-quota">
+        <label>
+          <span>${t('botDefaults.quotaDefault')}</span>
+          <input type="number" min="1" step="1" data-input="quotaLimit"
+            placeholder="${escapeHtml(t('botDefaults.quotaPlaceholder'))}"
+            value="${quota == null ? '' : quota}">
+        </label>
+        <small data-quota-state>${escapeHtml(quotaStateLabel(quota))}</small>
+        <small>${t('botDefaults.quotaHelp')}</small>
+        <div class="actions">
+          <button type="button" data-action="save-quota">${t('botDefaults.quotaSave')}</button>
+          <button type="button" data-action="off-quota">${t('botDefaults.quotaOff')}</button>
+          <span class="oncall-status" data-grant-status></span>
+        </div>
       </div>
     </section>`;
   }
@@ -564,6 +601,83 @@ export async function renderBotDefaultsPage(root: HTMLElement) {
         roleDeleteBtn.addEventListener('click', () => {
           roleTextarea.value = '';
           putRole('', roleDeleteBtn, true);
+        });
+      }
+
+      // ── 授权偏好：命令限制开关 + 默认消息额度 ──────────────────────────
+      const restrictCb = card.querySelector<HTMLInputElement>('input[data-action=toggle-restrict-grant]');
+      const quotaInput = card.querySelector<HTMLInputElement>('input[data-input=quotaLimit]');
+      const quotaSaveBtn = card.querySelector<HTMLButtonElement>('button[data-action=save-quota]');
+      const quotaOffBtn = card.querySelector<HTMLButtonElement>('button[data-action=off-quota]');
+      const grantStatusEl = card.querySelector<HTMLSpanElement>('[data-grant-status]');
+      const quotaStateEl = card.querySelector<HTMLElement>('[data-quota-state]');
+
+      // PUT a partial grant-prefs patch ({ restrictGrantCommands? } and/or
+      // { messageQuotaDefaultLimit: number|null }). Mirrors putCardPref.
+      async function putGrantPref(
+        patch: { restrictGrantCommands?: boolean; messageQuotaDefaultLimit?: number | null },
+        selfEl: HTMLInputElement | HTMLButtonElement,
+      ) {
+        if (!grantStatusEl) return;
+        grantStatusEl.textContent = '';
+        grantStatusEl.className = 'oncall-status';
+        selfEl.disabled = true;
+        try {
+          const r = await fetch(`/api/bots/${encodeURIComponent(appId)}/grant-prefs`, {
+            method: 'PUT',
+            headers: { 'content-type': 'application/json' },
+            body: JSON.stringify(patch),
+          });
+          const body = await r.json().catch(() => ({}));
+          if (r.ok && body.ok) {
+            grantStatusEl.textContent = `✓ ${t('botDefaults.cardPrefSaved')}`;
+            grantStatusEl.classList.add('hint-ok');
+            const next: number | null = typeof body.messageQuotaDefaultLimit === 'number' ? body.messageQuotaDefaultLimit : null;
+            const cached = cache.bots.find((bb: any) => bb.larkAppId === appId);
+            if (cached) {
+              cached.restrictGrantCommands = body.restrictGrantCommands === true;
+              cached.messageQuotaDefaultLimit = next;
+            }
+            if (quotaStateEl) quotaStateEl.textContent = quotaStateLabel(next);
+            if (quotaInput && 'messageQuotaDefaultLimit' in patch) {
+              quotaInput.value = next == null ? '' : String(next);
+            }
+          } else {
+            grantStatusEl.textContent = `✗ ${body.error ?? r.status}`;
+            grantStatusEl.classList.add('hint-warn-inline');
+          }
+        } catch (e: any) {
+          grantStatusEl.textContent = `✗ ${e?.message ?? e}`;
+          grantStatusEl.classList.add('hint-warn-inline');
+        } finally {
+          selfEl.disabled = false;
+        }
+      }
+
+      if (restrictCb) {
+        restrictCb.addEventListener('change', () => {
+          putGrantPref({ restrictGrantCommands: restrictCb.checked }, restrictCb);
+        });
+      }
+      if (quotaInput && quotaSaveBtn) {
+        quotaSaveBtn.addEventListener('click', () => {
+          const raw = quotaInput.value.trim();
+          if (raw === '') { putGrantPref({ messageQuotaDefaultLimit: null }, quotaSaveBtn); return; } // 空＝关闭
+          // 只认纯正整数 token（拒 1e2 / 1.0 / 01），与 /grant @x N 的数字语义一致。
+          if (!/^[1-9]\d*$/.test(raw)) {
+            if (grantStatusEl) {
+              grantStatusEl.textContent = `✗ ${t('botDefaults.quotaInvalid')}`;
+              grantStatusEl.className = 'oncall-status hint-warn-inline';
+            }
+            return;
+          }
+          putGrantPref({ messageQuotaDefaultLimit: Number(raw) }, quotaSaveBtn);
+        });
+      }
+      if (quotaInput && quotaOffBtn) {
+        quotaOffBtn.addEventListener('click', () => {
+          quotaInput.value = '';
+          putGrantPref({ messageQuotaDefaultLimit: null }, quotaOffBtn);
         });
       }
     });

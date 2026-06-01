@@ -8,23 +8,30 @@ import { randomUUID } from 'node:crypto';
 
 const DENY_COOLDOWN_MS = 10 * 60 * 1000;
 
-type Entry = { state: 'pending' | 'denied'; nonce?: string; ts: number };
+type Entry = { state: 'pending' | 'denied'; nonce?: string; ts: number; quota?: number };
 const table = new Map<string, Entry>();
 
 const key = (a: string, c: string, t: string) => `${a}:${c}:${t}`;
 
-/** 开一张待处置的卡，返回 nonce。 */
-export function openPending(larkAppId: string, chatId: string, target: string): string {
-  return openPendingMulti(larkAppId, chatId, [target]);
+/** 开一张待处置的卡，返回 nonce。`quota` 为可选的消息额度（已解析），落授权时透传给 grant-store。 */
+export function openPending(larkAppId: string, chatId: string, target: string, quota?: number): string {
+  return openPendingMulti(larkAppId, chatId, [target], quota);
 }
 
 /** owner 一次 /grant 多个目标：同一张卡 → 多个 target 共用同一 nonce，
- *  owner 点一次范围即对全部目标生效。校验时每个 target 独立 checkNonce。 */
-export function openPendingMulti(larkAppId: string, chatId: string, targets: string[]): string {
+ *  owner 点一次范围即对全部目标生效。校验时每个 target 独立 checkNonce。
+ *  `quota`（若有）对每个 target 各自生效（每人 N 条额度）。 */
+export function openPendingMulti(larkAppId: string, chatId: string, targets: string[], quota?: number): string {
   const nonce = randomUUID();
   const ts = Date.now();
-  for (const target of targets) table.set(key(larkAppId, chatId, target), { state: 'pending', nonce, ts });
+  for (const target of targets) table.set(key(larkAppId, chatId, target), { state: 'pending', nonce, ts, quota });
   return nonce;
+}
+
+/** 回读 pending 上挂的额度（owner 点授权按钮时用）。无 / 非 pending → undefined。 */
+export function getPendingQuota(larkAppId: string, chatId: string, target: string): number | undefined {
+  const e = table.get(key(larkAppId, chatId, target));
+  return e && e.state === 'pending' ? e.quota : undefined;
 }
 
 /** 卡片处置前校验：必须仍 pending 且 nonce 匹配。 */
