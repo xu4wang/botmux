@@ -970,7 +970,7 @@ stdout 为一行 JSON。注意：\`--json\` 覆盖所有结果类型；超时 / 
 
 const ORCHESTRATE_SKILL = `---
 name: botmux-orchestrate
-description: 作为「主 bot/编排者」把一个大项目拆成多个子项目，在普通群里自动开多话题、把不同 bot（常 coder+reviewer 一组）派进各话题并行干活，用飞书任务清单当共享进度板，收齐结果再汇总。触发：用户要「把大项目拆给多个机器人并行做」「协调多个 bot」「多话题并行推进」「你当总控/编排」，或显式提到 botmux orchestrate / botmux dispatch 派活。
+description: 作为「主 bot/编排者」把一个大项目拆成多个子项目，在普通群里自动开多话题、把不同 bot（常 coder+reviewer 一组）派进各话题并行干活，用飞书任务清单当共享进度板，收齐结果再汇总。触发：用户提到「多话题协作模式」，或要「把大项目拆给多个机器人并行做」「协调多个 bot」「多话题并行推进」「你当总控/编排」「一个写一个 review 多组并行」，或显式提到 botmux orchestrate / botmux dispatch 派活。
 ---
 
 # botmux-orchestrate — 多 bot 多话题编排
