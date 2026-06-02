@@ -31,9 +31,11 @@ vi.mock('node:fs', async (importOriginal) => {
 const mockGetBot = vi.fn();
 const mockGetAllBots = vi.fn(() => []);
 const mockIsChatOncallBoundForAnyBot = vi.fn<(chatId: string) => boolean>(() => false);
+const mockFindOncallChat = vi.fn<(larkAppId: string, chatId: string) => { chatId: string; workingDir: string } | undefined>(() => undefined);
 vi.mock('../src/bot-registry.js', () => ({
   getBot: (...args: any[]) => mockGetBot(...args),
   getAllBots: () => mockGetAllBots(),
+  findOncallChat: (...args: any[]) => mockFindOncallChat(...(args as [string, string])),
   isChatOncallBoundForAnyBot: (...args: any[]) => mockIsChatOncallBoundForAnyBot(...(args as [string])),
 }));
 
@@ -252,6 +254,7 @@ describe('im.message.receive_v1 — bot-to-bot @mention routing', () => {
     setupBotState();
     handlers = makeHandlers();
     mockIsChatOncallBoundForAnyBot.mockReturnValue(false);
+    mockFindOncallChat.mockReturnValue(undefined);
     startLarkEventDispatcher(MY_APP_ID, 'secret', handlers);
   });
 
@@ -529,14 +532,15 @@ describe('im.message.receive_v1 — bot-to-bot @mention routing', () => {
   });
 
   it('routes unknown-peer cross-bot @mention in oncall chat-scope (auto-create, no /introduce needed)', async () => {
-    // oncall 群是显式部署的协作工作区：canTalk 已对真人全员放行，bot→bot 接收侧
-    // 同等放行 —— 即使发送方不在 cross-ref（isKnownPeerBot=false），oncall 也跳过
-    // 这道 vetting，让外部 bot 直接拉起 chat-scope session。对照上面的非 oncall
-    // 用例：同样的 unknown peer 会被 drop。
+    // oncall 群是当前接收 bot 显式绑定的协作工作区：canTalk 已对真人全员放行，
+    // bot→bot 接收侧同等放行 —— 即使发送方不在 cross-ref（isKnownPeerBot=false），
+    // 也跳过这道 vetting，让外部 bot 直接拉起 chat-scope session。对照上面的非
+    // oncall 用例：同样的 unknown peer 会被 drop。
     // 注意 /introduce 写的是 observed-bots-store（发现/能 @ 到对方），跟这道接收侧
     // cross-ref vetting 是两套独立存储，不是这里放行的前提。
     mockGetChatMode.mockResolvedValueOnce('group');
     mockIsChatOncallBoundForAnyBot.mockReturnValue(true);
+    mockFindOncallChat.mockReturnValue({ chatId: 'chat-001', workingDir: '/repo' });
     mockReadFileSync.mockReturnValue('{}');  // empty cross-ref → unknown peer
     const event = makeBotMessageEvent({
       senderOpenId: OTHER_BOT_OPEN_ID,
@@ -566,6 +570,7 @@ describe('im.message.receive_v1 — bot-to-bot @mention routing', () => {
     // 消息仍在 self 分支被 drop，不会因为 oncall 而被路由。
     // （self 非 /close 在 decideRouting 之前就 return，故无需 stub getChatMode。）
     mockIsChatOncallBoundForAnyBot.mockReturnValue(true);
+    mockFindOncallChat.mockReturnValue({ chatId: 'chat-001', workingDir: '/repo' });
     const event = makeBotMessageEvent({
       senderOpenId: MY_OPEN_ID,  // own message
       content: JSON.stringify({ text: 'I just finished the task' }),
@@ -584,6 +589,7 @@ describe('im.message.receive_v1 — bot-to-bot @mention routing', () => {
     // 镜像上一条：oncall 不应改变 self /close 的既有行为 —— 精确 /close 仍进入
     // handleThreadReply 走关闭流程。
     mockIsChatOncallBoundForAnyBot.mockReturnValue(true);
+    mockFindOncallChat.mockReturnValue({ chatId: 'chat-001', workingDir: '/repo' });
     const event = makeBotMessageEvent({
       senderOpenId: MY_OPEN_ID,  // own message
       content: JSON.stringify({ text: '/close' }),
@@ -600,19 +606,18 @@ describe('im.message.receive_v1 — bot-to-bot @mention routing', () => {
     }));
   });
 
-  it('treats oncall as chat-level: relaxes canTalk even when THIS bot is not the one bound', async () => {
-    // Regression: /oncall bind is per-bot, but oncall is meant to be a
-    // chat-level concept. In multi-bot deployments the user often only binds
-    // one bot — sibling bots used to fall back to allowedUsers and reply
-    // "⚠️ 无操作权限" when @-mentioned by anyone outside the allowlist.
-    // isChatOncallBoundForAnyBot now answers true if ANY bot has the chat
-    // bound, so unbound siblings join the relaxed talking gate too.
+  it('keeps sibling oncall bindings from relaxing this bot canTalk', async () => {
+    // /oncall bind is bot-scoped. If Bot A binds this chat, Bot B still uses
+    // Bot B's own allowedUsers/chatGrants/globalGrants until Bot B also binds
+    // the same chat. Cross-bot oncall discovery may still report the chat as
+    // bound somewhere, but that must not open talk access for this receiver.
     mockGetChatMode.mockResolvedValueOnce('topic');
     mockIsChatOncallBoundForAnyBot.mockReturnValue(true);
+    mockFindOncallChat.mockReturnValue(undefined);
     mockGetBot.mockReturnValue({
       config: { larkAppId: MY_APP_ID, larkAppSecret: 'secret', cliId: 'claude-code' },
       botOpenId: MY_OPEN_ID,
-      resolvedAllowedUsers: ['ou_some_other_human'],
+      resolvedAllowedUsers: ['ou_allowed_sibling'],
     });
     const event = makeUserMessageEvent({
       senderOpenId: USER_OPEN_ID, // NOT in allowedUsers
@@ -626,11 +631,9 @@ describe('im.message.receive_v1 — bot-to-bot @mention routing', () => {
     await capturedHandlers['im.message.receive_v1'](event);
     await new Promise(r => setTimeout(r, 0));
 
-    expect(handlers.handleNewTopic).toHaveBeenCalledWith(event, expect.objectContaining({
-      anchor: 'msg-oncall-sibling',
-      scope: 'thread',
-      larkAppId: MY_APP_ID,
-    }));
+    expect(handlers.handleNewTopic).not.toHaveBeenCalled();
+    expect(handlers.handleThreadReply).not.toHaveBeenCalled();
+    expect(canTalk(MY_APP_ID, 'chat-oncall-sibling', 'ou_allowed_sibling')).toBe(true);
   });
 
   it('allows ordinary talk for any sender when the current chat is in allowedChatGroups', () => {

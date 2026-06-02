@@ -52,6 +52,29 @@ describe('grant gates', () => {
     expect(evaluateTalk('g1', 'oc_oncall_quota', 'ou_guest')).toEqual({ allowed: true, reason: 'oncall' });
   });
 
+  it('scopes oncall talk access to the bot that owns the binding', () => {
+    const botA = registerBot({
+      larkAppId: 'oncall_scope_a',
+      larkAppSecret: 's',
+      cliId: 'claude-code',
+      allowedUsers: ['ou_owner_a'],
+      oncallChats: [{ chatId: 'oc_shared_oncall', workingDir: '/repo/a' }],
+    });
+    botA.resolvedAllowedUsers = ['ou_owner_a'];
+
+    const botB = registerBot({
+      larkAppId: 'oncall_scope_b',
+      larkAppSecret: 's',
+      cliId: 'claude-code',
+      allowedUsers: ['ou_owner_b'],
+    });
+    botB.resolvedAllowedUsers = ['ou_owner_b'];
+
+    expect(canTalk('oncall_scope_a', 'oc_shared_oncall', 'ou_external')).toBe(true);
+    expect(canTalk('oncall_scope_b', 'oc_shared_oncall', 'ou_external')).toBe(false);
+    expect(canTalk('oncall_scope_b', 'oc_shared_oncall', 'ou_owner_b')).toBe(true);
+  });
+
   it('evaluateTalk prefers chat grant over global grant and emits a chat quota key', () => {
     expect(evaluateTalk('g1', 'oc_1', 'ou_both')).toEqual({
       allowed: true,

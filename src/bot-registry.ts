@@ -271,12 +271,12 @@ export function findOncallChat(larkAppId: string, chatId: string): OncallChat | 
   return bot?.config.oncallChats?.find(c => c.chatId === chatId);
 }
 
-// Cross-bot oncall chat check — cached by config-file mtime.
+// Cross-bot oncall chat discovery — cached by config-file mtime.
 //
-// /oncall bind is per-bot, but oncall is meant to be a chat-level property:
-// once any bot in a multi-bot deployment binds the chat, every sibling bot
-// should treat that chat as an oncall workspace too (otherwise unbound bots
-// fall back to allowedUsers and reply "⚠️ 无操作权限" when @-mentioned).
+// /oncall bind is per-bot for talk authorization: receiving-bot gates must use
+// findOncallChat(larkAppId, chatId). This cross-bot lookup remains for paths
+// that need deployment-wide discovery/inheritance, such as pinned working-dir
+// resolution and default-oncall checks.
 //
 // Multi-daemon deployments run one bot per process, so the in-memory `bots`
 // map only sees this daemon's own bot — sibling bots' bindings live only on
