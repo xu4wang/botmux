@@ -23,6 +23,7 @@ let dataDir: string;
 const SECRET = 'SECRET_SHOULD_NOT_LEAK_123';
 const APP_WITH_ROLE = 'cli_fake_app_001';
 const APP_NO_ROLE = 'cli_fake_app_002';
+const APP_BARE = 'cli_fake_app_003'; // role/capability live ONLY under the default data dir
 
 beforeAll(() => {
   if (!existsSync(CLI_PATH)) {
@@ -53,6 +54,12 @@ beforeAll(() => {
         larkAppSecret: SECRET,
         cliId: 'aiden',
       },
+      {
+        name: 'bareshell',
+        larkAppId: APP_BARE,
+        larkAppSecret: SECRET,
+        cliId: 'codex',
+      },
     ]),
     'utf-8',
   );
@@ -63,22 +70,52 @@ beforeAll(() => {
     JSON.stringify({ capability: '后端能力标签', updatedAt: 1 }),
     'utf-8',
   );
+
+  // Bare-shell fixture: APP_BARE's role/capability live ONLY under the DEFAULT
+  // data dir (~/.botmux/data → HOME/.botmux/data), with NO SESSION_DATA_DIR set.
+  // This is the actual bug scenario for Blocker 2: it only resolves correctly if
+  // resolveDataDir() falls back to the default AND config.session.dataDir reads
+  // it live (lazy getter) after the env is set inside cmdPresetExport.
+  const defaultDataDir = join(home, '.botmux', 'data');
+  mkdirSync(join(defaultDataDir, 'team-roles'), { recursive: true });
+  mkdirSync(join(defaultDataDir, 'bot-profiles'), { recursive: true });
+  writeFileSync(join(defaultDataDir, 'team-roles', `${APP_BARE}.md`), 'BARE_SHELL_ROLE_marker', 'utf-8');
+  writeFileSync(
+    join(defaultDataDir, 'bot-profiles', `${APP_BARE}.json`),
+    JSON.stringify({ capability: '裸终端能力', updatedAt: 1 }),
+    'utf-8',
+  );
 });
 
 afterAll(() => {
   if (home) rmSync(home, { recursive: true, force: true });
 });
 
-function runCli(args: string[]): { status: number; stdout: string; stderr: string } {
+function spawnCli(
+  args: string[],
+  env: Record<string, string | undefined>,
+): { status: number; stdout: string; stderr: string } {
   // spawnSync (not execFileSync) so we capture stderr on success too — several
   // assertions check stderr while the command exits 0 (stdout stays JSON-clean).
   const r = spawnSync('node', [CLI_PATH, ...args], {
     cwd: home,
-    env: { ...process.env, HOME: home, SESSION_DATA_DIR: dataDir },
+    env,
     stdio: ['ignore', 'pipe', 'pipe'], // stdin ignored ⇒ not a TTY
     encoding: 'utf-8',
   });
   return { status: r.status ?? 1, stdout: r.stdout ?? '', stderr: r.stderr ?? '' };
+}
+
+/** Agent-session style: SESSION_DATA_DIR explicitly injected. */
+function runCli(args: string[]) {
+  return spawnCli(args, { ...process.env, HOME: home, SESSION_DATA_DIR: dataDir });
+}
+
+/** Bare-shell style: SESSION_DATA_DIR unset, resolved via default data dir. */
+function runCliBare(args: string[]) {
+  const env: Record<string, string | undefined> = { ...process.env, HOME: home };
+  delete env.SESSION_DATA_DIR;
+  return spawnCli(args, env);
 }
 
 describe('botmux preset export — CLI boundary', () => {
@@ -96,13 +133,26 @@ describe('botmux preset export — CLI boundary', () => {
   it('--out - --yes emits ONLY JSON on stdout; logs go to stderr', () => {
     const out = runCli(['preset', 'export', APP_WITH_ROLE, '--out', '-', '--yes']);
     expect(out.status).toBe(0);
-    // stdout must parse as a single JSON object and carry no secret.
+    // stdout must parse as a single JSON object and carry no secret…
     const parsed = JSON.parse(out.stdout);
     expect(parsed.botmuxPreset).toBe(1);
     expect(parsed.teamRole).toContain('INTERNAL_NOTE_xyz');
     expect(out.stdout).not.toContain(SECRET);
-    // the human hint is on stderr, keeping stdout clean.
+    // …and nothing but JSON: the human hint must be on stderr, not stdout.
+    expect(out.stdout.trimStart().startsWith('{')).toBe(true);
+    expect(out.stdout).not.toContain('不含任何密钥');
     expect(out.stderr).toContain('不含任何密钥');
+  });
+
+  it('bare shell (no SESSION_DATA_DIR) reads role/capability from the default data dir', () => {
+    const out = runCliBare(['preset', 'export', APP_BARE, '--out', '-', '--yes']);
+    expect(out.status).toBe(0);
+    const parsed = JSON.parse(out.stdout);
+    // Proves resolveDataDir() → default dir AND the lazy getter is read live:
+    // without the fix, config.session.dataDir would stay the packaged default
+    // and these would be silently absent.
+    expect(parsed.teamRole).toContain('BARE_SHELL_ROLE_marker');
+    expect(parsed.capability).toBe('裸终端能力');
   });
 
   it('non-TTY without --yes fails fast (does not block on a prompt)', () => {
