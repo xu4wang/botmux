@@ -2290,6 +2290,9 @@ botmux v${getVersion()} — IM ↔ AI 编程 CLI 桥接
   lang [zh|en]         切换 UI 语言（无参 = 查看当前设置）
        --bot N         仅改 bots.json 中第 N 个 bot 的 lang
        --unset         清除（global 或 --bot N 配合）
+  voice                配置语音总结（高级功能，独立于 setup）— 交互式填 TTS 引擎+凭证
+       voice status    查看当前语音配置（凭证打码）
+       voice disable   关闭语音功能（移除配置）
 
 定时任务（可在 CLI 会话内自动推断 chat）:
   schedule list                        列出所有任务
@@ -3240,50 +3243,54 @@ async function cmdSend(rest: string[]): Promise<void> {
       if (footerRecipients.length > 0) {
         footerParts.push(`发送给：${footerRecipients.map(id => `<at id=${id}></at>`).join(' ')}`);
       }
-      // Empty brand + no recipients → no footer at all (skip the orphan HR).
-      if (footerParts.length > 0) {
-        elements.push({ tag: 'hr' });
-        elements.push({
-          tag: 'markdown',
-          text_size: 'notation_small_v2',
-          content: `<font color='grey'>${footerParts.join(' · ')}</font>`,
-        });
-      }
-
-      // 🔊 语音总结 button — only when this bot has a usable TTS engine
-      // configured (gates rendering, per design). Clicking asks the session
-      // model to condense this reply into spoken prose and emit it via
-      // `botmux send --voice`. Skipped for top-level publishes (not a reply to
-      // the user). v2 cards deliver callbacks via behaviors.callback — a
-      // top-level `value` (1.x form) would NOT fire here.
+      // Footer line (brand 个性签名 + 发送给) and the optional 🔊 语音总结 button
+      // share ONE row: footer text on the left (weighted, fills), button pinned
+      // to the far right (auto width). When voice isn't configured the footer
+      // renders alone, as before. Button only on a reply (not --top-level).
+      // v2 cards put buttons inside column_set/column — never the 1.x
+      // `tag:'action'` container (Feishu rejects it, error 200861).
+      let voiceOn = false;
       if (!sendTopLevel) {
-        let voiceOn = false;
         try {
           const { isVoiceConfigured } = await import('./services/voice/index.js');
           voiceOn = isVoiceConfigured(appId);
         } catch { /* voice module/config unavailable → no button */ }
+      }
+      const footerContent = footerParts.length > 0
+        ? `<font color='grey'>${footerParts.join(' · ')}</font>`
+        : '';
+      if (footerContent || voiceOn) {
+        elements.push({ tag: 'hr' });
         if (voiceOn) {
           const anchorId = (isChatScope ? s.chatId : s.rootMessageId) ?? s.chatId;
-          elements.push({ tag: 'hr' });
-          // v2 cards reject the 1.x `tag:'action'` button container (Feishu
-          // 200861). A button must sit inside a layout container — mirror the
-          // relay picker's proven `column_set > column > [button]` shape.
           elements.push({
             tag: 'column_set',
+            flex_mode: 'none',
             horizontal_spacing: 'default',
-            columns: [{
-              tag: 'column',
-              width: 'auto',
-              elements: [{
-                tag: 'button',
-                text: { tag: 'plain_text', content: '🔊 语音总结' },
-                type: 'default',
-                behaviors: [{
-                  type: 'callback',
-                  value: { action: 'voice_summary', session_id: sid, root_id: anchorId, lark_app_id: appId, chat_id: targetChatId },
+            columns: [
+              {
+                tag: 'column', width: 'weighted', weight: 1, vertical_align: 'center',
+                elements: [{ tag: 'markdown', text_size: 'notation_small_v2', content: footerContent || ' ' }],
+              },
+              {
+                tag: 'column', width: 'auto', vertical_align: 'center',
+                elements: [{
+                  tag: 'button',
+                  text: { tag: 'plain_text', content: '🔊 语音总结' },
+                  type: 'default',
+                  behaviors: [{
+                    type: 'callback',
+                    value: { action: 'voice_summary', session_id: sid, root_id: anchorId, lark_app_id: appId, chat_id: targetChatId },
+                  }],
                 }],
-              }],
-            }],
+              },
+            ],
+          });
+        } else {
+          elements.push({
+            tag: 'markdown',
+            text_size: 'notation_small_v2',
+            content: footerContent,
           });
         }
       }
@@ -4395,6 +4402,81 @@ if (process.env.BOTMUX_WORKFLOW === '1') {
   }
 }
 
+/**
+ * `botmux voice` — standalone voice-summary configuration (advanced feature,
+ * intentionally NOT folded into `botmux setup`). Writes the global `voice`
+ * block to ~/.botmux/config.json. Subcommands: (none)=interactive setup,
+ * `status`=show masked config, `disable`=remove.
+ */
+async function cmdVoiceSetup(args: string[]): Promise<void> {
+  const sub = (args[0] ?? '').toLowerCase();
+  const { readGlobalConfig, mergeGlobalConfig } = await import('./global-config.js');
+  const { DEFAULT_SAMI_SPEAKER, DEFAULT_OPENAI_SPEAKER } = await import('./services/voice/index.js');
+  const mask = (s?: string) => (s ? `${s.slice(0, 4)}***` : '(未设)');
+
+  if (sub === 'status') {
+    const v = readGlobalConfig().voice;
+    if (!v) { console.log('语音功能未配置。运行 `botmux voice` 配置。'); return; }
+    console.log('当前语音配置（全局 ~/.botmux/config.json）:');
+    console.log(`  引擎: ${v.engine ?? '(自动)'}`);
+    console.log(`  音色: ${v.speaker ?? '(默认)'}`);
+    if (typeof v.rate === 'number') console.log(`  语速: ${v.rate}`);
+    if (v.sami) console.log(`  SAMI: accessKey=${mask(v.sami.accessKey)} secretKey=${mask(v.sami.secretKey)} appkey=${v.sami.appkey ?? '(未设)'}${v.sami.tokenUrl ? ` tokenUrl=${v.sami.tokenUrl}` : ''}`);
+    if (v.openai) console.log(`  OpenAI: baseUrl=${v.openai.baseUrl ?? '(未设)'} model=${v.openai.model ?? '(未设)'} apiKey=${mask(v.openai.apiKey)}`);
+    return;
+  }
+  if (sub === 'disable' || sub === 'off') {
+    mergeGlobalConfig({ voice: null });
+    console.log('✅ 已移除全局语音配置（回复卡片不再显示「🔊 语音总结」按钮）。重启 daemon 生效。');
+    return;
+  }
+  if (sub && sub !== 'setup') {
+    console.error('用法: botmux voice [status|disable]（无参 = 交互式配置）');
+    process.exit(1);
+  }
+
+  const rl = createInterface({ input: process.stdin, output: process.stdout });
+  try {
+    console.log('🔊 配置语音总结（高级功能）。写入全局 ~/.botmux/config.json，重启后生效。\n');
+    const eng = (await ask(rl, '选择 TTS 引擎  [1] SAMI（需 AK/SK/appkey）  [2] OpenAI 兼容（自带 baseUrl/key）: ')).trim();
+    const voice: Record<string, any> = {};
+    if (eng === '2' || /openai/i.test(eng)) {
+      voice.engine = 'openai';
+      const baseUrl = (await ask(rl, 'baseUrl（如 https://api.openai.com/v1，自托管如 http://127.0.0.1:8880/v1）: ')).trim();
+      const apiKey = (await ask(rl, 'apiKey（无则留空）: ')).trim();
+      const model = (await ask(rl, 'model（如 tts-1 / kokoro）: ')).trim();
+      if (!baseUrl || !model) { console.error('❌ baseUrl 和 model 必填，未写入。'); return; }
+      voice.openai = { baseUrl, apiKey, model };
+      const sp = (await ask(rl, `音色 voice（留空=默认 ${DEFAULT_OPENAI_SPEAKER}）: `)).trim();
+      if (sp) voice.speaker = sp;
+    } else {
+      voice.engine = 'sami';
+      const accessKey = (await ask(rl, 'SAMI accessKey: ')).trim();
+      const secretKey = (await ask(rl, 'SAMI secretKey: ')).trim();
+      const appkey = (await ask(rl, 'SAMI appkey: ')).trim();
+      if (!accessKey || !secretKey || !appkey) { console.error('❌ accessKey/secretKey/appkey 都必填，未写入。'); return; }
+      voice.sami = { accessKey, secretKey, appkey };
+      const sp = (await ask(rl, `音色 speaker（留空=默认灿灿 ${DEFAULT_SAMI_SPEAKER}）: `)).trim();
+      if (sp) voice.speaker = sp;
+      const adv = (await ask(rl, '自定义 SAMI 端点？一般不用，回车跳过 (y/N): ')).trim().toLowerCase();
+      if (adv === 'y') {
+        const tokenUrl = (await ask(rl, 'tokenUrl（留空用默认）: ')).trim();
+        const wsUrl = (await ask(rl, 'wsUrl（留空用默认）: ')).trim();
+        if (tokenUrl) voice.sami.tokenUrl = tokenUrl;
+        if (wsUrl) voice.sami.wsUrl = wsUrl;
+      }
+    }
+    const rate = (await ask(rl, '语速倍率（留空=1.1）: ')).trim();
+    if (rate && !Number.isNaN(Number(rate))) voice.rate = Number(rate);
+
+    mergeGlobalConfig({ voice: voice as any });
+    console.log('\n✅ 已写入 voice 配置。`botmux restart` 后，配了语音的机器人回复卡片底部会出现「🔊 语音总结」按钮。');
+    console.log('   查看：`botmux voice status`  关闭：`botmux voice disable`');
+  } finally {
+    rl.close();
+  }
+}
+
 switch (command) {
   case '--version':
   case '-v':      console.log(getVersion()); break;
@@ -4440,6 +4522,7 @@ switch (command) {
   case 'history':  await cmdHistory(process.argv.slice(3)); break;
   case 'quoted':   await cmdQuoted(process.argv.slice(3)); break;
   case 'lang':     cmdLang(process.argv.slice(3)); break;
+  case 'voice':    await cmdVoiceSetup(process.argv.slice(3)); break;
   case 'thread':   {
     // Removed in favor of `botmux history` (普通群也兼容). Friendly stderr so
     // pre-rename scripts/skills surface the rename instead of "unknown command".

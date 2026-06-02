@@ -88,4 +88,19 @@ describe('card-handler voice_summary', () => {
     const res = await handler.handleCardAction(voiceAction('om_card1'), deps, 'h1');
     expect(res?.toast?.type).toBe('warning');
   });
+
+  it('unauthorized user (not canTalk/canOperate) → needs-auth toast, no injection', async () => {
+    // Bot WITH an allowlist; clicker (ou_clicker) is NOT on it → blocked.
+    const dir = mkdtempSync(join(tmpdir(), 'botmux-cardvoice-auth-'));
+    const cfg = join(dir, 'bots.json');
+    writeFileSync(cfg, JSON.stringify([{ larkAppId: 'h1', larkAppSecret: 's', cliId: 'claude-code', allowedUsers: ['ou_owner'] }], null, 2));
+    process.env.BOTS_CONFIG = cfg;
+    const { types, handler } = await fresh();
+    const send = vi.fn();
+    deps.activeSessions.set(types.sessionKey('om_root', 'h1'), fakeSession(send));
+
+    const res = await handler.handleCardAction(voiceAction('om_card1'), deps, 'h1'); // operator = ou_clicker
+    expect(res?.toast?.type).toBe('warning');
+    expect(send).not.toHaveBeenCalled();
+  });
 });

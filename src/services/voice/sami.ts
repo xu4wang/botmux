@@ -23,10 +23,8 @@ export interface SamiCreds {
   accessKey: string;
   secretKey: string;
   appkey: string;
-  /** SAMI token + WS endpoints. SAMI is an internal service, so its hostnames
-   *  are NOT hardcoded here (this is an open-source repo) — the operator
-   *  supplies them via config (`voice.sami.tokenUrl` / `voice.sami.wsUrl`) or
-   *  the `SAMI_TOKEN_URL` / `SAMI_WS_URL` env vars. Missing → clear error. */
+  /** Optional endpoint overrides. Default to the standard SAMI endpoints; set
+   *  these (or SAMI_TOKEN_URL / SAMI_WS_URL env) only to point elsewhere. */
   tokenUrl?: string;
   wsUrl?: string;
 }
@@ -34,17 +32,12 @@ export interface SamiCreds {
 const AUTH_VERSION = 'auth-v1';
 const OK = 20000000; // SAMI success status_code
 const SAMI_SR = 24000;
+const DEFAULT_TOKEN_URL = 'https://sami.bytedance.com/internal/api/v1/token';
+const DEFAULT_WS_URL = 'wss://sami.bytedance.com/internal/api/v1/ws?api_resource_id=tts.sync';
 
-/** Resolve an endpoint from config → env. No default: internal hostnames must
- *  never be baked into this public repo. */
-function samiEndpoint(fromConfig: string | undefined, envName: string, label: string): string {
-  const url = fromConfig || process.env[envName];
-  if (!url) {
-    throw new Error(
-      `未配置 SAMI ${label} 端点：在 voice.sami.${label === 'token' ? 'tokenUrl' : 'wsUrl'} 填写，或设环境变量 ${envName}。`,
-    );
-  }
-  return url;
+/** Resolve an endpoint: per-call config override → env var → default. */
+function samiEndpoint(fromConfig: string | undefined, envName: string, fallback: string): string {
+  return fromConfig || process.env[envName] || fallback;
 }
 
 /** Mint a short-lived SAMI token (default 24h). Two-step HMAC: sign the
@@ -66,7 +59,7 @@ export async function mintSamiToken(creds: SamiCreds, expiration = 86400): Promi
     expiration: String(expiration),
     signature,
   });
-  const tokenUrl = samiEndpoint(creds.tokenUrl, 'SAMI_TOKEN_URL', 'token');
+  const tokenUrl = samiEndpoint(creds.tokenUrl, 'SAMI_TOKEN_URL', DEFAULT_TOKEN_URL);
   const res = await fetch(`${tokenUrl}?${qs.toString()}`, { cache: 'no-store' });
   const data = (await res.json()) as { token?: string; status_text?: string };
   if (!data.token) throw new Error(`SAMI token 签发失败：${data.status_text ?? JSON.stringify(data).slice(0, 160)}`);
@@ -108,7 +101,7 @@ export async function samiSynthesizePcm(creds: SamiCreds, text: string, opts: Sa
     ...(config.extra ? { extra: config.extra } : {}),
   };
 
-  const wsUrl = samiEndpoint(creds.wsUrl, 'SAMI_WS_URL', 'ws');
+  const wsUrl = samiEndpoint(creds.wsUrl, 'SAMI_WS_URL', DEFAULT_WS_URL);
   return await new Promise<Pcm>((resolve, reject) => {
     const ws = new WebSocket(wsUrl);
     const chunks: Buffer[] = [];
