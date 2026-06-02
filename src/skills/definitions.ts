@@ -400,7 +400,6 @@ botmux send --top-level --chat-id oc_xxxxxxxxxxxx "📦 自动推送内容..."
 | \`--no-mention\` | 明确声明本条不 @ 任何人。满足 @ 硬门 |
 | \`--quote <message_id>\` | 引用指定消息（普通群）。默认引用本轮触发消息 |
 | \`--no-quote\` | 不引用，发独立消息（普通群） |
-| \`--card\` / \`--text\` | 强制卡片或纯文本模式（默认按 md 语法自动判断） |
 | \`--top-level\` | 发顶层消息（不回复进当前话题）；自动跳过"发送给/cc" footer |
 | \`--chat-id <oc_xxx>\` | 指定目标群（默认当前会话所在群）；常和 \`--top-level\` 一起用做跨群发布 |
 | \`--session-id <id>\` | 手动指定 session（通常自动推断，不需要传） |

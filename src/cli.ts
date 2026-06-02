@@ -2310,7 +2310,7 @@ botmux v${getVersion()} — IM ↔ AI 编程 CLI 桥接
        --no-mention                    明确声明本条不@任何人
        --quote <message_id>            指定引用某条消息（普通群，默认引用本轮触发消息）
        --no-quote                      不引用，发独立消息（普通群）
-       --card | --text                 强制卡片 / 纯文本（默认按 md 语法自动判断）
+       --voice "<口语文字>"            合成语音气泡发出（需先 botmux voice 配置 TTS）
        --top-level                     发顶层消息（不回复进当前话题）
        --chat-id <oc_xxx>              指定目标群（默认当前话题所在群）
        --anyway                        跳过「@ 到活跃子 bot」护栏强发（见下）
@@ -2757,8 +2757,8 @@ function argValues(args: string[], ...flags: string[]): string[] {
 // Card v2 body builder helpers — extracted to im/lark/md-card.ts so the
 // daemon's bridge fallback path can produce identical cards. cmdSend
 // keeps using `buildCardBodyElements` and `hasMarkdown` from there.
-import { buildCardBodyElements, hasMarkdown, brandFooterSegment } from './im/lark/md-card.js';
-import { claimPendingResponseCard, isPendingResponseCardOpen, markPendingResponseCardPatchedIfCurrent, mergePendingResponseState, shouldUseCardForSend } from './core/pending-response.js';
+import { buildCardBodyElements, brandFooterSegment } from './im/lark/md-card.js';
+import { claimPendingResponseCard, isPendingResponseCardOpen, markPendingResponseCardPatchedIfCurrent, mergePendingResponseState } from './core/pending-response.js';
 import { resolveBrandLabel } from './bot-registry.js';
 import { config } from './config.js';
 import { resolveQuoteTarget, validateMentionDecision } from './services/send-policy.js';
@@ -2785,8 +2785,8 @@ async function cmdSend(rest: string[]): Promise<void> {
   const files = argValues(rest, '--file', '--files');
   const mentionArgs = argValues(rest, '--mention');  // "open_id:Display Name"
   const contentFile = argValue(rest, '--content-file');
-  const forceCard = rest.includes('--card');
-  const forceText = rest.includes('--text');
+  // 回复一律走交互卡片。`--card` / `--text` 仅为向后兼容被容忍并忽略：纯文本 post
+  // 路径已删除——只有卡片能承载「🔊 语音总结」按钮，且守护进程兜底也一直只发卡片。
   // Publish-mode flags: post a fresh top-level message in a chat instead of
   // replying into the bound thread. Lets a session "publish" to a different
   // chat (e.g. a public release-notes group) while keeping its own thread
@@ -3156,16 +3156,6 @@ async function cmdSend(rest: string[]): Promise<void> {
           knownBotOpenIds,
         });
 
-    // Decide: interactive card (renders markdown) vs. post (plain text).
-    // An open pending response card takes precedence over --text so the
-    // placeholder can close cleanly; otherwise explicit --card / --text wins.
-    const useCard = shouldUseCardForSend({
-      forceCard,
-      forceText,
-      hasMarkdown: hasMarkdown(text),
-      hasOpenPendingResponseCard: isPendingResponseCardOpen(s),
-    });
-
     const mentionMap = new Map<string, string>();
     for (const m of mentions) if (m.name) mentionMap.set(m.name.toLowerCase(), m.open_id);
     const namedMentions = mentions.filter(m => m.name);
@@ -3181,7 +3171,8 @@ async function cmdSend(rest: string[]): Promise<void> {
     // we committed to sending — that's the boundary the gate cares about.
     const sentAtMs = Date.now();
     let messageId: string;
-    if (useCard) {
+    {
+      // 回复一律卡片（纯文本 post 路径已删）。
       // Inline @mention → <at id=open_id></at>; explicit --mention args that
       // weren't inlined are appended to the body. The session owner is
       // rendered in the footer note instead of the body.
@@ -3301,47 +3292,6 @@ async function cmdSend(rest: string[]): Promise<void> {
         body: { direction: 'vertical', elements },
       });
       messageId = await dispatchOrPatchPending(cardJson, 'interactive');
-    } else {
-      // Plain-text path: build post content, paragraph per line.
-      const postContent: any[][] = text ? text.split('\n').map((line: string) => {
-        if (!mentionPattern) return [{ tag: 'text', text: line }];
-        const nodes: any[] = [];
-        let lastIndex = 0;
-        for (const match of line.matchAll(mentionPattern)) {
-          const openId = mentionMap.get(match[1].toLowerCase());
-          if (!openId) continue;
-          if (match.index > lastIndex) nodes.push({ tag: 'text', text: line.slice(lastIndex, match.index) });
-          nodes.push({ tag: 'at', user_id: openId });
-          lastIndex = match.index + match[0].length;
-        }
-        if (lastIndex < line.length) nodes.push({ tag: 'text', text: line.slice(lastIndex) });
-        return nodes.length > 0 ? nodes : [{ tag: 'text', text: line }];
-      }) : [];
-
-      for (const key of imageKeys) postContent.push([{ tag: 'img', image_key: key }]);
-
-      // Footer: mirror the card layout — all real mentions go on one
-      // `发送给：` line (human addressee first, then explicit targets, then cc),
-      // separated from the body by a blank paragraph. Ids already inlined in the
-      // body prose are skipped. Top-level publish keeps sendTo empty.
-      const inlinedIds = new Set<string>();
-      for (const para of postContent) for (const n of para) if (n.tag === 'at') inlinedIds.add(n.user_id);
-      const footerRecipients = orderedFooterRecipients({
-        sendTo: footerAddressing.sendTo,
-        mentionIds: mentions.map(m => m.open_id),
-        cc: footerAddressing.cc,
-        inlinedIds,
-      });
-      if (footerRecipients.length > 0) {
-        if (postContent.length > 0) postContent.push([{ tag: 'text', text: '' }]);
-        postContent.push([
-          { tag: 'text', text: '发送给：' },
-          ...footerRecipients.map(id => ({ tag: 'at', user_id: id })),
-        ]);
-      }
-
-      const postJson = JSON.stringify({ zh_cn: { title: '', content: postContent } });
-      messageId = await dispatchPrimary(postJson, 'post');
     }
 
     // Bridge fallback marker — append-only jsonl per session. Same-thread

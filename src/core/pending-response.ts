@@ -43,16 +43,6 @@ export function mergePendingResponseState<T extends PendingResponseSession>(inco
   };
 }
 
-export function shouldUseCardForSend(opts: {
-  forceCard: boolean;
-  forceText: boolean;
-  hasMarkdown: boolean;
-  hasOpenPendingResponseCard: boolean;
-}): boolean {
-  if (opts.hasOpenPendingResponseCard) return true;
-  return opts.forceCard || (!opts.forceText && opts.hasMarkdown);
-}
-
 export function shouldWithdrawPreviousPendingOnNewTurn(_session: Pick<Session, 'pendingResponseCardId' | 'pendingResponseCardState'>): boolean {
   return false;
 }

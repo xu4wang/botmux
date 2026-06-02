@@ -8,7 +8,6 @@ import {
   markPendingResponseCardPatched,
   markPendingResponseCardPatchedIfCurrent,
   shouldWithdrawPreviousPendingOnNewTurn,
-  shouldUseCardForSend,
   startPendingResponseTurn,
   syncPendingResponseState,
 } from '../src/core/pending-response.js';
@@ -31,11 +30,6 @@ describe('pending response state', () => {
     expect(session.lastPatchedResponseCardId).toBe('om_processing');
     expect(session.pendingResponseCardState).toBe('patched');
     expect(isPendingResponseCardOpen(session)).toBe(false);
-  });
-
-  it('uses card output when an open pending card exists even if --text is set', () => {
-    expect(shouldUseCardForSend({ forceCard: false, forceText: true, hasMarkdown: false, hasOpenPendingResponseCard: true })).toBe(true);
-    expect(shouldUseCardForSend({ forceCard: false, forceText: true, hasMarkdown: true, hasOpenPendingResponseCard: false })).toBe(false);
   });
 
   it('syncs daemon in-memory pending state from persisted patched state', () => {
