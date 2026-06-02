@@ -6,7 +6,7 @@
 import * as Lark from '@larksuiteoapi/node-sdk';
 import { readFileSync, writeFileSync, mkdirSync, existsSync } from 'node:fs';
 import { join } from 'node:path';
-import { getBot, getAllBots, isChatOncallBoundForAnyBot, getOwnerOpenId, type BotState } from '../../bot-registry.js';
+import { getBot, getAllBots, findOncallChat, getOwnerOpenId, type BotState } from '../../bot-registry.js';
 import { config } from '../../config.js';
 import { getChatInfo, getChatMode, listChatBotMembers, replyMessage, sendUserMessage, isHumanOpenId } from './client.js';
 import { logger } from '../../utils/logger.js';
@@ -519,13 +519,13 @@ export function isBotMentioned(larkAppId: string, message: any, _senderOpenId: s
 //                slash commands like /cd /restart /close /oncall)
 //
 // Non-oncall chats: both fall back to the bot's allowedUsers.
-// Oncall-bound chats: talking is open to everyone in the group; operating
-// still requires allowedUsers (single source of truth — no per-chat owners).
+// Oncall-bound chats for the receiving bot: talking is open to everyone in the
+// group; operating still requires allowedUsers (single source of truth — no
+// per-chat owners).
 //
-// Oncall is a chat-level concept: `isChatOncallBoundForAnyBot` returns true
-// when ANY bot (this one or a sibling in another daemon) has the chat bound,
-// so an unbound sibling doesn't fall back to allowedUsers and reply
-// "⚠️ 无操作权限" when @-mentioned in a shared oncall workspace.
+// Oncall talk access is bot-scoped. Binding Bot A to a chat does not relax talk
+// access for sibling Bot B in the same deployment; Bot B must bind the same chat
+// itself, or continue using its own allowedUsers/chatGrants/globalGrants.
 
 export type TalkReason =
   | 'allowedUser'
@@ -579,7 +579,7 @@ export function evaluateTalk(larkAppId: string, chatId: string | undefined, send
   // 成员关系隐含在"能在该 chat 发言"里 —— 退群者发不了言自动失权，新人进群即生效，无需成员快照。
   const allowedUsers = bot.resolvedAllowedUsers;
   if (senderOpenId && allowedUsers.includes(senderOpenId)) return { allowed: true, reason: 'allowedUser' };
-  if (chatId && isChatOncallBoundForAnyBot(chatId)) return { allowed: true, reason: 'oncall' };
+  if (chatId && findOncallChat(larkAppId, chatId)) return { allowed: true, reason: 'oncall' };
   if (isKnownPeerBot(config.session.dataDir, larkAppId, senderOpenId)) return { allowed: true, reason: 'peer' };
   if (chatId && bot.config.allowedChatGroups?.includes(chatId)) return { allowed: true, reason: 'allowedChatGroup' };
 
@@ -946,15 +946,17 @@ export function startLarkEventDispatcher(larkAppId: string, larkAppSecret: strin
           // 对外部 bot 恒为 false——这跟 /introduce 是两套独立存储：/introduce 写的是
           // observed-bots-store，只负责让发送方"发现并能 @ 到"对方，过不了这道接收闸。
           //
-          // Oncall 群是显式部署的协作工作区，canTalk 已对任何成员（含真人）放行；这里
-          // 对 bot 同等放行，跳过 cross-ref vetting。否则 oncall 群里外部 bot 互相 @
-          // 会被静默丢弃、只有真人能拉起会话，与 oncall「全员可对话」语义不符。
+          // Oncall 群是当前接收 bot 显式部署的协作工作区，canTalk 已对任何成员
+          // （含真人）放行；这里对 bot 同等放行，跳过 cross-ref vetting。否则本
+          // bot 已绑定的 oncall 群里外部 bot 互相 @ 会被静默丢弃、只有真人能拉起会话。
+          // 注意 oncall talk access 是 bot-scoped：一个 bot 的 /oncall bind 不会放开
+          // sibling bot 的 talk 权限；如果 sibling bot 也要开放，需要自己绑定同一个 chat。
           //
           // owner 还可用 `/grant @bot` 把外部 bot 加进本群 chatGrants（与真人 /grant
           // 同一存储、同一 per-chat 语义）。命中 chatGrants 的 bot 即便不在 cross-ref，
           // 也与已注册 peer 同等放行——这是「授权外部 bot 在本群协作」的入口。
           // 全局授权（globalGrants）同理：命中即在任意群放行，是上面的全局版。
-          if (ctx.scope === 'chat' && !isChatOncallBoundForAnyBot(chatId)) {
+          if (ctx.scope === 'chat' && !findOncallChat(larkAppId, chatId)) {
             const ownsSession = handlers.isSessionOwner?.(ctx.anchor, larkAppId) ?? false;
             if (!ownsSession
                 && !isKnownPeerBot(config.session.dataDir, larkAppId, senderOpenId)
