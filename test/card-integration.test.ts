@@ -14,7 +14,8 @@
  *   3. Multi-turn: new card creation + old card freeze (nonce-based isolation)
  *   4. restart / close button actions
  *   5. Old card toggle ignored (card_nonce mismatch)
- *   6. get_write_link sends DM to operator
+ *   6. get_write_link delivers the write-link card privately (ephemeral in a
+ *      group, DM fallback in p2p)
  *
  * Run:  pnpm vitest run test/card-integration.test.ts
  */
@@ -726,13 +727,15 @@ describe('Card integration: full event flow', () => {
     });
   });
 
-  // ── Scenario 5: get_write_link DM ────────────────────────────────────
+  // ── Scenario 5: get_write_link delivers the write-link card privately ──
 
-  describe('Scenario 5: get_write_link sends DM', () => {
-    it('should send session card via DM to operator', async () => {
+  describe('Scenario 5: get_write_link delivers the write-link card privately', () => {
+    it('sends an ephemeral "visible-to-you" card in a group chat, not a DM', async () => {
+      const clientMod = await import('../src/im/lark/client.js');
       const ds = makeDaemonSession({
         workerPort: 9090,
         workerToken: 'write_tok',
+        chatType: 'group',
       });
       const sessions = new Map<string, DaemonSession>();
       sessions.set(sessionKey(ROOT_ID, APP_ID), ds);
@@ -741,11 +744,36 @@ describe('Card integration: full event flow', () => {
       await handleCardAction(makeGetWriteLinkEvent(ROOT_ID, 'ou_user'), deps, APP_ID);
       await flush();
 
+      // 普通群 → 仅点击者可见的 ephemeral 私密卡，不发 DM。
+      expect(vi.mocked(clientMod.sendEphemeralCard)).toHaveBeenCalledWith(
+        APP_ID, ds.chatId, 'ou_user', expect.stringContaining('"type":"session"'),
+      );
+      const card = parseCard(vi.mocked(clientMod.sendEphemeralCard).mock.calls[0][3] as string);
+      expect(card.type).toBe('session');
+      expect(card.showManageButtons).toBe(true);
+      expect(fakeLark.dms).toHaveLength(0);
+    });
+
+    it('falls back to a private DM in a p2p chat (ephemeral unsupported there)', async () => {
+      const clientMod = await import('../src/im/lark/client.js');
+      const ds = makeDaemonSession({
+        workerPort: 9090,
+        workerToken: 'write_tok',
+        chatType: 'p2p',
+      });
+      const sessions = new Map<string, DaemonSession>();
+      sessions.set(sessionKey(ROOT_ID, APP_ID), ds);
+      const deps = makeDeps(sessions);
+
+      await handleCardAction(makeGetWriteLinkEvent(ROOT_ID, 'ou_user'), deps, APP_ID);
+      await flush();
+
+      // 单聊 → 跳过注定失败的 ephemeral，直接私聊 DM（DM 落在同一个 1:1 会话里）。
+      expect(vi.mocked(clientMod.sendEphemeralCard)).not.toHaveBeenCalled();
       expect(fakeLark.dms).toHaveLength(1);
       expect(fakeLark.dms[0].args[0]).toBe(APP_ID);
       expect(fakeLark.dms[0].args[1]).toBe('ou_user');
-      const dmCard = parseCard(fakeLark.dms[0].args[2]);
-      expect(dmCard.type).toBe('session');
+      expect(parseCard(fakeLark.dms[0].args[2]).type).toBe('session');
     });
 
     it('should reply with warning when terminal not ready', async () => {

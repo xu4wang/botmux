@@ -7,7 +7,7 @@ import { execSync } from 'node:child_process';
 import { config } from '../../config.js';
 import { getBot, getAllBots, getOwnerOpenId } from '../../bot-registry.js';
 import { canOperate } from './event-dispatcher.js';
-import { sendUserMessage, updateMessage, deleteMessage, replyMessage, sendMessage, sendEphemeralCard, getMessageDetail, isHumanOpenId } from './client.js';
+import { updateMessage, deleteMessage, replyMessage, sendMessage, sendEphemeralCard, getMessageDetail, isHumanOpenId } from './client.js';
 import { buildSessionCard, buildStreamingCard, buildTuiPromptCard, buildTuiPromptProcessingCard, buildTuiPromptResolvedCard, buildSessionClosedCard, buildGrantResultCard, buildGrantNotifyCard, getCliDisplayName, truncateContent } from './card-builder.js';
 import { addChatGrant, addGlobalGrant } from '../../services/grant-store.js';
 import { checkNonce, clearPending, markDenied, getPendingQuota } from './grant-pending.js';
@@ -22,7 +22,7 @@ import { createCliAdapterSync } from '../../adapters/cli/registry.js';
 import { logger } from '../../utils/logger.js';
 import * as sessionStore from '../../services/session-store.js';
 import { loadFrozenCards, saveFrozenCards } from '../../services/frozen-card-store.js';
-import { forkWorker, killWorker, scheduleCardPatch, parkStreamCard, clearUsageLimitState, cardUsageLimit, writableTerminalLinkFor, resolvePrivateCardAudience, CARD_POSTING_SENTINEL } from '../../core/worker-pool.js';
+import { forkWorker, killWorker, scheduleCardPatch, parkStreamCard, clearUsageLimitState, cardUsageLimit, writableTerminalLinkFor, resolvePrivateCardAudience, deliverWriteLinkCard, CARD_POSTING_SENTINEL } from '../../core/worker-pool.js';
 import { getSessionWorkingDir, buildNewTopicPrompt, getAvailableBots, persistStreamCardState, resumeSession, rememberLastCliInput } from '../../core/session-manager.js';
 import type { DaemonToWorker, DisplayMode, TermActionKey } from '../../types.js';
 import { sessionKey, sessionAnchorId, frozenDisplayMode } from '../../core/types.js';
@@ -830,20 +830,19 @@ export async function handleCardAction(data: CardActionData, deps: CardHandlerDe
       const locDs = localeForBot(ds.larkAppId);
       if (ds.workerPort && ds.workerToken) {
         const writeUrl = buildTerminalUrl(ds, { write: true });
-        const dmCardJson = buildSessionCard(
+        const cardJson = buildSessionCard(
           ds.session.sessionId,
           sessionAnchorId(ds),
           writeUrl,
           ds.session.title || getCliDisplayName(effectiveCliId),
           effectiveCliId,
-          true, // showManageButtons — DM card includes restart & close
+          true, // showManageButtons — write-link card includes restart & close
           !!ds.adoptedFrom, // adoptMode — disconnect, never close-the-CLI
           locDs,
         );
-        sendUserMessage(ds.larkAppId, operatorOpenId, dmCardJson, 'interactive').catch(err =>
-          logger.warn(`[${tag(ds)}] Failed to DM write link: ${err}`),
-        );
-        logger.info(`[${tag(ds)}] Sent write link via DM to ${operatorOpenId}`);
+        // 普通群发「仅自己可见」私密卡，话题群 / 单聊自动回退私聊 DM（两条通道都私密，
+        // 不泄露写入 token）。fire-and-forget，保持卡片回调快速返回。
+        void deliverWriteLinkCard(ds, operatorOpenId, cardJson);
       } else {
         await sessionReply(rootId, t('card.action.terminal_not_ready', undefined, locDs));
       }

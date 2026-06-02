@@ -34,7 +34,7 @@ function escapeMd(s: string): string {
 
 /**
  * Build a Feishu interactive card with terminal button + action buttons.
- * @param showManageButtons - When true, include restart & close buttons (used in DM cards with write token).
+ * @param showManageButtons - When true, include restart & close buttons (used in the private write-link card — delivered as a "visible-to-you" ephemeral card in plain groups, or DM'd as fallback).
  * @param adoptMode - When true, the danger button reads "⏏ 断开" with action `disconnect` (only tears down botmux's bridge worker, leaves the user's tmux pane / Claude process alone). Mutually exclusive with `showManageButtons` (DM management isn't surfaced for adopt sessions). Without this flag the card uses the original "❌ 关闭会话" button which closes the underlying CLI — wrong for adopt where we never owned the CLI in the first place.
  */
 export function buildSessionCard(

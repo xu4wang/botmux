@@ -14,7 +14,7 @@ import { randomBytes } from 'node:crypto';
 import { config } from '../config.js';
 import * as sessionStore from '../services/session-store.js';
 import { persistStreamCardState } from './session-manager.js';
-import { updateMessage, deleteMessage, sendEphemeralCard, addReaction, MessageWithdrawnError } from '../im/lark/client.js';
+import { updateMessage, deleteMessage, sendEphemeralCard, sendUserMessage, addReaction, MessageWithdrawnError } from '../im/lark/client.js';
 import { buildStreamingCard, buildPrivateSnapshotCard, buildSessionCard, buildTuiPromptCard, buildTuiPromptResolvedCard, buildRelayedFrozenCard, getCliDisplayName } from '../im/lark/card-builder.js';
 import { loadFrozenCards, saveFrozenCards } from '../services/frozen-card-store.js';
 import { clearPendingResponsePatchMarker, markPendingResponsePatchMarkerPatched, writePendingResponsePatchMarker } from '../services/pending-response-transaction-store.js';
@@ -496,6 +496,50 @@ export async function postPrivateSnapshotCard(
   }
   logger.info(`[${tag(ds)}] private /card: ephemeral sent ${sent}/${audience.length}`);
   return { sent, total: audience.length, notReady: false };
+}
+
+/**
+ * Deliver the write-enabled session card (the "🔑 获取操作链接" card, which carries
+ * a write-token terminal URL + manage buttons) privately to a single operator.
+ *
+ * Prefers an in-chat "visible-to-you" ephemeral card so the operator never has
+ * to leave the conversation. Feishu's ephemeral API only works in plain `group`
+ * chats — topic / thread groups reject with {@link LARK_CODE_EPHEMERAL_NOT_GROUP}
+ * (18053) and p2p chats are unsupported — and chatType can't distinguish a topic
+ * group from a regular one (both record 'group'), so we attempt ephemeral for any
+ * non-p2p chat and fall back to a private DM on ANY failure. p2p chats skip the
+ * doomed ephemeral attempt and DM directly (the DM lands in that same 1:1 chat).
+ *
+ * Both channels are private, so the DM fallback never leaks the write token —
+ * unlike the private /card snapshot (which fails closed), here we fail OVER.
+ *
+ * Returns the channel actually used, or 'failed' if both errored.
+ */
+export async function deliverWriteLinkCard(
+  ds: DaemonSession,
+  operatorOpenId: string,
+  cardJson: string,
+): Promise<'ephemeral' | 'dm' | 'failed'> {
+  const who = operatorOpenId.substring(0, 8);
+  if (ds.chatType !== 'p2p') {
+    try {
+      await sendEphemeralCard(ds.larkAppId, ds.chatId, operatorOpenId, cardJson);
+      logger.info(`[${tag(ds)}] write link delivered via ephemeral card to ${who}…`);
+      return 'ephemeral';
+    } catch (err) {
+      // Expected in topic/thread groups (18053); any other error is also safe to
+      // retry via DM since the DM is private too.
+      logger.info(`[${tag(ds)}] ephemeral write-link card unavailable here (${err}); falling back to DM`);
+    }
+  }
+  try {
+    await sendUserMessage(ds.larkAppId, operatorOpenId, cardJson, 'interactive');
+    logger.info(`[${tag(ds)}] write link delivered via DM to ${who}…`);
+    return 'dm';
+  } catch (err) {
+    logger.warn(`[${tag(ds)}] failed to deliver write link (ephemeral + DM both failed): ${err}`);
+    return 'failed';
+  }
 }
 
 // ─── Card PATCH serialization queue ─────────────────────────────────────────
