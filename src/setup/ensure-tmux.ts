@@ -154,7 +154,7 @@ function sudoPrefix(cmd: string[], info: PlatformInfo): string[] | undefined {
 /** Build the install argv for a given package manager. Pure: returns argv[]
  *  ready for spawnSync, no side effects. Returns undefined if escalation
  *  isn't possible. */
-function buildInstallArgv(pm: PackageManager, pkg: string, info: PlatformInfo): string[] | undefined {
+export function buildInstallArgv(pm: PackageManager, pkg: string, info: PlatformInfo): string[] | undefined {
   switch (pm) {
     case 'brew':    return ['brew', 'install', pkg];
     case 'conda':   return ['conda', 'install', '-y', '-c', 'conda-forge', pkg];
@@ -173,7 +173,7 @@ function buildInstallArgv(pm: PackageManager, pkg: string, info: PlatformInfo): 
  *  (which is pure) — it runs once just before the apt install attempt.
  *  Failure here is non-fatal; the actual install will fail loudly if it
  *  can't find the package. */
-function aptUpdateBeforeInstall(info: PlatformInfo): void {
+export function aptUpdateBeforeInstall(info: PlatformInfo): void {
   const argv = sudoPrefix(['apt-get', 'update'], info);
   if (!argv) return;
   try {
@@ -182,7 +182,7 @@ function aptUpdateBeforeInstall(info: PlatformInfo): void {
 }
 
 /** Suggest the manual command we'd have run, for the failure message. */
-function suggestManualCommand(pm: PackageManager, pkg: string): string {
+export function suggestManualCommand(pm: PackageManager, pkg: string): string {
   switch (pm) {
     case 'brew': return `brew install ${pkg}`;
     case 'conda': return `conda install -y -c conda-forge ${pkg}`;
@@ -196,7 +196,7 @@ function suggestManualCommand(pm: PackageManager, pkg: string): string {
   }
 }
 
-function runInstall(argv: string[]): boolean {
+export function runInstall(argv: string[]): boolean {
   const result = spawnSync(argv[0]!, argv.slice(1), {
     stdio: 'inherit',
     timeout: 10 * 60_000, // 10 min — apt-get on slow networks

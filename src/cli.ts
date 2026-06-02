@@ -4432,6 +4432,24 @@ async function cmdVoiceSetup(args: string[]): Promise<void> {
     mergeGlobalConfig({ voice: voice as any });
     console.log('\n✅ 已写入 voice 配置。`botmux restart` 后，配了语音的机器人回复卡片底部会出现「🔊 语音总结」按钮。');
     console.log('   查看：`botmux voice status`  关闭：`botmux voice disable`');
+
+    // 语音合成产物要编码成飞书语音气泡用的 opus，依赖系统的 opusenc(opus-tools)。
+    // 缺了就当场帮用户装（沿用 ensure-tmux 的包管理器/sudo 机制）。
+    const { ensureOpusTools, probeOpusenc } = await import('./setup/ensure-opus.js');
+    if (!probeOpusenc()) {
+      console.log('\n⚠️  未检测到 opus 编码器（opus-tools）——语音合成需要它把音频转成飞书语音格式。');
+      const yes = (await ask(rl, '现在自动安装 opus-tools？(Y/n): ')).trim().toLowerCase();
+      if (yes === '' || yes === 'y' || yes === 'yes') {
+        const r = await ensureOpusTools();
+        if (r.installed) console.log(`✅ opus-tools 就绪${r.version ? `（${r.version}）` : ''}`);
+        else {
+          console.log(`未能自动安装：${r.reason ?? ''}`);
+          console.log(`请手动安装后再用语音：${r.manualCommand ?? 'apt-get install -y opus-tools / brew install opus-tools'}`);
+        }
+      } else {
+        console.log('已跳过。记得手动安装：Debian/Ubuntu `sudo apt-get install -y opus-tools`，macOS `brew install opus-tools`。');
+      }
+    }
   } finally {
     rl.close();
   }
