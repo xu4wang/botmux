@@ -17,6 +17,7 @@ import { realpathSync } from 'node:fs';
 import type { CliId } from '../adapters/cli/types.js';
 import {
   readComm, readCwd, getChildPids, readClaudeSessionMeta, cliIdFromCommArgv, readCmdline,
+  readProcessStartTime,
 } from './session-discovery.js';
 import { findCodexRolloutByPid } from '../services/codex-transcript.js';
 import { findCocoSessionByPid } from '../services/coco-transcript.js';
@@ -224,7 +225,9 @@ export function discoverAdoptableZellijSessions(filterCliId?: CliId): ZellijAdop
         cliId: cli.cliId,
         sessionId,
         cwd: cli.cwd ?? '',
-        startedAt,
+        // Same uptime fallback as the tmux path: only Claude carries startedAt
+        // from its session JSON, so derive it from the process for everyone else.
+        startedAt: startedAt ?? readProcessStartTime(cli.pid),
         paneCols: dims.cols,
         paneRows: dims.rows,
       });

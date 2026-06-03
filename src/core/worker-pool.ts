@@ -2165,6 +2165,14 @@ export function forkAdoptWorker(ds: DaemonSession, opts?: { restoredFromMetadata
   ds.worker = worker;
   ds.spawnedAt = Date.now();
   ds.cliVersion = '';
+  // Persist the bridge worker's pid, exactly like forkWorker. Without it the
+  // session row keeps pid=null, so `botmux list` (and killStalePids) judge an
+  // adopt session by "process dead AND no bmx-<id> tmux" — but adopt attaches to
+  // the user's OWN tmux/zellij pane, never a bmx-* session, so the heuristic
+  // always reported it unrecoverable and auto-pruned it to "closed" right after
+  // /adopt. Storing the worker pid (botmux's bridge, NOT the user's CLI) makes
+  // liveness consistent with normal sessions and leaves the user's CLI alone.
+  sessionStore.updateSessionPid(ds.session.sessionId, worker.pid ?? null);
   logger.info(`[${t}] Adopt worker forked (pid: ${worker.pid}, target: ${adopted.tmuxTarget ?? `${adopted.zellijSession}/${adopted.zellijPaneId}`})`);
 
   ds.exitEventEmitted = false;

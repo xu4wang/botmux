@@ -178,6 +178,77 @@ export function readCwd(pid: number): string | undefined {
   }
 }
 
+// /proc/stat btime 与 CLK_TCK 在一次 daemon 生命周期内不变，缓存避免每个候选都
+// 重复 fork-exec / 读盘。
+let cachedBtimeSeconds: number | undefined;
+let cachedBtimeRead = false;
+function readBootTimeSeconds(): number | undefined {
+  if (cachedBtimeRead) return cachedBtimeSeconds;
+  cachedBtimeRead = true;
+  try {
+    const m = readFileSync('/proc/stat', 'utf-8').match(/^btime\s+(\d+)/m);
+    cachedBtimeSeconds = m ? Number(m[1]) : undefined;
+  } catch {
+    cachedBtimeSeconds = undefined;
+  }
+  return cachedBtimeSeconds;
+}
+
+let cachedClkTck: number | undefined;
+function clockTicksPerSecond(): number {
+  if (cachedClkTck !== undefined) return cachedClkTck;
+  try {
+    const n = Number(execFileSync('getconf', ['CLK_TCK'], {
+      encoding: 'utf-8', stdio: ['ignore', 'pipe', 'ignore'],
+    }).trim());
+    cachedClkTck = Number.isFinite(n) && n > 0 ? n : 100;
+  } catch {
+    // 100 是 Linux 上几乎通用的默认值，拿不到 getconf 时用它兜底。
+    cachedClkTck = 100;
+  }
+  return cachedClkTck;
+}
+
+/**
+ * 进程启动时间（epoch ms），best-effort。让 /adopt 选择卡片能为**任意** CLI 显示
+ * 真实运行时长，而不是只有 Claude（Claude 另有 ~/.claude/sessions/<pid>.json 带
+ * startedAt）。其它 CLI（cursor/codex/coco/gemini…）之前一律落 "未知" 就是因为
+ * 这里没有兜底。
+ *
+ * Linux 走 /proc/<pid>/stat（字段 22 = starttime，单位时钟滴答，自开机起算）+
+ * /proc/stat 的 btime；其它 Unix 走 `ps -o lstart=` 解析。读不到返回 undefined。
+ */
+export function readProcessStartTime(pid: number): number | undefined {
+  if (IS_LINUX) {
+    try {
+      const stat = readFileSync(`/proc/${pid}/stat`, 'utf-8');
+      // comm（字段 2）用括号包裹且可能含空格/括号，slice 到最后一个 ')' 之后，
+      // 让后续字段偏移稳定。')' 之后第一个字段是 state（字段 3），所以 starttime
+      // （字段 22）对应这里的下标 19。
+      const afterComm = stat.slice(stat.lastIndexOf(')') + 1).trim().split(/\s+/);
+      const starttimeTicks = Number(afterComm[19]);
+      const btime = readBootTimeSeconds();
+      if (Number.isFinite(starttimeTicks) && btime !== undefined) {
+        return Math.round((btime + starttimeTicks / clockTicksPerSecond()) * 1000);
+      }
+    } catch {
+      // 落到下面的 ps 兜底
+    }
+  }
+  try {
+    const out = execFileSync('ps', ['-o', 'lstart=', '-p', String(pid)], {
+      encoding: 'utf-8', stdio: ['ignore', 'pipe', 'ignore'],
+    }).trim();
+    if (out) {
+      const ms = Date.parse(out);
+      if (Number.isFinite(ms)) return ms;
+    }
+  } catch {
+    // 进程不存在 / ps 不可用
+  }
+  return undefined;
+}
+
 /**
  * 获取一个进程的直接子进程 PID。
  *
@@ -487,6 +558,13 @@ export function discoverAdoptableSessions(filterCliId?: CliId): AdoptableSession
         // re-probes too, so undefined here is acceptable.
         const cocoSession = findCocoSessionByPid(match.pid);
         if (cocoSession) sessionId = cocoSession.sessionId;
+      }
+
+      // 5b. Fall back to the CLI process's own start time for uptime. Without
+      // this only Claude (which has a session JSON with startedAt) shows a real
+      // uptime; every other CLI — cursor/codex/coco/gemini… — rendered "未知".
+      if (startedAt === undefined) {
+        startedAt = readProcessStartTime(match.pid);
       }
 
       // 6. Get pane dimensions

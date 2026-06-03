@@ -60,12 +60,19 @@ function setupMocks(opts: {
   cmdlineMap?: Record<number, string[]>;
   dimsMap?: Record<string, string>;
   claudeMeta?: Record<number, string>;
+  /** pid → starttime (clock ticks since boot) for /proc/<pid>/stat field 22.
+   *  Drives readProcessStartTime's Linux fast path. Pids absent here yield a
+   *  thrown ENOENT → readProcessStartTime returns undefined (no ps fallback in
+   *  the mocked child_process), matching the "uptime unknown" legacy behavior. */
+  statMap?: Record<number, number>;
+  /** /proc/stat btime (seconds since epoch). Defaults to 1_700_000_000. */
+  bootTimeSeconds?: number;
   /** pid → ordered list of /proc/<pid>/fd/<n> symlink target strings.
    *  Used to test CoCo session discovery (and any future fd-walking logic).
    *  Pass `'<path> (deleted)'` suffix to simulate procfs's deleted-inode marker. */
   procFdMap?: Record<number, string[]>;
 }) {
-  const { paneLines, commMap = {}, cwdMap = {}, childMap = {}, cmdlineMap = {}, dimsMap = {}, claudeMeta = {}, procFdMap = {} } = opts;
+  const { paneLines, commMap = {}, cwdMap = {}, childMap = {}, cmdlineMap = {}, dimsMap = {}, claudeMeta = {}, statMap = {}, bootTimeSeconds = 1_700_000_000, procFdMap = {} } = opts;
 
   // Replace blanket existsSync / readdirSync mocks with procFdMap-aware ones.
   mockExistsSync.mockImplementation((path: unknown) => {
@@ -145,6 +152,25 @@ function setupMocks(opts: {
     if (cmdlineMatch) {
       const pid = Number(cmdlineMatch[1]);
       if (pid in cmdlineMap) return cmdlineMap[pid]!.join('\0') + '\0';
+      throw new Error('ENOENT');
+    }
+
+    // /proc/stat (system boot time)
+    if (pathStr === '/proc/stat') {
+      return `cpu 0 0 0 0\nbtime ${bootTimeSeconds}\nprocesses 1\n`;
+    }
+
+    // /proc/<pid>/stat — only field 22 (starttime, index 19 after the comm
+    // paren) matters to readProcessStartTime; pad the leading fields with 0s.
+    const statMatch = pathStr.match(/\/proc\/(\d+)\/stat$/);
+    if (statMatch) {
+      const pid = Number(statMatch[1]);
+      if (pid in statMap) {
+        const after = Array(19).fill('0');
+        after[0] = 'S';
+        after.push(String(statMap[pid]));
+        return `${pid} (proc) ${after.join(' ')}`;
+      }
       throw new Error('ENOENT');
     }
 
@@ -251,6 +277,25 @@ describe('discoverAdoptableSessions', () => {
     expect(results[0]!.cliId).toBe('cursor');
     expect(results[0]!.cliPid).toBe(1001);
     expect(results[0]!.cwd).toBe('/workspace/cursor');
+  });
+
+  it('should derive startedAt from process start time for non-Claude CLIs', () => {
+    setupMocks({
+      paneLines: 'cursor:0.0 1000\n',
+      commMap: { 1000: 'zsh', 1001: 'cursor-agent' },
+      childMap: { 1000: [1001] },
+      cwdMap: { 1001: '/workspace/cursor' },
+      dimsMap: { 'cursor:0.0': '160 50' },
+      // btime 1_700_000_000s + 50000 ticks / 100 Hz = 1_700_000_500s
+      statMap: { 1001: 50_000 },
+      bootTimeSeconds: 1_700_000_000,
+    });
+
+    const results = discoverAdoptableSessions();
+
+    expect(results).toHaveLength(1);
+    expect(results[0]!.cliId).toBe('cursor');
+    expect(results[0]!.startedAt).toBe(1_700_000_500_000);
   });
 
   it('should treat generic agent as Cursor only for Cursor-filtered adoption', () => {
