@@ -1419,6 +1419,37 @@ const commandDeps: CommandHandlerDeps = {
   lastRepoScan,
 };
 
+/**
+ * Fire a session-less daemon command (`/group`, `/g`) WITHOUT blocking the Lark
+ * event ACK on its slow work — the fast-ACK path.
+ *
+ * The Lark WS SDK sends the event response frame (a content-free `{code:200}`)
+ * only AFTER our `im.message.receive_v1` handler resolves: node-sdk's
+ * `handleEventData` does `await eventDispatcher.invoke(...)` and only then sends
+ * the ack. `/group` runs several seconds of serial Lark API calls (create chat →
+ * add bots → transfer owner → fetch share link → reply); awaiting that blocks the
+ * ack past Feishu's redelivery window, so Feishu redelivers the same message_id.
+ * Because these commands are session-less (SESSIONLESS_DAEMON_COMMANDS), no
+ * session record exists to dedupe the redelivery against — so it builds a SECOND
+ * group. (Observed: one `/g` created two identical groups, the duplicate ~19s
+ * after the first.)
+ *
+ * The ack needs nothing from the command's output, so run it detached and let the
+ * handler return immediately → the ack fires now → no redelivery. handleCommand
+ * wraps its whole body in try/catch and replies failures to the chat; the `.catch`
+ * here is only a last-resort backstop for anything that somehow escapes.
+ */
+function fireSessionlessCommandDetached(
+  cmd: string,
+  anchor: string,
+  message: LarkMessage,
+  larkAppId: string,
+): void {
+  void handleCommand(cmd, anchor, message, commandDeps, larkAppId).catch((err) =>
+    logger.error(`[sessionless ${cmd}] ${anchor.substring(0, 12)} failed: ${err?.message ?? err}`),
+  );
+}
+
 // Dependencies passed to card-handler
 const cardDeps: CardHandlerDeps = {
   activeSessions,
@@ -1939,7 +1970,10 @@ async function handleNewTopic(data: any, ctx: RoutingContext): Promise<void> {
       // without a session; pass chatId on the message so the handler can reach
       // the chat roster (it normally reads it from the active session's ds).
       if (SESSIONLESS_DAEMON_COMMANDS.has(cmd)) {
-        await handleCommand(cmd, anchor, { ...parsed, content: commandContent, chatId }, commandDeps, larkAppId);
+        // Fast-ACK: run detached so the WS event ack isn't blocked on /group's
+        // slow Lark API work → no Feishu redelivery → no duplicate group.
+        // See fireSessionlessCommandDetached.
+        fireSessionlessCommandDetached(cmd, anchor, { ...parsed, content: commandContent, chatId }, larkAppId);
         return;
       }
       // Same rootMessageId reasoning as below in the main spawn path:
@@ -2545,7 +2579,13 @@ async function handleThreadReply(data: any, ctx: RoutingContext): Promise<void> 
       }
       // Pass mention-stripped content so /command argument parsing works.
       // chatId lets session-less handlers (e.g. /group) reach the chat roster.
-      await handleCommand(cmd, anchor, { ...parsed, content: commandContent, chatId: threadChatId }, commandDeps, larkAppId);
+      const cmdMessage = { ...parsed, content: commandContent, chatId: threadChatId };
+      if (SESSIONLESS_DAEMON_COMMANDS.has(cmd)) {
+        // Fast-ACK for /group invoked mid-thread. See fireSessionlessCommandDetached.
+        fireSessionlessCommandDetached(cmd, anchor, cmdMessage, larkAppId);
+        return;
+      }
+      await handleCommand(cmd, anchor, cmdMessage, commandDeps, larkAppId);
       return;
     }
   }
