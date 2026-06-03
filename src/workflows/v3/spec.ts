@@ -28,16 +28,23 @@ export class SpecValidationError extends Error {
 
 /**
  * Pull the single fenced ```json block out of spec.md and `JSON.parse` it.
- * Throws `SpecValidationError` when the block is absent or unparseable — these
- * are the two earliest handoff blockers.
+ * Throws `SpecValidationError` when the block is absent, unparseable, OR when
+ * there is more than one — the spec contract says spec.md carries EXACTLY one
+ * canonical-Spec json block, so a stale-block + new-block mix must be rejected
+ * rather than silently finalizing the wrong (first) one (codex review).
  */
 export function extractSpecJsonBlock(specMd: string): unknown {
-  const m = specMd.match(/```json\s*\n([\s\S]*?)\n```/);
-  if (!m) {
+  const blocks = [...specMd.matchAll(/```json\s*\n([\s\S]*?)\n```/g)];
+  if (blocks.length === 0) {
     throw new SpecValidationError(['spec.md 缺少 ```json 代码块（应包含 canonical Spec）']);
   }
+  if (blocks.length > 1) {
+    throw new SpecValidationError([
+      `spec.md 有 ${blocks.length} 个 \`\`\`json 代码块，应只保留唯一一个 canonical Spec 块（删掉旧的/多余的）`,
+    ]);
+  }
   try {
-    return JSON.parse(m[1]);
+    return JSON.parse(blocks[0][1]);
   } catch (err) {
     throw new SpecValidationError([
       `spec.md 的 \`\`\`json 块 JSON.parse 失败：${err instanceof Error ? err.message : String(err)}`,

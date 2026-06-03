@@ -55,13 +55,22 @@ export interface GrillState {
  * earlier phase (so grill can re-converge the spec); you can never skip a gate
  * forward.  In particular `spec_approved` is the only state from which
  * `architect_running` is reachable — the backstop for codex assertion 1.
+ *
+ * Two self-loops exist on purpose (codex review 2026-06-02):
+ *  - `spec_ready → spec_ready`: re-running `spec-finalize` to re-validate a
+ *    Gate-1 re-draft in place (the user tweaked the requirement before
+ *    approving) — see `hostSpecFinalize`.
+ *  - `architect_running → architect_running`: crash-recovery re-entry.  If a
+ *    prior `architect` run was killed before it could retreat, the status is
+ *    stuck mid-flight; re-running `architect` resumes from here instead of
+ *    dead-ending behind the `spec_approved`-only guard.
  */
 const LEGAL: Record<GrillStatus, GrillStatus[]> = {
   grilling:          ['grilling', 'spec_ready'],
-  spec_ready:        ['spec_approved', 'grilling'],            // 用户要求改需求 → 回 grilling
+  spec_ready:        ['spec_ready', 'spec_approved', 'grilling'], // 自环=Gate-1 改稿重校验；回 grilling=revise-spec
   spec_approved:     ['architect_running', 'grilling'],
-  architect_running: ['dag_ready', 'spec_approved', 'grilling'], // architect/validate 失败可退回
-  dag_ready:         ['dag_approved', 'spec_approved', 'grilling'], // dag review 不过可退回
+  architect_running: ['architect_running', 'dag_ready', 'spec_approved', 'grilling'], // 自环=崩溃恢复重入；退回=architect/validate 失败
+  dag_ready:         ['dag_approved', 'spec_approved', 'grilling'], // 退回 spec_approved=revise-dag；回 grilling=revise-spec
   dag_approved:      ['dag_approved'],                          // 终态（交给 runtime）
 };
 

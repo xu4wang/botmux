@@ -18,7 +18,7 @@
  * dag.ts's `loadDag`.  grill state is a conversation worktable — it does NOT
  * write the runtime journal (codex 2026-06-02).
  */
-import { join } from 'node:path';
+import { resolve, sep } from 'node:path';
 import {
   birthRun,
   readGrillState,
@@ -30,6 +30,7 @@ import {
 import { finalizeSpec, SpecValidationError } from './spec.js';
 import { runArchitect as realRunArchitect, type RunArchitectInput, type RunArchitectResult } from './architect.js';
 import { loadDag } from './dag.js';
+import { isValidRunId } from './ops-projection.js';
 import type { BotSnapshot } from './contract.js';
 
 // ─── Core operations (dep-injected, pure of CLI / process concerns) ─────────
@@ -49,8 +50,19 @@ export interface SpecFinalizeOutcome {
  *  SpecValidationError, returns {ok:false, problems} and leaves status untouched
  *  (grill stays grilling and relays the problems to the user). */
 export function hostSpecFinalize(runDir: string, now: Date = new Date()): SpecFinalizeOutcome {
-  const cur = readGrillState(runDir);
-  if (!cur) throw new Error(`grill.state.json 不存在于 ${runDir}`);
+  const cur = mustRead(runDir);
+  // Guard the status BEFORE finalizeSpec writes spec.json — otherwise an
+  // illegal-state call (e.g. re-finalizing after the spec was approved /
+  // architected) would overwrite spec.json and only THEN hit the rejected
+  // transition, leaving state ⇄ canonical-spec inconsistent (codex review).
+  // Legal from `grilling` (first finalize) and `spec_ready` (Gate-1 re-draft,
+  // re-validate in place).  To revise after spec_approved/dag_ready, step back
+  // with `revise-spec` first.
+  if (cur.status !== 'grilling' && cur.status !== 'spec_ready') {
+    throw new HostGuardError(
+      `spec-finalize 需要 status=grilling 或 spec_ready，当前 ${cur.status}（先 revise-spec 退回改稿）`,
+    );
+  }
   try {
     finalizeSpec(cur.specPath, cur.specJsonPath, cur.runId);
   } catch (err) {
@@ -98,7 +110,13 @@ export interface ArchitectOutcome {
  */
 export async function hostArchitect(runDir: string, deps: ArchitectDeps, now: Date = new Date()): Promise<ArchitectOutcome> {
   const cur = mustRead(runDir);
-  if (cur.status !== 'spec_approved') {
+  // Accept `spec_approved` (the normal entry) AND `architect_running`
+  // (crash-recovery): a prior architect run can be killed AFTER it persisted
+  // `architect_running` but BEFORE it could retreat to spec_approved, leaving
+  // the status stuck mid-flight.  Without this, the only path out of
+  // `architect_running` would be a manual edit — re-running architect would
+  // dead-end behind a spec_approved-only guard (codex review 2026-06-02).
+  if (cur.status !== 'spec_approved' && cur.status !== 'architect_running') {
     throw new HostGuardError(`architect 需要 status=spec_approved（先 approve-spec），当前 ${cur.status}`);
   }
   transition(runDir, 'architect_running', { problems: undefined }, now);
@@ -165,6 +183,48 @@ export function hostApproveDag(runDir: string, now: Date = new Date()): { state:
   return { state, dagPath: cur.dagPath };
 }
 
+/**
+ * 改稿·改需求：把任一 grilling 之后的阶段退回 `grilling`，并清掉已失效的
+ * architect 产物（dagPath/notesPath/architectManifestPath）+ problems，让用户
+ * 重新 grill / 改 spec.md 再 finalize。改需求意味着已编排的 DAG 作废，所以这里
+ * 必须把那些指针清空，否则后续 approve-dag / dashboard 会拿到过期的 dag
+ * (codex review 2026-06-02).  从 `grilling`（无可退）和 `dag_approved`（已交
+ * runtime）拒绝。
+ */
+export function hostReviseSpec(runDir: string, now: Date = new Date()): GrillState {
+  const cur = mustRead(runDir);
+  if (cur.status === 'grilling') {
+    throw new HostGuardError('当前已在 grilling，直接改 spec.md 再 spec-finalize 即可');
+  }
+  if (cur.status === 'dag_approved') {
+    throw new HostGuardError('DAG 已批准并交给 runtime，无法再 revise（如需改动请新建 run）');
+  }
+  return transition(
+    runDir,
+    'grilling',
+    { dagPath: undefined, notesPath: undefined, architectManifestPath: undefined, problems: undefined },
+    now,
+  );
+}
+
+/**
+ * 改稿·只改流程：需求没变、只是 DAG 编得不满意时，从 `dag_ready` 退回
+ * `spec_approved` 并清掉 stale 的 dag 产物，使 `architect` 在同一份已批准 spec
+ * 上重编一张，不必重新 grill。
+ */
+export function hostReviseDag(runDir: string, now: Date = new Date()): GrillState {
+  const cur = mustRead(runDir);
+  if (cur.status !== 'dag_ready') {
+    throw new HostGuardError(`revise-dag 需要 status=dag_ready，当前 ${cur.status}`);
+  }
+  return transition(
+    runDir,
+    'spec_approved',
+    { dagPath: undefined, notesPath: undefined, architectManifestPath: undefined, problems: undefined },
+    now,
+  );
+}
+
 export class HostGuardError extends Error {
   constructor(message: string) {
     super(message);
@@ -181,7 +241,16 @@ function mustRead(runDir: string): GrillState {
 // ─── CLI dispatch (resolves real deps) ──────────────────────────────────────
 
 function runDirFor(runId: string, baseDir: string): string {
-  return join(baseDir, runId);
+  // runId is already validated by `requireRunId` (isValidRunId rejects `/` and
+  // a leading `.`, so traversal can't get this far) — this resolve()+prefix
+  // check is a defense-in-depth backstop so a runDir can never escape baseDir
+  // even if a caller bypasses requireRunId (codex review 2026-06-02).
+  const base = resolve(baseDir);
+  const dir = resolve(base, runId);
+  if (dir !== base && !dir.startsWith(base + sep)) {
+    throw new Error(`runId 越界 baseDir：${runId}`);
+  }
+  return dir;
 }
 
 /**
@@ -217,6 +286,20 @@ export async function cmdWorkflowHost(sub: string, rest: string[]): Promise<void
       console.log(JSON.stringify({ runId, status: state.status }, null, 2));
       return;
     }
+    case 'revise-spec': {
+      const runId = requireRunId(rest);
+      const state = hostReviseSpec(runDirFor(runId, baseDir));
+      console.log(JSON.stringify({ runId, status: state.status }, null, 2));
+      console.log('\n↩️  已退回 grilling，可改 spec.md 再 spec-finalize（原 DAG 产物已作废）。');
+      return;
+    }
+    case 'revise-dag': {
+      const runId = requireRunId(rest);
+      const state = hostReviseDag(runDirFor(runId, baseDir));
+      console.log(JSON.stringify({ runId, status: state.status }, null, 2));
+      console.log('\n↩️  已退回 spec_approved，可直接重跑 architect 重编 DAG（需求不变）。');
+      return;
+    }
     case 'architect': {
       const runId = requireRunId(rest);
       const out = await runArchitectCli(runId, baseDir, rest);
@@ -242,7 +325,7 @@ export async function cmdWorkflowHost(sub: string, rest: string[]): Promise<void
 
 /** True when `sub` is a v3 host-controller verb (so cmdWorkflow routes here). */
 export function isHostSub(sub: string): boolean {
-  return ['new', 'spec-finalize', 'approve-spec', 'architect', 'approve-dag'].includes(sub);
+  return ['new', 'spec-finalize', 'approve-spec', 'revise-spec', 'architect', 'revise-dag', 'approve-dag'].includes(sub);
 }
 
 /** Resolve real bot/secret deps and run the architect step. */
@@ -294,5 +377,11 @@ function firstPositional(args: string[]): string | undefined {
 function requireRunId(rest: string[]): string {
   const runId = firstPositional(rest);
   if (!runId) throw new Error('用法: botmux workflow <sub> <runId> [--base-dir <dir>]');
+  // Reject anything that could escape baseDir (path separators, `..`, leading
+  // dot) — these verbs are skill-driven shell commands, so harden the runId
+  // before it reaches join/resolve (codex review 2026-06-02).
+  if (!isValidRunId(runId)) {
+    throw new Error(`非法 runId（只允许字母数字与 . _ -、不得含路径分隔符）：${runId}`);
+  }
   return runId;
 }

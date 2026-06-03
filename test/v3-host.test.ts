@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { mkdtempSync, rmSync, writeFileSync, existsSync } from 'node:fs';
+import { mkdtempSync, rmSync, writeFileSync, readFileSync, existsSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import {
@@ -8,10 +8,13 @@ import {
   hostApproveSpec,
   hostArchitect,
   hostApproveDag,
+  hostReviseSpec,
+  hostReviseDag,
+  cmdWorkflowHost,
   HostGuardError,
   type ArchitectDeps,
 } from '../src/workflows/v3/host.js';
-import { readGrillState } from '../src/workflows/v3/grill-state.js';
+import { readGrillState, transition } from '../src/workflows/v3/grill-state.js';
 import { SPEC_SCHEMA_VERSION, type BotSnapshot } from '../src/workflows/v3/contract.js';
 import { DagValidationError } from '../src/workflows/v3/dag.js';
 
@@ -19,11 +22,11 @@ function base(): string {
   return mkdtempSync(join(tmpdir(), 'v3-host-'));
 }
 
-function writeValidSpecMd(specPath: string, runId: string): void {
+function writeSpecMd(specPath: string, runId: string, title: string): void {
   const spec = {
     schemaVersion: SPEC_SCHEMA_VERSION,
     runId,
-    title: 'demo',
+    title,
     requirement: '调研竞品出报告',
     nodes: [
       { sketchId: 'research', goal: '调研 X/Y/Z', input_needs: [], expected_outputs: ['facts.md'], acceptance: '含定价', risk_gate: false, unknowns: [] },
@@ -32,7 +35,26 @@ function writeValidSpecMd(specPath: string, runId: string): void {
   writeFileSync(specPath, `# Spec\n\n## 草图\n\`\`\`json\n${JSON.stringify(spec, null, 2)}\n\`\`\`\n`, 'utf-8');
 }
 
+function writeValidSpecMd(specPath: string, runId: string): void {
+  writeSpecMd(specPath, runId, 'demo');
+}
+
 const DUMMY_BOT: BotSnapshot = { larkAppId: 'cli_x', cliId: 'claude-code', workingDir: '/tmp' };
+
+/** ArchitectDeps that always synthesize a valid dag (loadDag never throws). */
+function okArchitectDeps(): ArchitectDeps {
+  return {
+    runArchitect: async (input) => ({
+      status: 'ok',
+      dagPath: join(input.runDir, 'architect/attempts/001/work/dag.json'),
+      notesPath: join(input.runDir, 'architect/attempts/001/work/architect-notes.md'),
+      manifestPath: join(input.runDir, 'architect/attempts/001/manifest.json'),
+    }),
+    loadDag: () => ({ runId: 'r', nodes: [] }),
+    botSnapshot: DUMMY_BOT,
+    resolveLarkAppSecret: () => undefined,
+  };
+}
 
 /** Drive a run to spec_approved (so architect tests can start there). */
 function toApprovedSpec(baseDir: string): { runDir: string; runId: string } {
@@ -41,6 +63,13 @@ function toApprovedSpec(baseDir: string): { runDir: string; runId: string } {
   hostSpecFinalize(runDir);
   hostApproveSpec(runDir);
   return { runDir, runId };
+}
+
+/** Drive a run all the way to dag_ready (so revise/approve-dag tests can start there). */
+async function toDagReady(baseDir: string): Promise<{ runDir: string; runId: string }> {
+  const r = toApprovedSpec(baseDir);
+  await hostArchitect(r.runDir, okArchitectDeps());
+  return r;
 }
 
 describe('host — new / spec-finalize / approve-spec', () => {
@@ -243,6 +272,126 @@ describe('host — approve-dag（gate-2）', () => {
     try {
       const { runDir } = toApprovedSpec(b);
       expect(() => hostApproveDag(runDir)).toThrow(HostGuardError);
+    } finally {
+      rmSync(b, { recursive: true, force: true });
+    }
+  });
+});
+
+describe('host — spec-finalize 状态守卫（先 guard 后写）', () => {
+  it('spec_ready 可原地重定稿（Gate-1 改稿自环），spec.json 更新成新内容', () => {
+    const b = base();
+    try {
+      const { runDir, runId } = hostNew({ goal: 'g', baseDir: b, runId: 'r' });
+      writeSpecMd(join(runDir, 'spec.md'), runId, '初稿');
+      expect(hostSpecFinalize(runDir).state!.status).toBe('spec_ready');
+      // 用户在 Gate-1 改需求 → 改 spec.md 重新 finalize
+      writeSpecMd(join(runDir, 'spec.md'), runId, '改后');
+      const out = hostSpecFinalize(runDir);
+      expect(out.ok).toBe(true);
+      expect(out.state!.status).toBe('spec_ready');
+      expect(readFileSync(join(runDir, 'spec.json'), 'utf-8')).toContain('改后');
+    } finally {
+      rmSync(b, { recursive: true, force: true });
+    }
+  });
+
+  it('spec_approved 状态下 finalize 被拒，且 spec.json 不被覆盖（先 guard 后写）', () => {
+    const b = base();
+    try {
+      const { runDir, runId } = toApprovedSpec(b); // spec.json 此刻 title=demo
+      const before = readFileSync(join(runDir, 'spec.json'), 'utf-8');
+      // 若 finalize 误执行，会把 spec.json 覆盖成新 title
+      writeSpecMd(join(runDir, 'spec.md'), runId, '不该被写入');
+      expect(() => hostSpecFinalize(runDir)).toThrow(HostGuardError);
+      expect(readFileSync(join(runDir, 'spec.json'), 'utf-8')).toBe(before);
+    } finally {
+      rmSync(b, { recursive: true, force: true });
+    }
+  });
+});
+
+describe('host — architect 崩溃恢复', () => {
+  it('上次 architect 写了 architect_running 后崩溃 → 重跑 architect 能恢复到 dag_ready（不卡死）', async () => {
+    const b = base();
+    try {
+      const { runDir } = toApprovedSpec(b);
+      // 模拟中断：状态停在 architect_running（进程在 await 中被 kill）
+      transition(runDir, 'architect_running');
+      expect(readGrillState(runDir)!.status).toBe('architect_running');
+      const out = await hostArchitect(runDir, okArchitectDeps());
+      expect(out.ok).toBe(true);
+      expect(out.state.status).toBe('dag_ready');
+    } finally {
+      rmSync(b, { recursive: true, force: true });
+    }
+  });
+});
+
+describe('host — 改稿（revise-spec / revise-dag）', () => {
+  it('revise-spec：dag_ready → grilling，并清掉 stale 的 dag 产物', async () => {
+    const b = base();
+    try {
+      const { runDir } = await toDagReady(b);
+      expect(readGrillState(runDir)!.dagPath).toBeDefined();
+      const state = hostReviseSpec(runDir);
+      expect(state.status).toBe('grilling');
+      expect(state.dagPath).toBeUndefined();
+      expect(state.notesPath).toBeUndefined();
+      expect(state.architectManifestPath).toBeUndefined();
+    } finally {
+      rmSync(b, { recursive: true, force: true });
+    }
+  });
+
+  it('revise-spec 在 grilling（无可退）/ dag_approved（已交 runtime）被拒', async () => {
+    const b = base();
+    const b2 = base();
+    try {
+      const { runDir } = hostNew({ goal: 'g', baseDir: b, runId: 'r' });
+      expect(() => hostReviseSpec(runDir)).toThrow(HostGuardError); // grilling
+      const { runDir: rd2 } = await toDagReady(b2);
+      hostApproveDag(rd2);
+      expect(() => hostReviseSpec(rd2)).toThrow(HostGuardError); // dag_approved
+    } finally {
+      rmSync(b, { recursive: true, force: true });
+      rmSync(b2, { recursive: true, force: true });
+    }
+  });
+
+  it('revise-dag：dag_ready → spec_approved，清掉 dag 产物，可重跑 architect 重编', async () => {
+    const b = base();
+    try {
+      const { runDir } = await toDagReady(b);
+      const state = hostReviseDag(runDir);
+      expect(state.status).toBe('spec_approved');
+      expect(state.dagPath).toBeUndefined();
+      // 需求不变，重跑 architect 应再次成功
+      const out = await hostArchitect(runDir, okArchitectDeps());
+      expect(out.ok).toBe(true);
+      expect(out.state.status).toBe('dag_ready');
+    } finally {
+      rmSync(b, { recursive: true, force: true });
+    }
+  });
+
+  it('revise-dag 在非 dag_ready 被拒', () => {
+    const b = base();
+    try {
+      const { runDir } = toApprovedSpec(b); // spec_approved
+      expect(() => hostReviseDag(runDir)).toThrow(HostGuardError);
+    } finally {
+      rmSync(b, { recursive: true, force: true });
+    }
+  });
+});
+
+describe('host — CLI runId 越界守卫', () => {
+  it('非法 runId（路径穿越）在 dispatch 入口被拒', async () => {
+    const b = base();
+    try {
+      await expect(cmdWorkflowHost('approve-spec', ['../escape', '--base-dir', b])).rejects.toThrow(/非法 runId/);
+      await expect(cmdWorkflowHost('revise-spec', ['a/b', '--base-dir', b])).rejects.toThrow(/非法 runId/);
     } finally {
       rmSync(b, { recursive: true, force: true });
     }

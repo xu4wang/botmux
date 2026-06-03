@@ -78,7 +78,7 @@ function positionals(args: string[]): string[] {
 export async function cmdWorkflow(sub: string, rest: string[]): Promise<void> {
   // v3 grill host-controller verbs route to host.ts (lazy import — keeps the v3
   // ephemeral-pool / worker deps out of the v0.2 workflow path).
-  if (['new', 'spec-finalize', 'approve-spec', 'architect', 'approve-dag'].includes(sub)) {
+  if (['new', 'spec-finalize', 'approve-spec', 'revise-spec', 'architect', 'revise-dag', 'approve-dag'].includes(sub)) {
     const { cmdWorkflowHost } = await import('../workflows/v3/host.js');
     await cmdWorkflowHost(sub, rest);
     return;

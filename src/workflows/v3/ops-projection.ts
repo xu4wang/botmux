@@ -55,8 +55,13 @@ export interface RunNodeView {
    *  to the frontend (codex review) — a replay endpoint locates it server-side
    *  via `ptyLogPathFor(runsDir, runId, nodeId)`. */
   hasPtyLog: boolean;
-  /** Present once the node succeeded. */
-  manifestPath?: string;
+  /** Whether the node produced a manifest (i.e. succeeded with a recorded
+   *  manifest).  The raw fs path is NOT exposed — same rationale as `hasPtyLog`:
+   *  `GET /api/v3/runs/:id` is link-shareable public-read, so a public reader
+   *  must never see absolute `/root/.botmux/...` paths (codex security review
+   *  2026-06-02).  A download, if ever needed, goes through a cookie-auth
+   *  endpoint that locates the file server-side via runId/nodeId. */
+  hasManifest: boolean;
 }
 
 export interface RunView {
@@ -127,7 +132,7 @@ export function projectRun(runId: string, runDir: string): RunView {
       goal: dagById.get(id)?.goal,
       attemptId: snap.attempts.get(id),
       hasPtyLog: Boolean(sess?.ptyLogPath),
-      manifestPath: manifests.get(id),
+      hasManifest: manifests.has(id),
     };
     if (sess) {
       view.webTerminal = {

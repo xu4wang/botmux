@@ -87,6 +87,12 @@ describe('v3 spec — extract + validate', () => {
     expect(obj.runId).toBe('deepsea-001');
     expect(Array.isArray(obj.nodes)).toBe(true);
   });
+
+  it('spec.md 有多个 ```json 块 → 抛 SpecValidationError（不静默选第一个）', () => {
+    const two = '## 旧稿\n```json\n{"schemaVersion":1}\n```\n\n## 新稿\n```json\n{"schemaVersion":1}\n```\n';
+    expect(() => extractSpecJsonBlock(two)).toThrow(SpecValidationError);
+    expect(() => extractSpecJsonBlock(two)).toThrow(/2 个/);
+  });
 });
 
 describe('v3 spec — validateSpec 守卫', () => {

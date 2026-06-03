@@ -58,7 +58,9 @@ describe('v3 ops-projection — projectRun', () => {
       expect(research.status).toBe('done');
       expect(research.depends).toEqual([]);
       expect(research.goal).toBe('调研 X/Y/Z');
-      expect(research.manifestPath).toContain('manifest.json');
+      // 节点成功 → hasManifest=true，但绝不暴露绝对 manifestPath（同 hasPtyLog 口径）
+      expect(research.hasManifest).toBe(true);
+      expect((research as Record<string, unknown>).manifestPath).toBeUndefined();
       // 终态后 webTerminal 应为 closed（回放走 pty-log endpoint）
       expect(research.webTerminal!.status).toBe('closed');
       expect(research.webTerminal!.webPort).toBe(5101);
@@ -66,6 +68,8 @@ describe('v3 ops-projection — projectRun', () => {
       // 安全：read-only DTO 不暴露 token，也不直出绝对 ptyLogPath
       expect((research.webTerminal as Record<string, unknown>).token).toBeUndefined();
       expect((research as Record<string, unknown>).ptyLogPath).toBeUndefined();
+      // 安全铁律：整个 RunView 序列化后不得含 runDir 绝对路径（codex review）
+      expect(JSON.stringify(view)).not.toContain(runDir);
 
       const report = view.nodes.find((n) => n.id === 'report')!;
       expect(report.status).toBe('running');

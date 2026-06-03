@@ -1131,20 +1131,20 @@ botmux workflow spec-finalize <runId>
 
 > 这是我理解的需求和拆解，对吗？确认我就编排成可执行流程。
 
-用户确认 → \`botmux workflow approve-spec <runId>\`；要改 → 回第 2/3 步改 spec 再 finalize。
+用户确认 → \`botmux workflow approve-spec <runId>\`；要改 → 直接改 spec.md 再 \`botmux workflow spec-finalize <runId>\` 重新校验（spec_ready 状态可原地重定稿，不用退回）。
 
 ## 6. 编排 DAG
 \`\`\`bash
 botmux workflow architect <runId>
 \`\`\`
-系统自动把 spec 编译成 dag.json 并**由 host 校验**。成功 → 命令打印 \`dagPath\`/\`notesPath\`，进下一步。失败（退回 spec_approved + 打印 problems）→ 说明 spec 还有问题，按 problems 回第 2/3 步修 spec，重新 approve-spec + architect。
+系统自动把 spec 编译成 dag.json 并**由 host 校验**。成功 → 命令打印 \`dagPath\`/\`notesPath\`，进下一步。失败（退回 spec_approved + 打印 problems）→ 多半是 spec 还有问题：\`botmux workflow revise-spec <runId>\` 退回 grilling，按 problems 改 spec.md，再 spec-finalize → approve-spec → architect。（若判断只是 architect 偶发失败、spec 没问题，可直接重跑 architect。）
 
 ## 7. Gate-2：确认流程
 读 architect 产出的 dag.json + architect-notes.md（用第 6 步打印的路径），给用户讲清楚流程：有哪些节点、依赖顺序、哪些节点执行期会停下等人批。问：
 
 > 编排好的流程是这样，对吗？确认就开跑。
 
-用户确认 → \`botmux workflow approve-dag <runId>\`，然后开跑 \`botmux v3 run <dagPath>\`（带当前 bot）。要改 → 回去修 spec 重新编排。
+用户确认 → \`botmux workflow approve-dag <runId>\`，然后开跑 \`botmux v3 run <dagPath>\`（带当前 bot）。要改：需求要改 → \`botmux workflow revise-spec <runId>\`（退回 grilling，原 DAG 作废）重走 grill→spec→architect；需求没变、只是流程不满意 → \`botmux workflow revise-dag <runId>\`（退回 spec_approved）重跑 architect 重编。
 
 ## 关键纪律
 - 全程飞书一问一答，用 botmux send 对话。
