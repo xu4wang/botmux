@@ -44,24 +44,45 @@ export function listenWebTerminalWithFallback(opts: ListenWebTerminalOpts): Prom
       return typeof addr === 'object' && addr ? addr.port : 0;
     };
 
-    httpServer.listen(preferredPort ?? 0, host, () => {
-      const port = currentPort();
-      log(`HTTP listening on ${host}:${port}`);
-      resolve(port);
-    });
+    const listenPort = preferredPort ?? 0;
+    let fallbackAttempted = false;
+    let settled = false;
 
+    const settleResolve = (port: number) => {
+      if (settled) return;
+      settled = true;
+      resolve(port);
+    };
+    const settleReject = (err: NodeJS.ErrnoException) => {
+      if (settled) return;
+      settled = true;
+      reject(err);
+    };
+
+    const listen = (port: number, suffix = '') => {
+      httpServer.listen(port, host, () => {
+        const boundPort = currentPort();
+        log(`HTTP listening on ${host}:${boundPort}${suffix}`);
+        settleResolve(boundPort);
+      });
+    };
+
+    // Register before listen(): bind failures are asynchronous 'error' events,
+    // and the recovery handler must be present before the first listen attempt.
     httpServer.on('error', (err: NodeJS.ErrnoException) => {
-      if (preferredPort && err.code === 'EADDRINUSE') {
-        // Preferred port in use — fall back to a random one.
-        log(`Preferred port ${preferredPort} in use (${err.code}), falling back to random`);
-        httpServer.listen(0, host, () => {
-          const port = currentPort();
-          log(`HTTP listening on ${host}:${port} (fallback)`);
-          resolve(port);
-        });
+      if (err.code === 'EADDRINUSE' && !fallbackAttempted) {
+        fallbackAttempted = true;
+        if (preferredPort) {
+          log(`Preferred port ${preferredPort} in use (${err.code}), falling back to random`);
+        } else {
+          log(`Port ${listenPort} bind failed (${err.code}), retrying with random port`);
+        }
+        listen(0, ' (fallback)');
       } else {
-        reject(err);
+        settleReject(err);
       }
     });
+
+    listen(listenPort);
   });
 }

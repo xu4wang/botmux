@@ -73,6 +73,44 @@ describe('listenWebTerminalWithFallback', () => {
     expect(boundPort).not.toBe(busyPort);
   });
 
+  it('retries once when the initial random-port listen reports EADDRINUSE', async () => {
+    const { httpServer, wss } = makePair();
+    const originalListen = httpServer.listen;
+    let listenCalls = 0;
+
+    // User-reported canary regression: msg.webPort can be absent, so the first
+    // bind is listen(0). The previous PR only retried when preferredPort was
+    // truthy, which still rejected/failed the worker if that initial listen(0)
+    // emitted EADDRINUSE. Simulate that race once, then let the fallback bind.
+    httpServer.listen = ((...args: Parameters<Server['listen']>) => {
+      listenCalls++;
+      if (listenCalls === 1) {
+        const err = Object.assign(new Error('listen EADDRINUSE: address already in use 0.0.0.0'), {
+          code: 'EADDRINUSE',
+          errno: -98,
+          syscall: 'listen',
+          address: '0.0.0.0',
+        }) as NodeJS.ErrnoException;
+        process.nextTick(() => httpServer.emit('error', err));
+        return httpServer;
+      }
+      return Reflect.apply(originalListen, httpServer, args) as Server;
+    }) as Server['listen'];
+
+    const logs: string[] = [];
+    const boundPort = await listenWebTerminalWithFallback({
+      httpServer,
+      wss,
+      host: '127.0.0.1',
+      preferredPort: undefined,
+      log: (msg) => logs.push(msg),
+    });
+
+    expect(listenCalls).toBe(2);
+    expect(boundPort).toBeGreaterThan(0);
+    expect(logs.some((line) => line.includes('retrying with random port'))).toBe(true);
+  });
+
   it('rejects (does not fall back) for non-EADDRINUSE errors', async () => {
     const { httpServer, wss } = makePair();
     // No preferredPort → an invalid host triggers a non-EADDRINUSE error which
