@@ -2195,6 +2195,40 @@ function findDaemon(larkAppId?: string): { ipcPort: number; larkAppId: string } 
   return all[0] ?? null;
 }
 
+/** `botmux workflow start <runId>` — POST the daemon's v3 start IPC so the run
+ *  is daemon-driven (humanGate → 飞书审批卡).  The grill skill calls this after
+ *  approve-dag instead of the standalone `botmux v3 run` (which has no card
+ *  layer).  Defaults the bot to the grill worker's BOTMUX_LARK_APP_ID env. */
+async function cmdWorkflowStart(runId: string | undefined, rest: string[]): Promise<void> {
+  if (!runId) {
+    console.error('用法: botmux workflow start <runId> [--bot <larkAppId>]');
+    process.exit(1);
+  }
+  const larkAppId = argValue(rest, '--bot') ?? process.env.BOTMUX_LARK_APP_ID;
+  const daemon = findDaemon(larkAppId);
+  if (!daemon) {
+    console.error('❌ 没有在线 daemon；v3 humanGate run 需要 daemon 驱动（审批卡是 daemon 的活）。');
+    process.exit(1);
+  }
+  let res: Response;
+  try {
+    res = await fetch(`http://127.0.0.1:${daemon.ipcPort}/api/v3/runs/${encodeURIComponent(runId)}/start`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: '{}',
+    });
+  } catch (err: any) {
+    console.error(`❌ 无法连接 daemon (port=${daemon.ipcPort}): ${err?.message ?? err}`);
+    process.exit(1);
+  }
+  const txt = await res.text();
+  if (!res.ok) {
+    console.error(`❌ start 失败 (HTTP ${res.status}): ${txt}`);
+    process.exit(1);
+  }
+  console.log(`✅ v3 run "${runId}" 已交 daemon 驱动；humanGate 会在话题里弹审批卡，点了才继续。`);
+}
+
 async function cmdResume(): Promise<void> {
   const target = process.argv[3];
   if (!target) {
@@ -4749,8 +4783,16 @@ switch (command) {
     break;
   }
   case 'workflow': {
+    const wfSub = process.argv[3] ?? '';
+    if (wfSub === 'start') {
+      // `botmux workflow start <runId>` — kick a daemon-driven v3 run (so
+      // humanGate posts approval cards).  Needs a live daemon; findDaemon is
+      // cli.ts-local so this case handles it instead of cmdWorkflow.
+      await cmdWorkflowStart(process.argv[4], process.argv.slice(5));
+      break;
+    }
     const { cmdWorkflow } = await import('./cli/workflow.js');
-    await cmdWorkflow(process.argv[3] ?? '', process.argv.slice(4));
+    await cmdWorkflow(wfSub, process.argv.slice(4));
     break;
   }
   case 'v3': {

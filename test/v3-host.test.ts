@@ -11,6 +11,7 @@ import {
   hostReviseSpec,
   hostReviseDag,
   cmdWorkflowHost,
+  chatBindingFromEnv,
   HostGuardError,
   type ArchitectDeps,
 } from '../src/workflows/v3/host.js';
@@ -395,5 +396,30 @@ describe('host — CLI runId 越界守卫', () => {
     } finally {
       rmSync(b, { recursive: true, force: true });
     }
+  });
+});
+
+describe('host — chatBindingFromEnv（grill 出生落话题绑定）', () => {
+  it('env 全 → 完整 binding', () => {
+    expect(chatBindingFromEnv({
+      BOTMUX_LARK_APP_ID: 'cli_abc',
+      BOTMUX_CHAT_ID: 'oc_chat',
+      BOTMUX_ROOT_MESSAGE_ID: 'om_root',
+      BOTMUX_SESSION_ID: 'sess-1',
+    } as NodeJS.ProcessEnv)).toEqual({
+      larkAppId: 'cli_abc', chatId: 'oc_chat', rootMessageId: 'om_root', sessionId: 'sess-1',
+    });
+  });
+
+  it('只有 larkAppId+chatId（无 root/session）→ 最小 binding', () => {
+    expect(chatBindingFromEnv({
+      BOTMUX_LARK_APP_ID: 'cli_abc', BOTMUX_CHAT_ID: 'oc_chat',
+    } as NodeJS.ProcessEnv)).toEqual({ larkAppId: 'cli_abc', chatId: 'oc_chat' });
+  });
+
+  it('缺 larkAppId 或 chatId（CLI/dev，非 worker）→ undefined', () => {
+    expect(chatBindingFromEnv({ BOTMUX_CHAT_ID: 'oc_chat' } as NodeJS.ProcessEnv)).toBeUndefined();
+    expect(chatBindingFromEnv({ BOTMUX_LARK_APP_ID: 'cli_abc' } as NodeJS.ProcessEnv)).toBeUndefined();
+    expect(chatBindingFromEnv({} as NodeJS.ProcessEnv)).toBeUndefined();
   });
 });

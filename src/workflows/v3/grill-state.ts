@@ -30,6 +30,25 @@ export type GrillStatus =
 export const GRILL_STATUS_FILE = 'grill.state.json';
 export const GRILL_STATE_SCHEMA_VERSION = 1;
 
+/**
+ * Where a daemon-driven run posts its humanGate approval cards.  Captured at
+ * run birth from the grill worker's injected env (`BOTMUX_CHAT_ID` /
+ * `_LARK_APP_ID` / `_ROOT_MESSAGE_ID` / `_SESSION_ID`).  WHY persist it: the
+ * daemon's ability to post a card is NOT from in-process context — after a
+ * restart, `cold-attach` reads this off disk to know which topic to re-post a
+ * pending gate card to (see humanGate daemon-card design §4.2).  CLI/dev runs
+ * (no grill, terminal y/N gate) simply omit it.
+ */
+export interface RunChatBinding {
+  larkAppId: string;
+  chatId: string;
+  /** thread anchor (rootMessageId) so the card lands in the grill topic. */
+  rootMessageId?: string;
+  sessionId?: string;
+  /** open_id of the grill initiator, if known — used for the approve gate. */
+  ownerOpenId?: string;
+}
+
 export interface GrillState {
   schemaVersion: number;
   runId: string;
@@ -48,6 +67,8 @@ export interface GrillState {
   architectManifestPath?: string;
   /** validateDag / architect 失败的问题列表（供 grill 回修；codex 断言2）. */
   problems?: string[];
+  /** 飞书话题绑定（daemon 发 humanGate 审批卡用）；CLI/dev 出生时无. */
+  chatBinding?: RunChatBinding;
 }
 
 /**
@@ -100,10 +121,20 @@ export function writeGrillState(runDir: string, state: GrillState): void {
   renameSync(tmp, p);
 }
 
+/**
+ * Read a run's grill state, or `undefined` if it's missing OR corrupt
+ * (unparseable / mid-write torn JSON).  Defensive-on-purpose (codex review):
+ * cold-attach reconcile scans every runDir, so one corrupt grill.state must not
+ * throw and kill the whole scan — it just makes that run look stateless.
+ */
 export function readGrillState(runDir: string): GrillState | undefined {
   const p = statePath(runDir);
   if (!existsSync(p)) return undefined;
-  return JSON.parse(readFileSync(p, 'utf-8')) as GrillState;
+  try {
+    return JSON.parse(readFileSync(p, 'utf-8')) as GrillState;
+  } catch {
+    return undefined;
+  }
 }
 
 /** Slugify a (possibly CJK) goal into a path-safe runId prefix. */
@@ -128,7 +159,14 @@ export interface BirthResult {
  * OQ-D), create its runDir, and write the initial `grilling` state.  grill is
  * the birth point of a run; spec.md and the later dag.json both live in runDir.
  */
-export function birthRun(opts: { goal: string; baseDir?: string; runId?: string; now?: Date }): BirthResult {
+export function birthRun(opts: {
+  goal: string;
+  baseDir?: string;
+  runId?: string;
+  now?: Date;
+  /** 飞书话题绑定（grill 经 daemon 出生时带；CLI/dev 出生省略）. */
+  chatBinding?: RunChatBinding;
+}): BirthResult {
   const baseDir = opts.baseDir ?? defaultBaseDir();
   const now = opts.now ?? new Date();
   const runId = opts.runId ?? `${slug(opts.goal)}-${stamp(now)}`;
@@ -143,9 +181,20 @@ export function birthRun(opts: { goal: string; baseDir?: string; runId?: string;
     updatedAt: iso,
     specPath: join(runDir, 'spec.md'),
     specJsonPath: join(runDir, 'spec.json'),
+    ...(opts.chatBinding ? { chatBinding: opts.chatBinding } : {}),
   };
   writeGrillState(runDir, state);
   return { runId, runDir, state };
+}
+
+/**
+ * Read a run's chat binding off disk (from grill.state.json).  The daemon's
+ * run driver + cold-attach recovery use this to know where to post / re-post a
+ * humanGate approval card.  Returns undefined for CLI/dev runs (no binding) or
+ * a missing/unparseable state file.
+ */
+export function readRunChatBinding(runDir: string): RunChatBinding | undefined {
+  return readGrillState(runDir)?.chatBinding;
 }
 
 /**

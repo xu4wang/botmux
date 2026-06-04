@@ -5,6 +5,7 @@ import { tmpdir } from 'node:os';
 import {
   birthRun,
   readGrillState,
+  readRunChatBinding,
   writeGrillState,
   transition,
   canTransition,
@@ -158,6 +159,44 @@ describe('grill-state — 持久化', () => {
     const base = freshBase();
     try {
       expect(readGrillState(join(base, 'nope'))).toBeUndefined();
+    } finally {
+      rmSync(base, { recursive: true, force: true });
+    }
+  });
+});
+
+describe('grill-state — chatBinding（daemon humanGate 发卡用）', () => {
+  it('birthRun 带 chatBinding → 落盘 + readRunChatBinding 读回', () => {
+    const base = freshBase();
+    try {
+      const binding = {
+        larkAppId: 'cli_abc', chatId: 'oc_chat', rootMessageId: 'om_root', sessionId: 'sess-1',
+      };
+      const { runDir, state } = birthRun({ goal: 'g', baseDir: base, runId: 'r', chatBinding: binding });
+      expect(state.chatBinding).toEqual(binding);
+      expect(readRunChatBinding(runDir)).toEqual(binding);
+      // 落盘后重新读 grill.state.json 也带 binding
+      expect(readGrillState(runDir)?.chatBinding).toEqual(binding);
+    } finally {
+      rmSync(base, { recursive: true, force: true });
+    }
+  });
+
+  it('birthRun 无 chatBinding（CLI/dev 出生）→ readRunChatBinding undefined，state 无该键', () => {
+    const base = freshBase();
+    try {
+      const { runDir, state } = birthRun({ goal: 'g', baseDir: base, runId: 'r' });
+      expect('chatBinding' in state).toBe(false);
+      expect(readRunChatBinding(runDir)).toBeUndefined();
+    } finally {
+      rmSync(base, { recursive: true, force: true });
+    }
+  });
+
+  it('readRunChatBinding 读不存在的 runDir → undefined', () => {
+    const base = freshBase();
+    try {
+      expect(readRunChatBinding(join(base, 'nope'))).toBeUndefined();
     } finally {
       rmSync(base, { recursive: true, force: true });
     }

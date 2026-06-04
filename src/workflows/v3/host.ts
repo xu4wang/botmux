@@ -26,6 +26,7 @@ import {
   defaultBaseDir,
   type BirthResult,
   type GrillState,
+  type RunChatBinding,
 } from './grill-state.js';
 import { finalizeSpec, SpecValidationError } from './spec.js';
 import { runArchitect as realRunArchitect, type RunArchitectInput, type RunArchitectResult } from './architect.js';
@@ -35,8 +36,33 @@ import type { BotSnapshot } from './contract.js';
 
 // ─── Core operations (dep-injected, pure of CLI / process concerns) ─────────
 
-export function hostNew(opts: { goal: string; baseDir?: string; runId?: string; now?: Date }): BirthResult {
+export function hostNew(opts: {
+  goal: string;
+  baseDir?: string;
+  runId?: string;
+  now?: Date;
+  chatBinding?: RunChatBinding;
+}): BirthResult {
   return birthRun(opts);
+}
+
+/**
+ * Read the grill worker's injected env into a chat binding, or undefined when
+ * not running inside a daemon worker (CLI/dev — no card layer).  The worker
+ * sets BOTMUX_CHAT_ID / _LARK_APP_ID / _ROOT_MESSAGE_ID / _SESSION_ID on every
+ * CLI subprocess (worker.ts).  A binding needs at least larkAppId + chatId to
+ * be useful for posting a card; missing either → undefined.
+ */
+export function chatBindingFromEnv(env: NodeJS.ProcessEnv = process.env): RunChatBinding | undefined {
+  const larkAppId = env.BOTMUX_LARK_APP_ID;
+  const chatId = env.BOTMUX_CHAT_ID;
+  if (!larkAppId || !chatId) return undefined;
+  return {
+    larkAppId,
+    chatId,
+    ...(env.BOTMUX_ROOT_MESSAGE_ID ? { rootMessageId: env.BOTMUX_ROOT_MESSAGE_ID } : {}),
+    ...(env.BOTMUX_SESSION_ID ? { sessionId: env.BOTMUX_SESSION_ID } : {}),
+  };
 }
 
 export interface SpecFinalizeOutcome {
@@ -265,8 +291,14 @@ export async function cmdWorkflowHost(sub: string, rest: string[]): Promise<void
     case 'new': {
       const goal = firstPositional(rest);
       if (!goal) throw new Error('用法: botmux workflow new "<目标>" [--base-dir <dir>]');
-      const { runId, runDir, state } = hostNew({ goal, baseDir });
-      console.log(JSON.stringify({ runId, runDir, status: state.status, specPath: state.specPath }, null, 2));
+      // grill 经 daemon worker 出生时，env 带话题上下文 → 落 chatBinding，供后续
+      // daemon humanGate 发审批卡用（CLI/dev 出生无 env → undefined，不影响）。
+      const chatBinding = chatBindingFromEnv();
+      const { runId, runDir, state } = hostNew({ goal, baseDir, chatBinding });
+      console.log(JSON.stringify({
+        runId, runDir, status: state.status, specPath: state.specPath,
+        chatBound: !!chatBinding,
+      }, null, 2));
       return;
     }
     case 'spec-finalize': {

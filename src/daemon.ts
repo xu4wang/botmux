@@ -90,6 +90,14 @@ import {
   type WorkflowCommandResult,
 } from './im/lark/workflow-slash-command.js';
 import { workflowRunDetailUrl } from './im/lark/workflow-cards.js';
+import { createV3GateRunner } from './workflows/v3/daemon-run.js';
+import { buildV3GateCard } from './im/lark/v3-gate-card.js';
+import { isValidRunId as isValidV3RunId } from './workflows/v3/ops-projection.js';
+import { readRunChatBinding as readV3RunChatBinding, defaultBaseDir as v3DefaultBaseDir } from './workflows/v3/grill-state.js';
+
+/** This daemon process's bot larkAppId (set in startDaemon).  Used to scope v3
+ *  humanGate cold-attach + start to runs this bot owns (codex blocker #1). */
+let selfV3LarkAppId: string | undefined;
 import {
   buildWorkflowStartingCard,
   buildWorkflowProgressCard,
@@ -1472,6 +1480,34 @@ function fireSessionlessCommandDetached(
 }
 
 // Dependencies passed to card-handler
+// v3 humanGate run-controller: drives daemon-side v3 runs, posts/​re-posts
+// approval cards to the run's bound topic, and re-arms pending gates on startup
+// (cold-attach).  postCard / notifyTerminal use the daemon's Lark sender; the
+// run logic + in-flight guard live in createV3GateRunner.
+const v3GateRunner = createV3GateRunner({
+  postCard: async (binding, gate, runId) => {
+    const card = buildV3GateCard({ runId, waitId: gate.waitId, nodeId: gate.nodeId, prompt: gate.prompt });
+    // codex blocker #3: never silently skip — a missing rootMessageId would
+    // leave the run stuck at awaitingGate forever.  Reply in-thread when we have
+    // an anchor; otherwise post to the chat directly.
+    if (binding.rootMessageId) {
+      await sessionReply(binding.rootMessageId, card, 'interactive', binding.larkAppId);
+    } else {
+      await sendMessage(binding.larkAppId, binding.chatId, card, 'interactive');
+    }
+  },
+  notifyTerminal: async (binding, runId, outcome) => {
+    if (!binding?.rootMessageId) return;
+    const msg = outcome.runStatus === 'succeeded'
+      ? `✅ v3 workflow \`${runId}\` 跑完了`
+      : `❌ v3 workflow \`${runId}\` 失败${outcome.failedNodeId ? `（节点 ${outcome.failedNodeId}）` : ''}`;
+    await sessionReply(binding.rootMessageId, msg, 'text', binding.larkAppId).catch(() => {});
+  },
+  onError: (runId, err) => {
+    logger.warn(`[v3:${runId}] drive failed: ${err instanceof Error ? err.message : String(err)}`);
+  },
+});
+
 const cardDeps: CardHandlerDeps = {
   activeSessions,
   sessionReply,
@@ -1480,6 +1516,13 @@ const cardDeps: CardHandlerDeps = {
     driveWorkflowRun(runId).catch((err) => {
       logger.warn(`[workflow:${runId}] re-entry after approval failed: ${err instanceof Error ? err.message : String(err)}`);
     });
+  },
+  v3GateDeps: {
+    driveRun: (runId) => v3GateRunner.driveDetached(runId),
+    // 审批权限：复用 canOperate（话题 owner / allowedUsers / oncall）。无 binding（corrupt /
+    // 非 grill 出生的旧卡）→ **拒**（codex follow-up：合法卡一定有 binding，缺失即可疑）.
+    canResolve: (binding, operatorOpenId) =>
+      binding ? canOperate(binding.larkAppId, binding.chatId, operatorOpenId) : false,
   },
 };
 
@@ -1517,6 +1560,24 @@ for (const [path, resolution] of [
     return jsonRes(res, 200, result);
   });
 }
+
+// v3 humanGate: start a daemon-driven run (grill `approve-dag` 后的主入口).  Same
+// 127.0.0.1 ipcRoute posture as the v0.2 approve/reject mutations (dashboard
+// proxies authed external calls).  Fire-and-forget: the runner drives the run +
+// posts gate cards; the caller polls /api/v3/runs/:id for status.
+ipcRoute('POST', '/api/v3/runs/:runId/start', async (_req, res, params) => {
+  const runId = params.runId;
+  if (!isValidV3RunId(runId)) return jsonRes(res, 400, { ok: false, error: 'bad_run_id' });
+  // Owner check (codex blocker #1): only the daemon owning this run's bot may
+  // start it — otherwise the wrong daemon drives + posts cards with its client.
+  const binding = readV3RunChatBinding(join(v3DefaultBaseDir(), runId));
+  if (!binding) return jsonRes(res, 404, { ok: false, error: 'unknown_run_or_no_binding' });
+  if (selfV3LarkAppId && binding.larkAppId !== selfV3LarkAppId) {
+    return jsonRes(res, 409, { ok: false, error: 'wrong_daemon', ownerLarkAppId: binding.larkAppId });
+  }
+  v3GateRunner.driveDetached(runId);
+  return jsonRes(res, 202, { ok: true, runId });
+});
 
 function attemptResumeStatus(error: { error: string }): number {
   switch (error.error) {
@@ -3016,6 +3077,7 @@ export async function startDaemon(botIndex?: number): Promise<void> {
   // also needs its own copy for SessionRow.botName.
   setBotName(cfg.larkAppId);
   setLarkAppId(cfg.larkAppId);
+  selfV3LarkAppId = cfg.larkAppId; // scope v3 humanGate cold-attach / start to this bot
 
   // Bind dashboard IPC HTTP server BEFORE publishing the registry descriptor.
   // Otherwise the dashboard process can race-fetch the IPC port from the
@@ -3163,6 +3225,13 @@ export async function startDaemon(botIndex?: number): Promise<void> {
   await restoreActiveSessions(activeSessions);
 
   await attachColdWorkflowRuns(cfg.larkAppId);
+
+  // v3 humanGate cold-attach: re-post pending gate cards + resume healed gates
+  // for runs OWNED BY THIS BOT (codex blocker #1 — owner filter, mirrors
+  // attachColdWorkflowRuns(cfg.larkAppId)).  Best-effort; never blocks startup.
+  await v3GateRunner.coldAttach(cfg.larkAppId).catch((err) => {
+    logger.warn(`[v3] cold-attach failed; continuing daemon startup: ${err instanceof Error ? err.message : String(err)}`);
+  });
 
   // Start scheduler in every daemon.  Each daemon owns exactly one bot, so
   // each filters to only execute tasks whose `larkAppId` matches its bot

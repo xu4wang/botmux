@@ -17,6 +17,12 @@ import {
   isWorkflowApprovalAction,
   type WorkflowApprovalHandlerDeps,
 } from './workflow-card-handler.js';
+import {
+  handleV3GateAction,
+  isV3GateAction,
+  type V3GateCardHandlerDeps,
+} from './v3-gate-card-handler.js';
+import type { V3GateActionValue } from './v3-gate-card.js';
 import { handleAskCardAction, isAskCardAction } from './ask-card.js';
 import { createCliAdapterSync } from '../../adapters/cli/registry.js';
 import { logger } from '../../utils/logger.js';
@@ -39,6 +45,8 @@ export interface CardHandlerDeps {
   lastRepoScan: Map<string, ProjectInfo[]>;
   workflowApprovalDeps?: WorkflowApprovalHandlerDeps;
   workflowApprovalResolved?: (runId: string) => void | Promise<void>;
+  /** v3 humanGate 审批卡点击处理（driveRun 由 daemon 接的 v3 gate runner 提供）. */
+  v3GateDeps?: V3GateCardHandlerDeps;
 }
 
 interface CardActionData {
@@ -480,6 +488,15 @@ export async function handleCardAction(data: CardActionData, deps: CardHandlerDe
       deleteMessage(larkAppId, cardMessageId).catch(() => { /* leave it */ });
     }
     return { toast: { type: 'success', content: t('card.relay.toast_success', undefined, loc) } };
+  }
+
+  // v3 humanGate 审批卡（独立 namespace，不混 v0.2 wait path）。**在通用 sensitive
+  // 权限门之前**处理（codex medium）：v3 卡 value 没有 root_id/session_id，通用门只能
+  // 用 chatId=undefined 做粗判，可能误拦；v3 自己的 `canResolve(binding, operator)`
+  // 才有 run binding 的 chatId，是权威权限门。
+  if (isV3GateAction(value?.action)) {
+    if (!deps.v3GateDeps) return;
+    return await handleV3GateAction(value as unknown as V3GateActionValue, operatorOpenId, deps.v3GateDeps);
   }
 
   const isSensitive = value?.action && ['restart', 'close', 'resume', 'skip_repo', 'retry_last_task', 'get_write_link', 'toggle_stream', 'toggle_display', 'export_text', 'term_action', 'refresh_screenshot', 'takeover', 'disconnect', 'tui_keys', 'tui_text_input', 'wf_approve', 'wf_reject', 'wf_cancel'].includes(value.action);
