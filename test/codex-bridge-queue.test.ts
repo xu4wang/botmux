@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import { CodexBridgeQueue } from '../src/services/codex-bridge-queue.js';
-import { shouldSuppressBridgeEmit, type BridgeSendMarker } from '../src/services/bridge-fallback-gate.js';
+import { buildBridgeSendMarkerContent, shouldSuppressBridgeEmit, type BridgeSendMarker } from '../src/services/bridge-fallback-gate.js';
 import type { CodexBridgeEvent } from '../src/services/codex-transcript.js';
 
 let nextUuid = 0;
@@ -9,6 +9,9 @@ function userEv(text: string, uuid?: string, ts = 0): CodexBridgeEvent {
 }
 function asstEv(text: string, uuid?: string, ts = 0): CodexBridgeEvent {
   return { uuid: uuid ?? `a${++nextUuid}`, timestampMs: ts, kind: 'assistant_final', text };
+}
+function markerForContent(sentAtMs: number, content: string): BridgeSendMarker {
+  return { sentAtMs, ...buildBridgeSendMarkerContent(content) };
 }
 
 /** Mirrors emitReadyCodexTurns' boundary computation so the queue + gate can
@@ -403,8 +406,8 @@ describe('CodexBridgeQueue + bridge-fallback gate (type-ahead suppression window
     ]);
 
     const markers: BridgeSendMarker[] = [
-      { sentAtMs: 7_000, contentFingerprint: 'I am checking the current repo', contentLength: 30 },
-      { sentAtMs: 10_000, contentFingerprint: 'I found the existing scripts', contentLength: 28 },
+      markerForContent(7_000, 'I am checking the current repo'),
+      markerForContent(10_000, 'I found the existing scripts'),
     ];
     expect(emitDecisions(q, markers)).toEqual([{ turnId: 't1', suppressed: false }]);
   });

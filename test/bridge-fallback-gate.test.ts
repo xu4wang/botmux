@@ -1,8 +1,22 @@
 import { describe, it, expect } from 'vitest';
+import { createHash } from 'node:crypto';
 import { shouldSuppressBridgeEmit, type BridgeSendMarker } from '../src/services/bridge-fallback-gate.js';
 
 const turn = (markTimeMs: number | undefined, isLocal: boolean | undefined = false) =>
   ({ markTimeMs, isLocal });
+
+const normalise = (text: string) => text.replace(/\s+/g, ' ').trim();
+const hash = (text: string) => createHash('sha256').update(text).digest('base64url');
+const markerForContent = (sentAtMs: number, content: string): BridgeSendMarker => {
+  const normalized = normalise(content);
+  return {
+    sentAtMs,
+    contentHash: hash(normalized),
+    contentPrefixHash: hash(normalized.slice(0, 30)),
+    contentSuffixHash: hash(normalized.slice(-30)),
+    contentLength: normalized.length,
+  } as BridgeSendMarker;
+};
 
 describe('shouldSuppressBridgeEmit', () => {
   it('adopt mode never suppresses, even with markers in window', () => {
@@ -27,7 +41,7 @@ describe('shouldSuppressBridgeEmit', () => {
   });
 
   it('non-adopt: structured marker suppresses when sent content matches the transcript final', () => {
-    const markers: BridgeSendMarker[] = [{ sentAtMs: 150, contentFingerprint: 'final answer body', contentLength: 42 }];
+    const markers: BridgeSendMarker[] = [markerForContent(150, 'final answer body with extra formatting')];
     expect(shouldSuppressBridgeEmit(
       { ...turn(100), finalText: 'final answer body with extra formatting' },
       200,
@@ -37,13 +51,59 @@ describe('shouldSuppressBridgeEmit', () => {
   });
 
   it('non-adopt: structured progress marker does not suppress an uncovered longer transcript final', () => {
-    const markers: BridgeSendMarker[] = [{ sentAtMs: 150, contentFingerprint: 'checking repository state', contentLength: 25 }];
+    const markers: BridgeSendMarker[] = [markerForContent(150, 'checking repository state')];
     expect(shouldSuppressBridgeEmit(
       { ...turn(100), finalText: 'The final answer contains a full implementation plan that was never explicitly sent through botmux send.' },
       200,
       markers,
       false,
     )).toBe(false);
+  });
+
+  it('non-adopt: structured prefix marker does not suppress the missing tail of a longer final', () => {
+    const finalText = 'Plan: keep repository-owned scripts, install them through a setup skill, and let a user-level systemd timer own the runtime synchronization loop.';
+    const markers: BridgeSendMarker[] = [markerForContent(150, 'Plan: keep repository-owned scripts')];
+    expect(shouldSuppressBridgeEmit(
+      { ...turn(100), finalText },
+      200,
+      markers,
+      false,
+    )).toBe(false);
+  });
+
+  it('non-adopt: near-complete prefix marker still emits when the final tail was not sent', () => {
+    const finalText = 'Plan: keep repository-owned scripts, install them through a setup skill, let a user-level systemd timer own the runtime synchronization loop, and document rollback clearly.';
+    const markers: BridgeSendMarker[] = [markerForContent(150, finalText.slice(0, -4))];
+    expect(shouldSuppressBridgeEmit(
+      { ...turn(100), finalText },
+      200,
+      markers,
+      false,
+    )).toBe(false);
+  });
+
+  it('non-adopt: unrelated structured progress markers do not suppress just because their total length is large', () => {
+    const finalText = 'The final answer contains the actual migration plan, validation commands, rollout boundary, and the follow-up risk assessment.';
+    const markers: BridgeSendMarker[] = [
+      markerForContent(130, 'I am checking the current repository state and reading the relevant files.'),
+      markerForContent(150, 'I found the existing scripts and will compare them before proposing the final plan.'),
+    ];
+    expect(shouldSuppressBridgeEmit(
+      { ...turn(100), finalText },
+      200,
+      markers,
+      false,
+    )).toBe(false);
+  });
+
+  it('non-adopt: short transcript send acknowledgements remain suppressed when a structured marker exists', () => {
+    const markers: BridgeSendMarker[] = [markerForContent(150, 'full answer was sent through botmux send')];
+    expect(shouldSuppressBridgeEmit(
+      { ...turn(100), finalText: '已用 botmux send 发出。' },
+      200,
+      markers,
+      false,
+    )).toBe(true);
   });
 
   it('non-adopt: marker exactly at lower bound suppresses (>= boundary)', () => {

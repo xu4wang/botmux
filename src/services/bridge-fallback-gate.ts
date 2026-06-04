@@ -19,22 +19,28 @@
  *     reason to push it back to the Lark thread.
  *   - Non-adopt + send observed in window: suppress. The window is
  *     [turn.markTimeMs, nextBoundaryMs). Legacy markers only carry time,
- *     so any marker in the window still suppresses. Newer markers also
- *     carry a fingerprint/length of the explicit `botmux send` body; when
- *     the transcript final is available, suppress only if the explicit
- *     send appears to cover that final. This prevents progress updates
- *     from hiding a later substantive final answer. Boundary handling
- *     intentionally also considers
+ *     so any marker in the window still suppresses. Newer markers carry
+ *     hashes/length of the explicit `botmux send` body; when the transcript
+ *     final is available, suppress only if the explicit send appears to
+ *     cover that final. This prevents progress updates from hiding a later
+ *     substantive final answer without writing plaintext reply snippets into
+ *     the marker file. Boundary handling intentionally also considers
  *     queue items that haven't reached "ready" yet (passed in via
  *     nextBoundaryMs) — without that, a model that's still mid-tool-use
  *     for turn N+1 could leak a send credit into turn N's window.
  */
+import { createHash } from 'node:crypto';
 import { normaliseForFingerprint } from './bridge-turn-queue.js';
+
+const CONTENT_PREFIX_LEN = 30;
+const FINAL_COVERAGE_RATIO = 0.95;
 
 export interface BridgeSendMarker {
   sentAtMs: number;
   messageId?: string;
-  contentFingerprint?: string;
+  contentHash?: string;
+  contentPrefixHash?: string;
+  contentSuffixHash?: string;
   contentLength?: number;
 }
 
@@ -51,24 +57,64 @@ export interface BridgeGateInput {
   finalText?: string;
 }
 
+function hashContent(content: string): string {
+  return createHash('sha256').update(content).digest('base64url');
+}
+
+export function buildBridgeSendMarkerContent(content: string): Pick<BridgeSendMarker, 'contentHash' | 'contentPrefixHash' | 'contentSuffixHash' | 'contentLength'> | undefined {
+  const normalized = normaliseForFingerprint(content);
+  if (!normalized) return undefined;
+  return {
+    contentHash: hashContent(normalized),
+    contentPrefixHash: hashContent(normalized.slice(0, CONTENT_PREFIX_LEN)),
+    contentSuffixHash: hashContent(normalized.slice(-CONTENT_PREFIX_LEN)),
+    contentLength: normalized.length,
+  };
+}
+
+type StructuredBridgeSendMarker = BridgeSendMarker & {
+  contentHash: string;
+  contentPrefixHash: string;
+  contentSuffixHash: string;
+  contentLength: number;
+};
+
+function hasStructuredContentMarker(marker: BridgeSendMarker): marker is StructuredBridgeSendMarker {
+  return typeof marker.contentHash === 'string'
+    && typeof marker.contentPrefixHash === 'string'
+    && typeof marker.contentSuffixHash === 'string'
+    && typeof marker.contentLength === 'number';
+}
+
+function isLikelySendAcknowledgement(finalNormalized: string): boolean {
+  if (finalNormalized.length === 0 || finalNormalized.length > 120) return false;
+  return [
+    /^(已|已经|我已|我已经).{0,40}(发送|发出|回复|重发)/,
+    /^(sent|posted|delivered|done)\b/i,
+    /^(i'?ve|i have).{0,40}(sent|posted|replied|resent)/i,
+  ].some(re => re.test(finalNormalized));
+}
+
+function structuredMarkerCoversFinal(marker: BridgeSendMarker, finalNormalized: string): boolean {
+  if (!hasStructuredContentMarker(marker)) return false;
+  if (marker.contentHash === hashContent(finalNormalized)) return true;
+  if (marker.contentPrefixHash !== hashContent(finalNormalized.slice(0, CONTENT_PREFIX_LEN))) return false;
+  if (marker.contentSuffixHash !== hashContent(finalNormalized.slice(-CONTENT_PREFIX_LEN))) return false;
+  return marker.contentLength >= Math.ceil(finalNormalized.length * FINAL_COVERAGE_RATIO);
+}
+
 function markerSetCoversFinal(markers: readonly BridgeSendMarker[], finalText: string | undefined): boolean {
   if (markers.length === 0) return false;
 
   // Back-compat: old marker files only have sentAtMs/messageId. Keep the old
   // conservative behavior for those entries instead of risking duplicates.
-  if (markers.some(m => typeof m.contentFingerprint !== 'string' || typeof m.contentLength !== 'number')) {
-    return true;
-  }
+  if (markers.some(m => !hasStructuredContentMarker(m))) return true;
 
   const finalNormalized = normaliseForFingerprint(finalText ?? '');
   if (!finalNormalized) return true;
+  if (isLikelySendAcknowledgement(finalNormalized)) return true;
 
-  if (markers.some(m => m.contentFingerprint && finalNormalized.includes(m.contentFingerprint))) {
-    return true;
-  }
-
-  const sentLength = markers.reduce((sum, m) => sum + Math.max(0, m.contentLength ?? 0), 0);
-  return sentLength >= Math.floor(finalNormalized.length * 0.8);
+  return markers.some(m => structuredMarkerCoversFinal(m, finalNormalized));
 }
 
 export function shouldSuppressBridgeEmit(
