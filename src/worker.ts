@@ -3079,7 +3079,7 @@ function spawnCli(cfg: Extract<DaemonToWorker, { type: 'init' }>): void {
   // is misleading and has cost real debugging time. (CliId-mismatch reattach
   // is now blocked upstream in restoreActiveSessions / killStalePids.)
   const persistentSessionName = effectiveBackendType === 'tmux'
-    ? TmuxBackend.sessionName(cfg.sessionId)
+    ? TmuxBackend.managedTarget(cfg.sessionId)
     : effectiveBackendType === 'herdr'
       ? HerdrBackend.sessionName(cfg.sessionId)
       : effectiveBackendType === 'zellij'
@@ -3087,7 +3087,7 @@ function spawnCli(cfg: Extract<DaemonToWorker, { type: 'init' }>): void {
       : undefined;
   const willReattachPersistent = persistentSessionName
     ? effectiveBackendType === 'tmux'
-      ? TmuxBackend.hasSession(persistentSessionName)
+      ? (TmuxBackend.groupSessionName() ? TmuxBackend.hasWindow(persistentSessionName) : TmuxBackend.hasSession(persistentSessionName))
       : effectiveBackendType === 'zellij'
         ? ZellijBackend.hasSession(persistentSessionName)
         : HerdrBackend.hasSession(persistentSessionName)
@@ -3366,7 +3366,7 @@ function startWebServer(host: string, preferredPort?: number): Promise<number> {
         // ── Tmux-attach mode: per-client attach ──
         // Each WS client gets its own `tmux attach-session` PTY.
         // Scrollback is handled natively by tmux (history-limit).
-        // In adopt mode, attach to the user's original pane; otherwise use bmx-* session.
+        // In adopt mode, attach to the user's original pane; otherwise use the managed botmux tmux target.
         //
         // Spawn is DEFERRED until the client sends its first 'resize'.  If we
         // spawned at a default size (e.g. 80×24) first and then resized, tmux
@@ -3375,7 +3375,7 @@ function startWebServer(host: string, preferredPort?: number): Promise<number> {
         // byte-for-byte (empty, separators, etc.) are not retransmitted, so
         // the earlier frame "bleeds through" — visible as a second
         // banner/prompt stacked above the new layout when scrolling up.
-        const tmuxTarget = lastInitConfig?.adoptTmuxTarget ?? TmuxBackend.sessionName(sessionId);
+        const tmuxTarget = lastInitConfig?.adoptTmuxTarget ?? TmuxBackend.managedTarget(sessionId);
         let cp: pty.IPty | null = null;
         const pendingInput: string[] = [];
 

@@ -84,6 +84,8 @@ export function composeSeedBody(
 export class TmuxPipeBackend implements SessionBackend {
   /** Real tmux pane address (e.g. "0:2.0") or botmux session name (bmx-*). */
   private readonly paneTarget: string;
+  /** Optional shared tmux session that owns this backend's botmux window. */
+  private readonly groupSessionName?: string;
   private readonly fifoPath: string;
   private readStream: fs.ReadStream | null = null;
   /** Streaming UTF-8 decoder. The fifo read emits raw Buffer chunks at libuv's
@@ -128,18 +130,19 @@ export class TmuxPipeBackend implements SessionBackend {
    *  file's cwd field so a recycled PID can't mislead the resolver. */
   cliCwd?: string;
 
-  /** Whether this backend re-attached to an existing bmx-* tmux session
+  /** Whether this backend re-attached to an existing bmx-* tmux session/window
    *  (rather than creating a new detached one). Mirrors TmuxBackend.isReattach
    *  so the worker can branch on reattach behaviour without a private-cast. */
   get isReattach(): boolean {
     return this._isReattach;
   }
 
-  constructor(paneTarget: string, opts?: { createSession?: boolean; ownsSession?: boolean; isReattach?: boolean }) {
+  constructor(paneTarget: string, opts?: { createSession?: boolean; ownsSession?: boolean; isReattach?: boolean; groupSessionName?: string }) {
     this.paneTarget = paneTarget;
     this.createSession = opts?.createSession ?? false;
     this.ownsSession = opts?.ownsSession ?? false;
     this._isReattach = opts?.isReattach ?? false;
+    this.groupSessionName = opts?.groupSessionName;
     // Per-instance fifo so concurrent adopt sessions don't collide.
     this.fifoPath = join(tmpdir(), `botmux-pipe-${randomBytes(8).toString('hex')}.fifo`);
   }
@@ -147,7 +150,7 @@ export class TmuxPipeBackend implements SessionBackend {
   // ─── SessionBackend implementation ────────────────────────────────────────
 
   /** spawn() sets up the pipe-pane subscription + fifo reader. In managed
-   *  mode it first creates a detached bmx-* tmux session that runs the CLI. */
+   *  mode it first creates a detached bmx-* tmux session/window that runs the CLI. */
   spawn(bin: string, args: string[], opts: SpawnOpts): void {
     this.cols = opts.cols;
     this.rows = opts.rows;
@@ -155,7 +158,7 @@ export class TmuxPipeBackend implements SessionBackend {
     if (this.createSession) {
       this.createDetachedSession(bin, args, opts);
     } else if (this.ownsSession && this._isReattach) {
-      // Backfill tmux options on an existing bmx-* session — daemon may have
+      // Backfill tmux options on an existing bmx-* session/window — daemon may have
       // been upgraded since the session was originally created, and options
       // like set-clipboard / window-size largest are idempotent to re-apply.
       this.applySessionOptions();
@@ -406,7 +409,8 @@ export class TmuxPipeBackend implements SessionBackend {
   destroySession(): void {
     this.kill();
     if (this.ownsSession) {
-      TmuxBackend.killSession(this.paneTarget);
+      if (this.groupSessionName) TmuxBackend.killWindow(this.paneTarget);
+      else TmuxBackend.killSession(this.paneTarget);
     }
   }
 
@@ -472,24 +476,74 @@ export class TmuxPipeBackend implements SessionBackend {
   private createDetachedSession(bin: string, args: string[], opts: SpawnOpts): void {
     const shellSpec = resolveUserShell();
     const envAssignments = buildBotmuxEnvAssignments(opts.env);
-    execFileSync('tmux', [
-      'new-session',
-      '-d',
-      '-s', this.paneTarget,
-      '-x', String(opts.cols),
-      '-y', String(opts.rows),
-      '--',
+    const command = [
       shellSpec.shell, ...shellSpec.flags, '-c', SHELL_WRAPPER_SCRIPT, '_',
       opts.cwd,
       ...envAssignments,
       bin, ...args,
+    ];
+    if (this.groupSessionName) {
+      this.createGroupedWindow(command, opts);
+    } else {
+      execFileSync('tmux', [
+        'new-session',
+        '-d',
+        '-s', this.paneTarget,
+        '-x', String(opts.cols),
+        '-y', String(opts.rows),
+        '--',
+        ...command,
+      ], {
+        cwd: opts.cwd,
+        stdio: 'ignore',
+        timeout: 5000,
+        env: tmuxEnv(opts.env),
+      });
+    }
+    this.applySessionOptions();
+  }
+
+  private createGroupedWindow(command: string[], opts: SpawnOpts): void {
+    const group = this.groupSessionName!;
+    const windowName = this.paneTarget.slice(group.length + 1);
+    const env = tmuxEnv(opts.env);
+    if (!TmuxBackend.hasSession(group)) {
+      execFileSync('tmux', [
+        'new-session',
+        '-d',
+        '-s', group,
+        '-n', windowName,
+        '-x', String(opts.cols),
+        '-y', String(opts.rows),
+        '--',
+        ...command,
+      ], {
+        cwd: opts.cwd,
+        stdio: 'ignore',
+        timeout: 5000,
+        env,
+      });
+      return;
+    }
+
+    execFileSync('tmux', [
+      'new-window',
+      '-d',
+      '-t', group,
+      '-n', windowName,
+      '--',
+      ...command,
     ], {
       cwd: opts.cwd,
       stdio: 'ignore',
       timeout: 5000,
-      env: tmuxEnv(opts.env),
+      env,
     });
-    this.applySessionOptions();
+    execFileSync('tmux', ['resize-window', '-t', this.paneTarget, '-x', String(opts.cols), '-y', String(opts.rows)], {
+      stdio: 'ignore',
+      timeout: 5000,
+      env,
+    });
   }
 
   private applySessionOptions(): void {

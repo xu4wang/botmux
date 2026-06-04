@@ -31,6 +31,7 @@ vi.mock('@larksuiteoapi/node-sdk', () => {
 import * as sdk from '@larksuiteoapi/node-sdk';
 import {
   validateCredentials,
+  fetchBotAppName,
   checkRequiredScopes,
   applyScopesUnverified,
   buildScopeDeepLink,
@@ -139,6 +140,52 @@ describe('validateCredentials', () => {
       expect.stringContaining('open.larksuite.com'),
       expect.any(Object),
     );
+  });
+});
+
+describe('fetchBotAppName', () => {
+  it('fetches tenant token then bot app_name without leaking secret', async () => {
+    fetchMock
+      .mockResolvedValueOnce({
+        ok: true,
+        status: 200,
+        json: async () => ({ code: 0, tenant_access_token: 't-xxx', expire: 7200 }),
+      })
+      .mockResolvedValueOnce({
+        ok: true,
+        status: 200,
+        json: async () => ({ code: 0, bot: { app_name: 'Codex Bot', open_id: 'ou_bot' } }),
+      });
+
+    const r = await fetchBotAppName('cli_x', 'super-secret-value-do-not-leak', 'feishu');
+
+    expect(r).toEqual({ ok: true, appName: 'Codex Bot', openId: 'ou_bot' });
+    expect(fetchMock).toHaveBeenNthCalledWith(
+      2,
+      expect.stringContaining('/open-apis/bot/v3/info/'),
+      expect.objectContaining({
+        headers: { Authorization: 'Bearer t-xxx' },
+      }),
+    );
+  });
+
+  it('returns unknown when bot info has no app_name', async () => {
+    fetchMock
+      .mockResolvedValueOnce({
+        ok: true,
+        status: 200,
+        json: async () => ({ code: 0, tenant_access_token: 't-xxx' }),
+      })
+      .mockResolvedValueOnce({
+        ok: true,
+        status: 200,
+        json: async () => ({ code: 0, bot: { open_id: 'ou_bot' } }),
+      });
+
+    const r = await fetchBotAppName('cli_x', 'sec', 'feishu');
+
+    expect(r.ok).toBe(false);
+    if (!r.ok) expect(r.message).toContain('app_name');
   });
 });
 

@@ -5,6 +5,7 @@ import {
   assertOwnerWhenChatGroups,
   botProcessName,
   findInvalidAllowedUserEntries,
+  formatBotConfigTableRows,
   hasOwnerEntry,
   isValidAllowedUserEntry,
   normalizeBotConfig,
@@ -13,6 +14,18 @@ import {
   removeBotConfig,
   resolveCliId,
 } from '../src/setup/bot-config-editor.js';
+
+describe('formatBotConfigTableRows', () => {
+  it('includes App Name between process name and App ID', () => {
+    const table = formatBotConfigTableRows([
+      { processName: 'botmux-0', appName: 'Botmux Oncall', appId: 'cli_a940bbbbdd38dbde', cliId: 'codex' },
+    ]);
+
+    expect(table.split('\n')[0]).toContain('App Name');
+    expect(table).toContain('Botmux Oncall');
+    expect(table).toMatch(/进程名\s+App Name\s+App ID\s+CLI/);
+  });
+});
 
 describe('parseBotSelection', () => {
   const bots = [
@@ -174,6 +187,18 @@ describe('applyBotConfigEdits', () => {
       name: 'Codex-Main',
       workingDir: '~/new',
     });
+  });
+
+  it('preserves bare relative workingDir edits', () => {
+    const updated = applyBotConfigEdits({
+      larkAppId: 'app',
+      larkAppSecret: 'secret',
+      workingDir: '~',
+    }, {
+      workingDir: 'docai/docai-oncall',
+    });
+
+    expect(updated.workingDir).toBe('docai/docai-oncall');
   });
 
   it('accepts cliChoice as a literal cliId', () => {

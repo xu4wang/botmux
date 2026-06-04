@@ -17,7 +17,7 @@
  *   botmux delete all     — close all active sessions
  *   botmux autostart enable|disable|status — manage boot-time autostart (launchd / user systemd)
  */
-import { execSync, spawnSync, spawn } from 'node:child_process';
+import { execSync, execFileSync, spawnSync, spawn } from 'node:child_process';
 import { existsSync, mkdirSync, copyFileSync, readFileSync, writeFileSync, renameSync, readdirSync, readlinkSync, appendFileSync, statSync, unlinkSync } from 'node:fs';
 import { join, dirname } from 'node:path';
 import { homedir } from 'node:os';
@@ -41,6 +41,7 @@ import {
   resolveCliId,
   assertOwnerWhenChatGroups,
   findInvalidAllowedUserEntries,
+  formatBotConfigTableRows,
   hasOwnerEntry,
   type BotConfigEditInput,
 } from './setup/bot-config-editor.js';
@@ -48,7 +49,7 @@ import { buildPreset, serializePreset, presetFilename } from './setup/agent-pres
 import type { CliId } from './adapters/cli/types.js';
 import { createCliAdapterSync } from './adapters/cli/registry.js';
 import { logger } from './utils/logger.js';
-import { invalidWorkingDirs } from './utils/working-dir.js';
+import { invalidWorkingDirs, normalizeWorkingDirInput } from './utils/working-dir.js';
 import { firstPositional } from './cli/arg-utils.js';
 import {
   formatBotInfoEntriesForCli,
@@ -673,7 +674,12 @@ async function promptBotConfig(rl: ReturnType<typeof createInterface>): Promise<
     console.log('   不写 bots.json。请重新运行 botmux setup。');
     return null;
   }
-  const workingDir = await ask(rl, '默认工作目录 [~]: ');
+  printInputHelp('默认工作目录', [
+    '留空沿用兼容默认值 ~（当前用户 home）；不改变老用户一路回车的行为。',
+    `当前命令所在目录是：${process.cwd()}；如果想使用它，请输入 .`,
+    '相对路径（如 docai/docai-oncall）会按当前命令所在目录解析；如要放在 home 下请写 ~/docai/docai-oncall。',
+  ]);
+  const workingDir = await ask(rl, '默认工作目录 [~]（当前目录请输入 .）: ');
   const modelChoice = await promptModel(rl, cliId);
 
   // 不再持久化 brand 字段: setup 阶段 brand=lark 直接被 obtainCredentials 中止,
@@ -684,9 +690,9 @@ async function promptBotConfig(rl: ReturnType<typeof createInterface>): Promise<
     larkAppId: creds.appId,
     larkAppSecret: creds.appSecret,
     cliId,
-    // 总是写 workingDir, 留空用 '~'. 用户手动编辑 bots.json 时一眼能看到字段
+    // 总是写 workingDir, 留空兼容旧版用 '~'. 用户手动编辑 bots.json 时一眼能看到字段
     // 在哪儿, 不用去 README 查字段名.
-    workingDir: workingDir.trim() || '~',
+    workingDir: normalizeWorkingDirInput(workingDir),
   };
   // modelChoice === undefined → 该 CLI 没声明候选 / 用户跳过；不写 model 字段
   if (typeof modelChoice === 'string' && modelChoice) {
@@ -702,6 +708,9 @@ async function promptBotConfig(rl: ReturnType<typeof createInterface>): Promise<
   } else {
     bot.allowedUsers = await promptRequiredOwner(rl);
   }
+
+  const appName = await refreshBotAppName(bot);
+  if (appName) console.log(`App Name: ${appName}\n`);
 
   if (!ensureBotWorkingDirsExist(bot, '默认工作目录')) return null;
 
@@ -723,19 +732,89 @@ function formatOptionalValue(v: unknown): string {
  * parseBotSelection 不再接受裸数字, 避免又冒出 "序号到底是几" 的歧义.
  */
 function formatBotConfigTable(bots: any[]): string {
-  if (bots.length === 0) return '';
-  const headers = ['进程名', 'App ID', 'CLI'];
-  const rows = bots.map((b, i) => [
-    botProcessName(b, i, PM2_NAME),
-    String(b?.larkAppId ?? ''),
-    String(b?.cliId ?? 'claude-code'),
-  ]);
-  const widths = headers.map((h, c) =>
-    Math.max(displayWidth(h), ...rows.map(r => displayWidth(r[c]))),
+  const appNames = loadKnownBotAppNames();
+  return formatBotConfigTableRows(bots.map((b, i) => ({
+    processName: botProcessName(b, i, PM2_NAME),
+    appName: knownBotAppName(b, appNames),
+    appId: String(b?.larkAppId ?? ''),
+    cliId: String(b?.cliId ?? 'claude-code'),
+  })));
+}
+
+type BotInfoEntryForSetup = { larkAppId?: string; botName?: string | null; appName?: string | null };
+
+function loadKnownBotAppNames(): Map<string, string> {
+  const map = new Map<string, string>();
+
+  const ingest = (entries: unknown): void => {
+    if (!Array.isArray(entries)) return;
+    for (const entry of entries as BotInfoEntryForSetup[]) {
+      const appId = typeof entry?.larkAppId === 'string' ? entry.larkAppId : '';
+      const name = typeof entry?.botName === 'string'
+        ? entry.botName.trim()
+        : typeof entry?.appName === 'string'
+          ? entry.appName.trim()
+          : '';
+      if (appId && name) map.set(appId, name);
+    }
+  };
+
+  // Populated by running daemons after /bot/v3/info; available even when setup
+  // is offline and avoids a network call in the common restart/edit path.
+  try { ingest(JSON.parse(readFileSync(join(DATA_DIR, 'bots-info.json'), 'utf-8'))); } catch { /* ignore */ }
+  // Cache written by setup's own best-effort lookup, so the name can show even
+  // before the first daemon start.
+  try { ingest(JSON.parse(readFileSync(join(CONFIG_DIR, 'bots-app-names.json'), 'utf-8'))); } catch { /* ignore */ }
+
+  return map;
+}
+
+function knownBotAppName(bot: any, appNames = loadKnownBotAppNames()): string | undefined {
+  const configured = typeof bot?.appName === 'string' ? bot.appName.trim() : '';
+  if (configured) return configured;
+  const appId = typeof bot?.larkAppId === 'string' ? bot.larkAppId : '';
+  return appId ? appNames.get(appId) : undefined;
+}
+
+function cacheBotAppName(appId: string, appName: string): void {
+  const cleanName = appName.trim();
+  if (!appId || !cleanName) return;
+  const path = join(CONFIG_DIR, 'bots-app-names.json');
+  const map = new Map<string, BotInfoEntryForSetup>();
+  try {
+    const entries = JSON.parse(readFileSync(path, 'utf-8'));
+    if (Array.isArray(entries)) {
+      for (const entry of entries as BotInfoEntryForSetup[]) {
+        if (typeof entry?.larkAppId === 'string') map.set(entry.larkAppId, entry);
+      }
+    }
+  } catch { /* ignore */ }
+  map.set(appId, { larkAppId: appId, appName: cleanName, botName: cleanName });
+  writeFileSync(path, JSON.stringify([...map.values()], null, 2) + '\n', { mode: 0o600 });
+}
+
+async function refreshBotAppName(bot: any): Promise<string | undefined> {
+  const appId = typeof bot?.larkAppId === 'string' ? bot.larkAppId : '';
+  const secret = typeof bot?.larkAppSecret === 'string' ? bot.larkAppSecret : '';
+  if (!appId || !secret) return undefined;
+  try {
+    const { fetchBotAppName } = await import('./setup/verify-permissions.js');
+    const info = await fetchBotAppName(appId, secret, botBrand(bot), { budgetMs: 5_000 });
+    if (info.ok) {
+      cacheBotAppName(appId, info.appName);
+      return info.appName;
+    }
+  } catch { /* best effort only */ }
+  return undefined;
+}
+
+async function refreshMissingBotAppNames(bots: any[]): Promise<void> {
+  const known = loadKnownBotAppNames();
+  await Promise.all(
+    bots
+      .filter((bot) => !knownBotAppName(bot, known))
+      .map((bot) => refreshBotAppName(bot)),
   );
-  const render = (cells: string[]) =>
-    '  ' + cells.map((cell, i) => padEndDisplay(cell, widths[i])).join('  ');
-  return [render(headers), ...rows.map(render)].join('\n');
 }
 
 async function promptEditBotConfig(
@@ -809,6 +888,8 @@ async function promptEditBotConfig(
 
   printInputHelp('默认工作目录', [
     '可选。新会话默认进入的目录，支持逗号分隔多个候选目录。',
+    '推荐输入 ~/xxx 或 /绝对路径，语义最明确。',
+    '相对路径（如 docai/docai-oncall）会按当前命令所在目录解析；如要放在 home 下请写 ~/docai/docai-oncall。',
     '留空保留当前值；输入 - 清空并回到默认 ~。',
   ]);
   input.workingDir = await ask(rl, `默认工作目录 [${formatOptionalValue(bot.workingDir)}]: `);
@@ -902,6 +983,7 @@ async function cmdSetup(): Promise<void> {
   if (hasBots) {
     // --- Multi-bot mode (bots.json exists) ---
     const bots = loadBotsJson();
+    await refreshMissingBotAppNames(bots);
     console.log(`已配置 ${bots.length} 个机器人：\n`);
     console.log(formatBotConfigTable(bots));
     console.log('');
@@ -970,6 +1052,7 @@ async function cmdSetup(): Promise<void> {
           return;
         }
         console.log('✅ 凭证有效\n');
+        await refreshBotAppName(edited);
       }
       rl.close();
 
@@ -1786,6 +1869,34 @@ function tmuxSessionExists(name: string): boolean {
   }
 }
 
+function botmuxTmuxTarget(sessionId: string): string {
+  const name = `bmx-${sessionId.substring(0, 8)}`;
+  const group = process.env.BOTMUX_TMUX_GROUP_SESSION?.trim();
+  return group ? `${group}:${name}` : name;
+}
+
+function botmuxTmuxTargetExists(sessionId: string): boolean {
+  return tmuxSessionExists(botmuxTmuxTarget(sessionId));
+}
+
+function killBotmuxTmuxTarget(sessionId: string): string | undefined {
+  const target = botmuxTmuxTarget(sessionId);
+  const group = process.env.BOTMUX_TMUX_GROUP_SESSION?.trim();
+  try {
+    const args = group ? ['kill-window', '-t', target] : ['kill-session', '-t', target];
+    execFileSync('tmux', args, { stdio: 'ignore', env: tmuxEnv() });
+    return target;
+  } catch {
+    return undefined;
+  }
+}
+
+function tmuxAttachArgsForTarget(target: string): string[] {
+  // tmux accepts `session:window` directly for attach-session and selects that
+  // window inside the shared group session.
+  return ['attach-session', '-t', target];
+}
+
 /** Shorten path for display: replace $HOME with ~. */
 function shortenPath(p: string): string {
   const home = homedir();
@@ -1842,8 +1953,8 @@ function interactiveSessionPicker(active: SessionData[]): Promise<void> {
       const status = (alive ? 'online' : s.pid ? 'stopped' : 'idle').padEnd(cols.status);
       parts.push(title, dir, pid, uptime, status);
 
-      const tmuxName = `bmx-${s.sessionId.substring(0, 8)}`;
-      const hasTmux = tmuxSessionExists(tmuxName);
+      const tmuxName = botmuxTmuxTarget(s.sessionId);
+      const hasTmux = botmuxTmuxTargetExists(s.sessionId);
       return { session: s, text: parts.join(' │ '), alive, tmuxName, hasTmux };
     });
   }
@@ -1949,7 +2060,7 @@ function interactiveSessionPicker(active: SessionData[]): Promise<void> {
 
       // Kill tmux session
       if (r.hasTmux) {
-        try { execSync(`tmux kill-session -t '${r.tmuxName}' 2>/dev/null`, { stdio: 'ignore', env: tmuxEnv() }); } catch { /* */ }
+        killBotmuxTmuxTarget(s.sessionId);
       }
 
       // Mark closed & persist
@@ -2024,7 +2135,7 @@ function interactiveSessionPicker(active: SessionData[]): Promise<void> {
           return;
         }
         cleanup();
-        spawnSync('tmux', ['attach-session', '-t', selected.tmuxName], {
+        spawnSync('tmux', tmuxAttachArgsForTarget(selected.tmuxName), {
           stdio: 'inherit',
           env: tmuxEnv(),
         });
@@ -2052,7 +2163,7 @@ async function cmdList(): Promise<void> {
   const live: SessionData[] = [];
   for (const s of active) {
     const hasPid = !!(s.pid && isProcessAlive(s.pid));
-    const hasTmux = tmuxSessionExists(`bmx-${s.sessionId.substring(0, 8)}`);
+    const hasTmux = botmuxTmuxTargetExists(s.sessionId);
     if (!hasPid && !hasTmux) {
       const everReal = !!(s.cliId || s.lastCliInput || s.adoptedFrom);
       (everReal ? pruned : prunedScratch).push(s);
@@ -2114,7 +2225,7 @@ function cmdDelete(): void {
   } else if (target === 'stopped') {
     toDelete = active.filter(s => {
       const hasPid = !!(s.pid && isProcessAlive(s.pid));
-      const hasTmux = tmuxSessionExists(`bmx-${s.sessionId.substring(0, 8)}`);
+      const hasTmux = botmuxTmuxTargetExists(s.sessionId);
       return !hasPid && !hasTmux;
     });
     if (toDelete.length === 0) {
@@ -2146,11 +2257,8 @@ function cmdDelete(): void {
     }
 
     // Kill associated tmux session if it exists
-    const tmuxName = `bmx-${s.sessionId.substring(0, 8)}`;
-    try {
-      execSync(`tmux kill-session -t '${tmuxName}' 2>/dev/null`, { stdio: 'ignore', env: tmuxEnv() });
-      console.log(`  killed tmux ${tmuxName}`);
-    } catch { /* no tmux session */ }
+    const killedTmux = killBotmuxTmuxTarget(s.sessionId);
+    if (killedTmux) console.log(`  killed tmux ${killedTmux}`);
 
     // Mark session as closed
     s.status = 'closed';

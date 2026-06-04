@@ -7,6 +7,8 @@ vi.mock('../src/adapters/backend/pty-backend.js', () => ({
 vi.mock('../src/adapters/backend/tmux-backend.js', () => ({
   TmuxBackend: class MockTmuxBackend {
     static sessionName = vi.fn((id: string) => `bmx-${id.slice(0, 8)}`);
+    static groupSessionName = vi.fn(() => undefined as string | undefined);
+    static hasWindow = vi.fn();
     static hasSession = vi.fn();
     constructor(public sessionName: string) {}
   },
@@ -41,6 +43,8 @@ import { selectSessionBackend } from '../src/adapters/backend/session-backend-se
 describe('selectSessionBackend', () => {
   beforeEach(() => {
     vi.mocked(TmuxBackend.hasSession).mockReset();
+    vi.mocked(TmuxBackend.hasWindow).mockReset();
+    vi.mocked(TmuxBackend.groupSessionName).mockReset().mockReturnValue(undefined);
     vi.mocked(TmuxBackend.sessionName).mockClear();
   });
 
@@ -54,6 +58,19 @@ describe('selectSessionBackend', () => {
     expect(selected.backend.constructor.name).toBe('MockTmuxPipeBackend');
     expect((selected.backend as any).paneTarget).toBe('bmx-9cfa0024');
     expect((selected.backend as any).opts).toEqual({ ownsSession: true, isReattach: true });
+  });
+
+  it('uses a shared tmux session window when BOTMUX_TMUX_GROUP_SESSION is set', () => {
+    vi.mocked(TmuxBackend.groupSessionName).mockReturnValue('botmux');
+    vi.mocked(TmuxBackend.hasWindow).mockReturnValue(false);
+
+    const selected = selectSessionBackend({ sessionId: '9cfa0024-197d-4781-845b-c541dceb8980', backendType: 'tmux' });
+
+    expect(selected.backend.constructor.name).toBe('MockTmuxPipeBackend');
+    expect((selected.backend as any).paneTarget).toBe('botmux:bmx-9cfa0024');
+    expect((selected.backend as any).opts).toEqual({ createSession: true, ownsSession: true, groupSessionName: 'botmux' });
+    expect(TmuxBackend.hasSession).not.toHaveBeenCalled();
+    expect(TmuxBackend.hasWindow).toHaveBeenCalledWith('botmux:bmx-9cfa0024');
   });
 
   it('uses managed pipe backend for a new tmux session', () => {

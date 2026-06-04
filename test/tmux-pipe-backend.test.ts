@@ -359,6 +359,30 @@ describe('TmuxPipeBackend managed session', () => {
     expect(optionCalls.some(c => c.includes('set-option -s set-clipboard on'))).toBe(true);
   });
 
+  it('creates a shared-session window when groupSessionName is set', () => {
+    const be = new TmuxPipeBackend('botmux:bmx-owned', { createSession: true, ownsSession: true, groupSessionName: 'botmux' });
+    mockedExecSync.mockImplementation((cmd: any) => {
+      if (String(cmd).includes('has-session')) throw new Error('missing');
+      return Buffer.from('') as any;
+    });
+    be.spawn('/bin/echo', ['hello'], spawnOpts());
+
+    const calls = mockedExecFileSync.mock.calls.map(call => call[1] as string[]);
+    expect(calls.some(args =>
+      args.includes('new-session') &&
+      args.includes('-s') && args.includes('botmux') &&
+      args.includes('-n') && args.includes('bmx-owned'),
+    )).toBe(true);
+  });
+
+  it('kills only the shared-session window on destroySession', () => {
+    const be = new TmuxPipeBackend('botmux:bmx-owned', { ownsSession: true, groupSessionName: 'botmux' });
+    be.destroySession();
+
+    expect(mockedExecSync).toHaveBeenCalledWith("tmux kill-window -t 'botmux:bmx-owned'", expect.any(Object));
+    expect(mockedExecSync).not.toHaveBeenCalledWith("tmux kill-session -t 'botmux:bmx-owned'", expect.any(Object));
+  });
+
   it('resizes owned tmux sessions and only records adopted pane resize', () => {
     const owned = new TmuxPipeBackend('bmx-owned', { ownsSession: true });
     owned.resize(120, 40);

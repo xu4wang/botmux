@@ -762,19 +762,22 @@ function getSessionPersistentBackendType(ds: DaemonSession): Exclude<BackendType
 }
 
 function persistentSessionName(backendType: Exclude<BackendType, 'pty'>, sessionId: string): string {
-  if (backendType === 'tmux') return TmuxBackend.sessionName(sessionId);
+  if (backendType === 'tmux') return TmuxBackend.managedTarget(sessionId);
   if (backendType === 'zellij') return ZellijBackend.sessionName(sessionId);
   return HerdrBackend.sessionName(sessionId);
 }
 
 function persistentSessionExists(backendType: Exclude<BackendType, 'pty'>, name: string): boolean {
-  if (backendType === 'tmux') return TmuxBackend.hasSession(name);
+  if (backendType === 'tmux') return TmuxBackend.groupSessionName() ? TmuxBackend.hasWindow(name) : TmuxBackend.hasSession(name);
   if (backendType === 'zellij') return ZellijBackend.hasSession(name);
   return HerdrBackend.hasSession(name);
 }
 
 function killPersistentSession(backendType: Exclude<BackendType, 'pty'>, name: string): void {
-  if (backendType === 'tmux') TmuxBackend.killSession(name);
+  if (backendType === 'tmux') {
+    if (TmuxBackend.groupSessionName()) TmuxBackend.killWindow(name);
+    else TmuxBackend.killSession(name);
+  }
   else if (backendType === 'zellij') ZellijBackend.killSession(name);
   else HerdrBackend.killSession(name);
 }

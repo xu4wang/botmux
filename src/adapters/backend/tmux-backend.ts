@@ -28,6 +28,10 @@ const REDACTED_ENV_UNSET_CLAUSE = `unset ${REDACTED_CHILD_ENV_KEYS.join(' ')}`;
  *   - destroySession() kills the tmux session (for explicit /close)
  *
  * Naming: tmux sessions are named `bmx-<sessionId.slice(0,8)>`.
+ *
+ * Optional shared-session mode: when BOTMUX_TMUX_GROUP_SESSION is set, botmux
+ * keeps all managed tmux windows inside that single tmux session. Each agent
+ * session still gets an isolated window named `bmx-<sessionId.slice(0,8)>`.
  */
 export class TmuxBackend implements SessionBackend {
   private process: pty.IPty | null = null;
@@ -69,6 +73,24 @@ export class TmuxBackend implements SessionBackend {
     return `bmx-${sessionId.slice(0, 8)}`;
   }
 
+  /** Optional shared tmux session name. Empty / unset keeps legacy per-session mode. */
+  static groupSessionName(): string | undefined {
+    const name = process.env.BOTMUX_TMUX_GROUP_SESSION?.trim();
+    return name || undefined;
+  }
+
+  /** Window name used inside BOTMUX_TMUX_GROUP_SESSION shared-session mode. */
+  static groupWindowName(sessionId: string): string {
+    return TmuxBackend.sessionName(sessionId);
+  }
+
+  /** tmux target for a managed Botmux pane/session. */
+  static managedTarget(sessionId: string): string {
+    const group = TmuxBackend.groupSessionName();
+    const name = TmuxBackend.sessionName(sessionId);
+    return group ? `${group}:${name}` : name;
+  }
+
   /** Check if a named tmux session exists. */
   static hasSession(name: string): boolean {
     try {
@@ -79,6 +101,11 @@ export class TmuxBackend implements SessionBackend {
     }
   }
 
+  /** Check if a shared-session window target exists. */
+  static hasWindow(target: string): boolean {
+    return TmuxBackend.hasSession(target);
+  }
+
   /** Kill a named tmux session (no-op if it doesn't exist). */
   static killSession(name: string): void {
     try {
@@ -86,9 +113,24 @@ export class TmuxBackend implements SessionBackend {
     } catch { /* session doesn't exist */ }
   }
 
+  /** Kill a specific tmux window (used by shared-session mode). */
+  static killWindow(target: string): void {
+    try {
+      execSync(`tmux kill-window -t ${shellescape(target)}`, { stdio: 'ignore', env: tmuxEnv() });
+    } catch { /* window doesn't exist */ }
+  }
+
   /** List all botmux tmux sessions (bmx-* prefix). */
   static listBotmuxSessions(): string[] {
     try {
+      const group = TmuxBackend.groupSessionName();
+      if (group) {
+        const out = execSync(`tmux list-windows -t ${shellescape(group)} -F '#{window_name}' 2>/dev/null`, {
+          encoding: 'utf-8',
+          env: tmuxEnv(),
+        });
+        return out.split('\n').filter(s => s.startsWith('bmx-')).map(s => `${group}:${s}`);
+      }
       const out = execSync("tmux list-sessions -F '#{session_name}' 2>/dev/null", {
         encoding: 'utf-8',
         env: tmuxEnv(),

@@ -1,8 +1,9 @@
 import { mkdtempSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { homedir, tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { describe, expect, it } from 'vitest';
-import { configuredWorkingDirs, invalidWorkingDirs, parseWorkingDirList } from '../src/utils/working-dir.js';
+import { configuredWorkingDirs, invalidWorkingDirs, normalizeWorkingDirInput, parseWorkingDirList } from '../src/utils/working-dir.js';
+import { expandHome, validateWorkingDir } from '../src/core/working-dir.js';
 
 describe('working-dir utils', () => {
   it('parses comma-separated strings and arrays', () => {
@@ -14,6 +15,20 @@ describe('working-dir utils', () => {
   it('dedupes configured dirs by resolved path', () => {
     const cwd = process.cwd();
     expect(configuredWorkingDirs({ workingDir: '., ' + cwd })).toEqual(['.']);
+  });
+
+  it('expands ~/ paths to the user home directory', () => {
+    expect(expandHome('~')).toBe(homedir());
+    expect(expandHome('~/docai')).toBe(join(homedir(), 'docai'));
+    expect(validateWorkingDir('~').ok).toBe(true);
+  });
+
+  it('normalizes setup workingDir input without changing relative path semantics', () => {
+    expect(normalizeWorkingDirInput('')).toBe('~');
+    expect(normalizeWorkingDirInput('', '/repo/current')).toBe('/repo/current');
+    expect(normalizeWorkingDirInput('docai/docai-oncall')).toBe('docai/docai-oncall');
+    expect(normalizeWorkingDirInput('~/docai')).toBe('~/docai');
+    expect(normalizeWorkingDirInput('/srv/docai')).toBe('/srv/docai');
   });
 
   it('reports missing paths and files as invalid dirs', () => {

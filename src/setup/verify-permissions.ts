@@ -99,6 +99,10 @@ export type CredentialValidation =
   | { ok: true; tenantAccessToken: string; tokenExpiresIn: number }
   | { ok: false; error: 'invalid_credentials' | 'network' | 'unknown'; message: string };
 
+export type BotInfoLookup =
+  | { ok: true; appName: string; openId?: string }
+  | { ok: false; error: 'invalid_credentials' | 'network' | 'unknown'; message: string };
+
 /**
  * 用 AppID/Secret 取一次 tenant_access_token, 验证凭证可用.
  *
@@ -166,6 +170,73 @@ export async function validateCredentials(
   // 10003 / 10012: app_id or app_secret invalid
   // 10014: 应用未发布
   // 99991663: app_secret invalid
+  if (body?.code === 10003 || body?.code === 10012 || body?.code === 99991663) {
+    return { ok: false, error: 'invalid_credentials', message: `凭证无效 (code=${body.code}): ${body.msg ?? ''}` };
+  }
+
+  return { ok: false, error: 'unknown', message: `code=${body?.code ?? '?'} msg=${body?.msg ?? ''}` };
+}
+
+/**
+ * Best-effort lookup for the human-visible Lark/Feishu bot app name.
+ * Used by `botmux setup` to make the existing-bots list recognizable without
+ * requiring the daemon to be running. Secret never appears in returned errors.
+ */
+export async function fetchBotAppName(
+  appId: string,
+  appSecret: string,
+  brand: Brand = 'feishu',
+  opts: { budgetMs?: number; signal?: AbortSignal } = {},
+): Promise<BotInfoLookup> {
+  const budgetMs = opts.budgetMs ?? 10_000;
+  const host = brand === 'lark' ? 'open.larksuite.com' : 'open.feishu.cn';
+
+  const token = await validateCredentials(appId, appSecret, brand, opts);
+  if (!token.ok) return token;
+
+  const ac = new AbortController();
+  const timer = setTimeout(() => ac.abort(), budgetMs);
+  if (opts.signal) {
+    if (opts.signal.aborted) ac.abort();
+    else opts.signal.addEventListener('abort', () => ac.abort(), { once: true });
+  }
+
+  let res: Response;
+  let body: any;
+  try {
+    res = await fetch(`https://${host}/open-apis/bot/v3/info/`, {
+      headers: { Authorization: `Bearer ${token.tenantAccessToken}` },
+      signal: ac.signal,
+    });
+    body = await res.json();
+  } catch (err: any) {
+    clearTimeout(timer);
+    const isAbort = err?.name === 'AbortError' || ac.signal.aborted;
+    if (!isAbort && err instanceof SyntaxError) {
+      return { ok: false, error: 'unknown', message: `HTTP ${res!?.status ?? '?'} 响应非 JSON` };
+    }
+    return {
+      ok: false,
+      error: 'network',
+      message: isAbort
+        ? `请求超时 (> ${budgetMs}ms)`
+        : `网络错误: ${err?.code ?? err?.message ?? 'unknown'}`,
+    };
+  }
+  clearTimeout(timer);
+
+  if (body?.code === 0) {
+    const appName = typeof body?.bot?.app_name === 'string' ? body.bot.app_name.trim() : '';
+    if (appName) {
+      return {
+        ok: true,
+        appName,
+        openId: typeof body?.bot?.open_id === 'string' ? body.bot.open_id : undefined,
+      };
+    }
+    return { ok: false, error: 'unknown', message: 'bot/v3/info 响应缺少 bot.app_name' };
+  }
+
   if (body?.code === 10003 || body?.code === 10012 || body?.code === 99991663) {
     return { ok: false, error: 'invalid_credentials', message: `凭证无效 (code=${body.code}): ${body.msg ?? ''}` };
   }

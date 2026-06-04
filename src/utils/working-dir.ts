@@ -2,8 +2,17 @@ import { statSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join, resolve } from 'node:path';
 
+export function normalizeWorkingDirInput(input: string, fallback = '~'): string {
+  const s = input.trim();
+  if (!s) return fallback;
+  if (s === '-') return s;
+  return s;
+}
+
 export function expandHomePath(p: string): string {
-  return p.startsWith('~') ? join(homedir(), p.slice(1)) : p;
+  if (p === '~') return homedir();
+  if (p.startsWith('~/')) return join(homedir(), p.slice(2));
+  return p;
 }
 
 export function parseWorkingDirList(value: unknown): string[] {

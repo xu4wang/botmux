@@ -8,7 +8,9 @@ import { homedir } from 'node:os';
 import { t, type Locale } from '../i18n/index.js';
 
 export function expandHome(p: string): string {
-  return p.startsWith('~') ? join(homedir(), p.slice(1)) : p;
+  if (p === '~') return homedir();
+  if (p.startsWith('~/')) return join(homedir(), p.slice(2));
+  return p;
 }
 
 /**

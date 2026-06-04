@@ -1,4 +1,5 @@
 import type { CliId } from '../adapters/cli/types.js';
+import { normalizeWorkingDirInput } from '../utils/working-dir.js';
 
 export const CLI_ID_CHOICES: Record<string, CliId> = {
   '1': 'claude-code',
@@ -258,6 +259,40 @@ export function removeBotConfig<T extends { larkAppId?: string; name?: unknown }
   return { bots: nextBots, removed: removed as T, index };
 }
 
+export interface BotConfigTableRow {
+  processName: string;
+  appName?: string;
+  appId: string;
+  cliId: string;
+}
+
+function displayWidth(s: string): number {
+  // Good enough for setup's CJK/ASCII table: wide code points count as 2,
+  // combining marks are rare in these labels and can safely count as 1 here.
+  let w = 0;
+  for (const ch of s) {
+    const cp = ch.codePointAt(0) ?? 0;
+    w += cp > 0x2e80 ? 2 : 1;
+  }
+  return w;
+}
+
+function padEndDisplay(s: string, width: number): string {
+  return s + ' '.repeat(Math.max(0, width - displayWidth(s)));
+}
+
+export function formatBotConfigTableRows(rows: BotConfigTableRow[]): string {
+  if (rows.length === 0) return '';
+  const headers = ['进程名', 'App Name', 'App ID', 'CLI'];
+  const cells = rows.map((r) => [r.processName, r.appName ?? '', r.appId, r.cliId]);
+  const widths = headers.map((h, c) =>
+    Math.max(displayWidth(h), ...cells.map(r => displayWidth(r[c]))),
+  );
+  const render = (row: string[]) =>
+    '  ' + row.map((cell, i) => padEndDisplay(cell, widths[i])).join('  ');
+  return [render(headers), ...cells.map(render)].join('\n');
+}
+
 export function applyBotConfigEdits<T extends Record<string, any>>(
   bot: T,
   input: BotConfigEditInput,
@@ -304,7 +339,11 @@ export function applyBotConfigEdits<T extends Record<string, any>>(
     }
   }
 
-  applyOptionalString(out, 'workingDir', input.workingDir);
+  if (input.workingDir !== undefined) {
+    const workingDir = input.workingDir.trim();
+    if (workingDir === '-') delete out.workingDir;
+    else if (workingDir) out.workingDir = normalizeWorkingDirInput(workingDir);
+  }
 
   if (input.allowedUsers !== undefined) {
     const allowedUsers = input.allowedUsers.trim();
