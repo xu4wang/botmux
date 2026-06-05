@@ -29,6 +29,7 @@ import { HerdrBackend } from '../adapters/backend/herdr-backend.js';
 import { getBot, getAllBots, resolveBrandLabel } from '../bot-registry.js';
 import { dashboardEventBus } from './dashboard-events.js';
 import { composeRowFromActive } from './dashboard-rows.js';
+import { publishAttentionPatch } from './session-activity.js';
 import { knownBotOpenIdsFromCrossRef, type BotMentionEntry } from '../utils/bot-routing.js';
 import type { CliId } from '../adapters/cli/types.js';
 import type { DaemonToWorker, WorkerToDaemon, Session, DisplayMode } from '../types.js';
@@ -1707,6 +1708,7 @@ function setupWorkerHandlers(ds: DaemonSession, worker: ChildProcess): void {
           );
           const cardMsgId = await cb.sessionReply(sessionAnchorId(ds), cardJson, 'interactive', ds.larkAppId);
           ds.tuiPromptCardId = cardMsgId;
+          publishAttentionPatch(ds);
         } catch (err) {
           logger.warn(`[${t}] Failed to post TUI prompt card: ${err}`);
         }
@@ -1723,6 +1725,7 @@ function setupWorkerHandlers(ds: DaemonSession, worker: ChildProcess): void {
           );
           ds.tuiPromptCardId = undefined;
           ds.tuiPromptOptions = undefined;
+          publishAttentionPatch(ds);
         }
         break;
       }

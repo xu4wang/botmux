@@ -26,6 +26,7 @@ import { getRunsDir } from './workflows/runs-dir.js';
 import { BotOnboardingManager } from './dashboard/bot-onboarding.js';
 import { CLI_OPTIONS, resolveCliId } from './setup/bot-config-editor.js';
 import { invalidWorkingDirs } from './utils/working-dir.js';
+import { mergeDashboardConfig, readGlobalConfig, type DashboardGlobalConfig } from './global-config.js';
 import type { CliId } from './adapters/cli/types.js';
 import type { ConnectorDefinition } from './services/connector-store.js';
 import type { WebhookLifecycleRecord } from './services/webhook-lifecycle-store.js';
@@ -57,6 +58,26 @@ const aggregator = new Aggregator();
 const botOnboarding = new BotOnboardingManager({ botsJsonPath: BOTS_JSON_PATH });
 const subs = new Map<string, () => void>();
 const attaching = new Set<string>();   // dedup concurrent attaches per appId
+
+interface ResolvedDashboardSettings {
+  publicReadOnly: boolean;
+  openTerminalInFeishu: boolean;
+}
+
+function resolveDashboardSettings(): ResolvedDashboardSettings {
+  const dashboard = readGlobalConfig().dashboard ?? {};
+  return {
+    publicReadOnly: dashboard.publicReadOnly ?? config.dashboard.publicReadOnly,
+    openTerminalInFeishu: dashboard.openTerminalInFeishu === true,
+  };
+}
+
+async function readJsonBody(req: IncomingMessage): Promise<unknown> {
+  const chunks: Buffer[] = [];
+  for await (const c of req) chunks.push(c as Buffer);
+  const raw = Buffer.concat(chunks).toString('utf8').trim();
+  return raw ? JSON.parse(raw) : {};
+}
 
 /**
  * Attach to one daemon: hydrate its sessions/schedules into the aggregator,
@@ -370,12 +391,14 @@ const server = createServer(async (req, res) => {
     }
 
     const presentedToken = authedToken(req, url);
+    const dashboardSettings = resolveDashboardSettings();
     const decision = decideDashboardAuth({
       method: req.method ?? 'GET',
       pathname: url.pathname,
       hasTokenParam: url.searchParams.has('t'),
       presentedToken,
       activeToken: activeToken ?? '',
+      publicReadOnly: dashboardSettings.publicReadOnly,
     });
     // `authed` is consumed by route handlers that need to distinguish
     // "request got in via public-read carve-out" from "request has a
@@ -414,7 +437,40 @@ const server = createServer(async (req, res) => {
       return jsonRes(res, 200, { sessions: aggregator.getSessions() });
     }
     if (req.method === 'GET' && url.pathname === '/api/schedules') {
-      return jsonRes(res, 200, { schedules: aggregator.getSchedules() });
+      // Public-read carve-out: the task prompt is CONTENT (business
+      // instructions), not status — strip it for anonymous visitors. The
+      // schedules page only renders name/timing, so nothing degrades.
+      const schedules = authed
+        ? aggregator.getSchedules()
+        : aggregator.getSchedules().map(({ prompt: _prompt, ...rest }) => rest);
+      return jsonRes(res, 200, { schedules });
+    }
+    if (req.method === 'GET' && url.pathname === '/api/settings') {
+      // `authed` lets the Settings page disable toggles for read-only
+      // visitors up front, instead of letting them flip a switch that
+      // 401s + rolls back on save.
+      return jsonRes(res, 200, { settings: dashboardSettings, authed });
+    }
+    if (req.method === 'PUT' && url.pathname === '/api/settings') {
+      let parsed: unknown;
+      try {
+        parsed = await readJsonBody(req);
+      } catch {
+        return jsonRes(res, 400, { ok: false, error: 'bad_json' });
+      }
+      const body = parsed && typeof parsed === 'object' ? parsed as Record<string, unknown> : {};
+      const patch: DashboardGlobalConfig = {};
+      if ('publicReadOnly' in body) {
+        if (typeof body.publicReadOnly !== 'boolean') return jsonRes(res, 400, { ok: false, error: 'invalid_publicReadOnly' });
+        patch.publicReadOnly = body.publicReadOnly;
+      }
+      if ('openTerminalInFeishu' in body) {
+        if (typeof body.openTerminalInFeishu !== 'boolean') return jsonRes(res, 400, { ok: false, error: 'invalid_openTerminalInFeishu' });
+        patch.openTerminalInFeishu = body.openTerminalInFeishu;
+      }
+      if (Object.keys(patch).length === 0) return jsonRes(res, 400, { ok: false, error: 'empty_patch' });
+      mergeDashboardConfig(patch);
+      return jsonRes(res, 200, { ok: true, settings: resolveDashboardSettings() });
     }
 
     if (await handleConnectorApi(req, res, url)) {
@@ -966,7 +1022,19 @@ const server = createServer(async (req, res) => {
       });
       res.write('retry: 5000\n\n');
       const off = aggregator.on(ev => {
-        res.write(`event: ${ev.type}\ndata: ${JSON.stringify({ larkAppId: ev.larkAppId, body: ev.body })}\n\n`);
+        // Mirror the GET /api/schedules carve-out: schedule events carry the
+        // full task object — strip the prompt for anonymous SSE listeners,
+        // or the REST-side scrub would be trivially bypassed by `/events`.
+        let body = ev.body;
+        if (!authed && (ev.type === 'schedule.created' || ev.type === 'schedule.updated')) {
+          const b = body as { schedule?: Record<string, unknown>; patch?: Record<string, unknown>; id?: string };
+          body = {
+            ...b,
+            ...(b.schedule ? { schedule: { ...b.schedule, prompt: undefined } } : {}),
+            ...(b.patch ? { patch: { ...b.patch, prompt: undefined } } : {}),
+          } as typeof ev.body;
+        }
+        res.write(`event: ${ev.type}\ndata: ${JSON.stringify({ larkAppId: ev.larkAppId, body })}\n\n`);
       });
       const hb = setInterval(() => {
         res.write(`event: heartbeat\ndata: ${JSON.stringify({ ts: Date.now() })}\n\n`);

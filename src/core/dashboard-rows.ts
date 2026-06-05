@@ -24,6 +24,11 @@ export interface SessionRow {
   chatId: string;
   rootMessageId: string;
   threadId?: string;
+  /** Conversation unit ('thread' = topic-anchored, 'chat' = plain chat scope).
+   *  Drives the board's locate button: chat-scope sessions have no topic to
+   *  locate, so the dashboard offers "open chat" (feishuChatLink) instead.
+   *  Absent on rows from older daemons → callers keep the locate behavior. */
+  scope?: 'thread' | 'chat';
   title?: string;
   ownerOpenId?: string;
   webPort: number | null;
@@ -33,6 +38,12 @@ export interface SessionRow {
   cliVersion?: string;
   hasHistory?: boolean;
   feishuChatLink: string;
+  /** Repo-selection card is waiting for a click — the CLI has not spawned yet.
+   *  Feeds the board view's needs-you column. */
+  pendingRepo?: boolean;
+  /** A TUI prompt card is open and waiting for the user's choice.
+   *  Feeds the board view's needs-you column. */
+  tuiPromptActive?: boolean;
 }
 
 export function feishuChatLink(chatId: string): string {
@@ -70,6 +81,7 @@ export function composeRowFromActive(ds: DaemonSession): SessionRow {
     workingDir: ds.workingDir,
     chatId: ds.chatId,
     rootMessageId: ds.session.rootMessageId,
+    scope: ds.session.scope,
     title: ds.session.title,
     // Read from the persisted Session — single source of truth.
     // ds.ownerOpenId is a parallel in-memory copy that gets cleared on
@@ -82,6 +94,8 @@ export function composeRowFromActive(ds: DaemonSession): SessionRow {
     cliVersion: ds.cliVersion,
     hasHistory: ds.hasHistory,
     feishuChatLink: feishuChatLink(ds.chatId),
+    pendingRepo: !!ds.pendingRepo,
+    tuiPromptActive: !!ds.tuiPromptCardId,
   };
 }
 
@@ -99,6 +113,7 @@ export function composeRowFromClosed(s: Session): SessionRow {
     workingDir: s.workingDir,
     chatId: s.chatId,
     rootMessageId: s.rootMessageId,
+    scope: s.scope,
     title: s.title,
     ownerOpenId: s.ownerOpenId,
     webPort: s.webPort ?? null,

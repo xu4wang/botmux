@@ -24,6 +24,7 @@ import { discoverAdoptableZellijSessions, validateZellijAdoptTarget, type Zellij
 import { listCodexAppThreads, type CodexAppThreadSummary } from '../services/codex-app-threads.js';
 import { generateAuthUrl, getTokenStatus } from '../utils/user-token.js';
 import { bindOncall, unbindOncall, getOncallStatus } from '../services/oncall-store.js';
+import { publishAttentionPatch, announcePendingRepoSession } from './session-activity.js';
 import { setCardMode } from '../services/card-mode-store.js';
 import { invalidWorkingDirs } from '../utils/working-dir.js';
 import { writeRoleFile, deleteRoleFile, resolveRole, resolveTeamRoleFile, writeTeamRoleFile, deleteTeamRoleFile } from './role-resolver.js';
@@ -710,6 +711,7 @@ export async function handleCommand(
           const selfBot = getBot(ds!.larkAppId);
           const botCfg = selfBot.config;
           ds!.pendingRepo = false;
+          publishAttentionPatch(ds!);
           const pendingPrompt = ds!.pendingPrompt ?? '';
           // Was there an actual buffered user message to deliver? A session
           // launched *via* `/repo` (the command itself is the first message) has
@@ -859,7 +861,10 @@ export async function handleCommand(
         const currentCwd = getSessionWorkingDir(ds);
         const cardJson = buildRepoSelectCard(projects, currentCwd, rootId, loc);
         const repoCardMsgId = await sessionReply(rootId, cardJson, 'interactive');
-        if (ds) ds.repoCardMessageId = repoCardMsgId;
+        if (ds) {
+          ds.repoCardMessageId = repoCardMsgId;
+          announcePendingRepoSession(ds);
+        }
         logger.info(`[${logTag}] Sent repo card with ${projects.length} project(s)`);
         break;
       }

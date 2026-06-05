@@ -24,6 +24,7 @@ import * as sessionStore from '../../services/session-store.js';
 import { loadFrozenCards, saveFrozenCards } from '../../services/frozen-card-store.js';
 import { forkWorker, killWorker, scheduleCardPatch, parkStreamCard, clearUsageLimitState, cardUsageLimit, writableTerminalLinkFor, resolvePrivateCardAudience, deliverWriteLinkCard, deliverEphemeralOrReply, CARD_POSTING_SENTINEL } from '../../core/worker-pool.js';
 import { getSessionWorkingDir, buildNewTopicPrompt, getAvailableBots, persistStreamCardState, resumeSession, rememberLastCliInput } from '../../core/session-manager.js';
+import { publishAttentionPatch } from '../../core/session-activity.js';
 import type { DaemonToWorker, DisplayMode, TermActionKey } from '../../types.js';
 import { sessionKey, sessionAnchorId, frozenDisplayMode } from '../../core/types.js';
 import type { DaemonSession } from '../../core/types.js';
@@ -842,6 +843,7 @@ export async function handleCardAction(data: CardActionData, deps: CardHandlerDe
           ds.tuiPromptOptions = undefined;
           ds.tuiPromptMultiSelect = undefined;
           ds.tuiToggledIndices = undefined;
+          publishAttentionPatch(ds);
           try { return JSON.parse(buildTuiPromptProcessingCard(finalText, locDs)); } catch { /* fall through */ }
         }
       }
@@ -864,6 +866,7 @@ export async function handleCardAction(data: CardActionData, deps: CardHandlerDe
         }
         ds.tuiPromptCardId = undefined;
         ds.tuiPromptOptions = undefined;
+        publishAttentionPatch(ds);
       }
       try {
         return JSON.parse(buildTuiPromptResolvedCard(inputText || t('card.action.tui_custom_input', undefined, locDs), locDs));
@@ -1140,6 +1143,7 @@ export async function handleCardAction(data: CardActionData, deps: CardHandlerDe
         const effectiveCliId = sessionCliId(ds);
         // Skip repo selection — spawn CLI with default working dir
         ds.pendingRepo = false;
+        publishAttentionPatch(ds);
         const pendingPrompt = ds.pendingPrompt ?? '';
         const prompt = buildNewTopicPrompt(
           pendingPrompt,
@@ -1330,6 +1334,7 @@ export async function handleCardAction(data: CardActionData, deps: CardHandlerDe
     const effectiveCliId = sessionCliId(targetDs);
     // First-time repo selection — now spawn CLI with the original prompt
     targetDs.pendingRepo = false;
+    publishAttentionPatch(targetDs);
     const pendingPrompt = targetDs.pendingPrompt ?? '';
     const prompt = buildNewTopicPrompt(
       pendingPrompt,

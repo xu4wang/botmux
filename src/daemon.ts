@@ -96,7 +96,7 @@ import { replay as replayWorkflow } from './workflows/events/replay.js';
 import { isBotMentioned, probeBotOpenId, startLarkEventDispatcher, writeBotInfoFile, canOperate, evaluateTalk, grantCommandRestriction, isKnownPeerBot, checkRequiredScopes, type RoutingContext, type TalkEvaluation } from './im/lark/event-dispatcher.js';
 import { learnFromMentions, resolveSender, flushIdentityCacheSync } from './im/lark/identity-cache.js';
 import { renderBufferedSenderBlock } from './core/session-manager.js';
-import { markSessionActivity } from './core/session-activity.js';
+import { markSessionActivity, announcePendingRepoSession } from './core/session-activity.js';
 import { WorkflowEventWatcher, handleWorkflowFanoutEvent } from './workflows/fanout.js';
 import type { WorkflowRuntimeContext, WorkerSpawnFn } from './workflows/runtime.js';
 import { runLoop } from './workflows/loop.js';
@@ -2124,6 +2124,7 @@ async function handleNewTopic(data: any, ctx: RoutingContext): Promise<void> {
     const currentCwd = getSessionWorkingDir(ds);
     const cardJson = buildRepoSelectCard(projects, currentCwd, anchor, localeForBot(larkAppId));
     ds.repoCardMessageId = await sessionReply(anchor, cardJson, 'interactive', larkAppId);
+    announcePendingRepoSession(ds);
     logger.info(`[${tag(ds)}] Waiting for repo selection (${projects.length} projects)`);
   } else {
     // No projects found — skip repo selection, spawn directly
@@ -2316,6 +2317,7 @@ async function handleBotAdded(chatId: string, operatorOpenId: string | undefined
       lastRepoScan.set(chatId, projects);
       const cardJson = buildRepoSelectCard(projects, getSessionWorkingDir(ds), anchor, localeForBot(larkAppId));
       ds.repoCardMessageId = await sessionReply(anchor, cardJson, 'interactive', larkAppId);
+      announcePendingRepoSession(ds);
       logger.info(`[auto-start:入群] ${chatId.substring(0, 12)} 无默认目录，弹 repo 选择卡（${projects.length} 个项目）`);
     } else {
       ds.pendingRepo = false;
@@ -2797,6 +2799,7 @@ async function handleThreadReply(data: any, ctx: RoutingContext): Promise<void> 
       const currentCwd = getSessionWorkingDir(newDs);
       const cardJson = buildRepoSelectCard(projects, currentCwd, anchor, localeForBot(larkAppId));
       newDs.repoCardMessageId = await sessionReply(anchor, cardJson, 'interactive', larkAppId);
+      announcePendingRepoSession(newDs);
       logger.info(`[${tag(newDs)}] Waiting for repo selection (${projects.length} projects)`);
     } else {
       // No projects found — skip repo selection, spawn directly
@@ -3065,6 +3068,9 @@ export async function startDaemon(botIndex?: number): Promise<void> {
         desc.botName = probedName;
         try { writeDaemonDescriptor(desc); } catch { /* best effort */ }
       }
+      // SessionRow.botName 同步换成友好名——否则 dashboard 会话行一直显示
+      // 启动时 seed 的 larkAppId（web 端有注册表映射兜底，这里是根因修复）。
+      if (probedName) setBotName(probedName);
     }).catch(err => {
       // Probe runs in background and is retried by the periodic heartbeat;
       // a single failure here is not actionable. Surface as debug only.

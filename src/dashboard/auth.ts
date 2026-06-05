@@ -135,28 +135,51 @@ export function decideDashboardAuth(opts: {
   hasTokenParam: boolean;
   presentedToken: string | undefined;
   activeToken: string;
+  /** When true (config.dashboard.publicReadOnly), ALL GET/HEAD surfaces are
+   *  public except the raw PTY/diag log — a tokenless (or stale-token)
+   *  visitor gets a read-only dashboard instead of a 401 wall. Write
+   *  actions still require the active token. */
+  publicReadOnly?: boolean;
 }): AuthDecision {
-  const { method, pathname, hasTokenParam, presentedToken, activeToken } = opts;
+  const { method, pathname, hasTokenParam, presentedToken, activeToken, publicReadOnly } = opts;
+
+  // Carve-out: `…/terminal-log/raw` streams full PTY bytes (`?stream=pty`) or
+  // worker diagnostic log (`?stream=diag`).  PTY transcript can leak API
+  // keys / env vars / token reads that happened to scroll the terminal, so
+  // both stream variants stay behind cookie auth in EVERY mode.
+  //
+  // Management/config reads also stay behind the token in public read-only
+  // mode: the public surface is meant for WATCHING work (sessions board,
+  // schedules, workflow runs), not for browsing connector configs, webhook
+  // secret metadata, trigger payload logs, or onboarding state.
+  // 口径（待产品确认后可放宽/收紧）：公开 = 会话/排程/事件/设置/群名册。
+  const isSensitiveRead =
+    pathname.endsWith('/terminal-log/raw') ||
+    pathname.startsWith('/api/connectors') ||
+    pathname.startsWith('/api/webhook-secrets') ||
+    pathname.startsWith('/api/trigger-logs') ||
+    pathname.startsWith('/api/bot-onboarding');
 
   // Workflow read-only paths + static SPA shell are public — the dashboard
   // must be linkable from Lark cards without forcing a `botmux dashboard`
   // round-trip.  Write actions still need a cookie / token.
-  //
-  // Carve-out: `…/terminal-log/raw` streams full PTY bytes (`?stream=pty`) or
-  // worker diagnostic log (`?stream=diag`).  PTY transcript can leak API
-  // keys / env vars / token reads that happened to scroll the terminal, so
-  // we keep both stream variants behind cookie auth even though the rest of
-  // the read-only API is link-shareable.
   const isWorkflowReadOnly =
     method === 'GET' &&
     pathname.startsWith('/api/workflows/') &&
-    !pathname.endsWith('/terminal-log/raw');
+    !isSensitiveRead;
   const isStaticShell =
     method === 'GET' && (pathname === '/' || pathname.startsWith('/assets/'));
 
+  // Public read-only mode widens the public surface from "workflow reads" to
+  // ALL reads (sessions / schedules / SSE), sensitive raw log still excluded.
+  const isPublicRead =
+    !!publicReadOnly &&
+    (method === 'GET' || method === 'HEAD') &&
+    !isSensitiveRead;
+
   const authed = !!presentedToken && presentedToken === activeToken;
 
-  if (!authed && !isWorkflowReadOnly && !isStaticShell) {
+  if (!authed && !isWorkflowReadOnly && !isStaticShell && !isPublicRead) {
     return { kind: 'deny401' };
   }
 

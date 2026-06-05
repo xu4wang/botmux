@@ -6,6 +6,7 @@ import type { CodexAppThreadSummary } from '../../services/codex-app-threads.js'
 import type { DisplayMode, StreamStatus } from '../../types.js';
 import type { CliUsageLimitState } from '../../utils/cli-usage-limit.js';
 import { t, type Locale } from '../../i18n/index.js';
+import { readGlobalConfig } from '../../global-config.js';
 
 const cliDisplayNames: Record<CliId, string> = {
   'claude-code': 'Claude',
@@ -57,6 +58,21 @@ function sidebarMultiUrl(url: string): Record<string, string> {
   };
 }
 
+function directMultiUrl(url: string): Record<string, string> {
+  return {
+    url,
+    pc_url: url,
+    android_url: url,
+    ios_url: url,
+  };
+}
+
+function terminalMultiUrl(url: string): Record<string, string> {
+  return readGlobalConfig().dashboard?.openTerminalInFeishu === true
+    ? sidebarMultiUrl(url)
+    : directMultiUrl(url);
+}
+
 /**
  * Build a Feishu interactive card with terminal button + action buttons.
  * @param showManageButtons - When true, include restart & close buttons (used in the private write-link card — delivered as a "visible-to-you" ephemeral card in plain groups, or DM'd as fallback).
@@ -79,7 +95,7 @@ export function buildSessionCard(
       tag: 'button',
       text: { tag: 'plain_text', content: t(showManageButtons ? 'card.btn.open_writable_terminal' : 'card.btn.open_terminal', undefined, locale) },
       type: 'primary',
-      multi_url: sidebarMultiUrl(terminalUrl),
+      multi_url: terminalMultiUrl(terminalUrl),
     },
   ];
   if (!showManageButtons) {
@@ -440,7 +456,7 @@ export function buildStreamingCard(
     tag: 'button',
     text: { tag: 'plain_text', content: t('card.btn.open_terminal', undefined, locale) },
     type: 'primary',
-    multi_url: sidebarMultiUrl(terminalUrl),
+    multi_url: terminalMultiUrl(terminalUrl),
   });
   if (status === 'limited' && usageLimit?.retryReady) {
     headerActions.push({
@@ -604,7 +620,7 @@ export function buildPrivateSnapshotCard(
         tag: 'button',
         text: { tag: 'plain_text', content: t('card.btn.open_terminal', undefined, locale) },
         type: 'primary',
-        multi_url: sidebarMultiUrl(terminalUrl),
+        multi_url: terminalMultiUrl(terminalUrl),
       },
       {
         tag: 'button',
