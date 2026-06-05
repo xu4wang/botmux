@@ -7,7 +7,8 @@
     "disableCliBypass": true,
     "allowedUsers": ["alice@company.com"],
     "allowedChatGroups": ["oc_xxx_team"],
-    "workingDir": "~/projects"
+    "workingDir": "~/projects",
+    "customPassthroughCommands": ["/status", "/export"]
   },
   {
     "larkAppId": "cli_xxx_bot2",

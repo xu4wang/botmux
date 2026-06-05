@@ -312,7 +312,20 @@ export const messages: Record<string, string> = {
   'help.revoke': '@机器人 /revoke @某人  - 撤销对方本群对话权（可一次 @ 多人/多 bot）；/revoke（不带人）撤销整群授权',
   'help.heading_group': '🆕 一键新建会话群：',
   'help.group': '/group <群名>  (别名 /g)  - 自动建群、邀请你进群（整群=一个 CLI 会话）',
+  'help.list_slash': '/list-slash-command  (别名 /slash)  - 列出当前可用的 slash 命令（固定放行 / 自定义配置 / 自动发现三段）',
   'help.help': '/help       - 显示此帮助',
+
+  // ─── /list-slash-command ─────────────────────────────────────────────────
+  'slashlist.heading': '🧩 当前可用的 Slash 命令（{cliName}）',
+  'slashlist.part_builtin': '① botmux 固定放行（内置透传白名单）：',
+  'slashlist.part_custom': '② 用户自定义配置（bots.json · customPassthroughCommands）：',
+  'slashlist.part_custom_empty': '（未配置 —— 在 bots.json 给本 bot 加 customPassthroughCommands: ["/xxx"] 即可额外放行）',
+  'slashlist.part_discovered': '③ 自动发现（{cliName} 的 .claude 自定义命令 / skill / 插件）：',
+  'slashlist.part_discovered_empty': '（未发现 —— {dir} 及 ~/.claude 下暂无 commands/skills/plugins）',
+  'slashlist.more': '… 另有 {n} 条未展示',
+  'slashlist.mcp_note': 'ℹ️ MCP 的 /mcp__<server>__<prompt> 需运行时握手才能枚举，此处不列。检测到 MCP server：{servers}',
+  'slashlist.col_cmd': '命令',
+  'slashlist.col_desc': '说明',
 
   // ─── AI system prompt (Claude Code: --append-system-prompt) ──────────────
   'ai.routing.intro': '你连接到了飞书（Lark）话题群。用户在飞书上阅读，看不到你的终端输出。',

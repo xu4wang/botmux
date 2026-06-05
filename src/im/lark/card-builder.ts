@@ -199,6 +199,107 @@ export function buildPendingResponseCard(locale?: Locale): string {
   });
 }
 
+/** Collapse whitespace and clip a discovered-command description for a table cell. */
+function clipDesc(desc?: string): string {
+  if (!desc) return '—';
+  const flat = desc.replace(/\s+/g, ' ').trim();
+  return flat.length > 70 ? flat.slice(0, 69) + '…' : flat;
+}
+
+/**
+ * Build the `/list-slash-command` card (schema 2.0): a coloured header and three
+ * sections — ① fixed passthrough allowlist, ② user-configured custom passthrough,
+ * ③ auto-discovered .claude commands/skills/plugins rendered as a paginated native
+ * table (command | description). An optional MCP-servers note is appended.
+ */
+export function buildSlashListCard(
+  params: {
+    cliName: string;
+    builtin: string[];
+    custom: string[];
+    discovered: { name: string; description?: string }[];
+    workingDir: string;
+    mcpServers: string[];
+  },
+  locale?: Locale,
+): string {
+  const { cliName, builtin, custom, discovered, workingDir, mcpServers } = params;
+  const asCode = (cmds: string[]) => cmds.map((c) => `\`${c}\``).join('  ');
+  const elements: any[] = [];
+
+  // ① 固定放行（内置透传白名单）
+  elements.push({
+    tag: 'markdown',
+    content: `**${t('slashlist.part_builtin', undefined, locale)}**\n${builtin.length ? asCode(builtin) : '—'}`,
+  });
+  elements.push({ tag: 'hr' });
+
+  // ② 用户自定义配置
+  elements.push({
+    tag: 'markdown',
+    content: `**${t('slashlist.part_custom', undefined, locale)}**\n${
+      custom.length ? asCode(custom) : t('slashlist.part_custom_empty', undefined, locale)
+    }`,
+  });
+  elements.push({ tag: 'hr' });
+
+  // ③ 自动发现（命令 / skill / 插件）
+  const discHeading = `**${t('slashlist.part_discovered', { cliName }, locale)}**`;
+  if (discovered.length === 0) {
+    elements.push({
+      tag: 'markdown',
+      content: `${discHeading}\n${t('slashlist.part_discovered_empty', { dir: workingDir }, locale)}`,
+    });
+  } else {
+    const MAX = 60;
+    const shown = discovered.slice(0, MAX);
+    elements.push({ tag: 'markdown', content: `${discHeading}　·　${discovered.length}` });
+    elements.push({
+      tag: 'table',
+      page_size: 10,
+      row_height: 'low',
+      header_style: {
+        text_align: 'left',
+        text_size: 'normal',
+        background_style: 'grey',
+        text_color: 'default',
+        bold: true,
+        lines: 1,
+      },
+      columns: [
+        { name: 'cmd', display_name: t('slashlist.col_cmd', undefined, locale), data_type: 'lark_md', width: '200px' },
+        { name: 'desc', display_name: t('slashlist.col_desc', undefined, locale), data_type: 'text', width: 'auto' },
+      ],
+      rows: shown.map((c) => ({ cmd: `\`${c.name}\``, desc: clipDesc(c.description) })),
+    });
+    if (discovered.length > MAX) {
+      elements.push({
+        tag: 'note',
+        elements: [{ tag: 'lark_md', content: t('slashlist.more', { n: String(discovered.length - MAX) }, locale) }],
+      });
+    }
+  }
+
+  // MCP 提示（server 名，prompt 需运行时握手不在此列）
+  if (mcpServers.length > 0) {
+    elements.push({ tag: 'hr' });
+    elements.push({
+      tag: 'note',
+      elements: [{ tag: 'lark_md', content: t('slashlist.mcp_note', { servers: mcpServers.join(', ') }, locale) }],
+    });
+  }
+
+  return JSON.stringify({
+    schema: '2.0',
+    config: { update_multi: true },
+    header: {
+      template: 'blue',
+      title: { tag: 'plain_text', content: t('slashlist.heading', { cliName }, locale) },
+    },
+    body: { direction: 'vertical', elements },
+  });
+}
+
 
 export function buildDetouredPendingResponseCard(locale?: Locale): string {
   return JSON.stringify({

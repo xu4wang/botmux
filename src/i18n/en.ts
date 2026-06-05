@@ -309,7 +309,20 @@ export const messages: Record<string, string> = {
   'help.revoke': '@bot /revoke @someone  - Revoke their talk access (you can @ several at once); /revoke (no target) revokes the whole-chat grant',
   'help.heading_group': '🆕 One-shot session group:',
   'help.group': '/group <name>  (alias /g)  - Auto-create a group and invite you (the whole group = one CLI session)',
+  'help.list_slash': '/list-slash-command  (alias /slash)  - List the slash commands available now (fixed allowlist / custom config / auto-discovered)',
   'help.help': '/help       - Show this help',
+
+  // ─── /list-slash-command ─────────────────────────────────────────────────
+  'slashlist.heading': '🧩 Slash commands available now ({cliName})',
+  'slashlist.part_builtin': '① Fixed allowlist (builtin passthrough):',
+  'slashlist.part_custom': '② User-configured (bots.json · customPassthroughCommands):',
+  'slashlist.part_custom_empty': '(none configured — add customPassthroughCommands: ["/xxx"] to this bot in bots.json to allow more)',
+  'slashlist.part_discovered': '③ Auto-discovered ({cliName} .claude commands / skills / plugins):',
+  'slashlist.part_discovered_empty': '(none found — no commands/skills/plugins under {dir} or ~/.claude)',
+  'slashlist.more': '… {n} more not shown',
+  'slashlist.mcp_note': 'ℹ️ MCP /mcp__<server>__<prompt> commands need a live handshake to enumerate and are not listed here. Detected MCP servers: {servers}',
+  'slashlist.col_cmd': 'Command',
+  'slashlist.col_desc': 'Description',
 
   // ─── AI system prompt (Claude Code: --append-system-prompt) ──────────────
   'ai.routing.intro': 'You are connected to a Lark (Feishu) topic group. The user is reading on Lark and CANNOT see your terminal output.',

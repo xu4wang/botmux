@@ -115,6 +115,15 @@ export interface BotConfig {
    */
   restrictGrantCommands?: boolean;
   /**
+   * 用户自定义、额外放行透传给 CLI 的 slash 命令 —— 在固定的 PASSTHROUGH_COMMANDS
+   * 之上扩展（例如把 CLI 内置但默认不放行的 `/status`、`/export` 加进来）。每项必须
+   * `/` 开头、小写、仅含 [a-z0-9:_-]；解析时归一化（缺失的 `/` 自动补、转小写、去重、
+   * 丢弃非法项与会遮蔽 botmux daemon 命令的项）。与内置白名单合并后由
+   * {@link resolvePassthroughCommands} 生效；`/list-slash-command` 可查看完整放行清单。
+   * 未配置（undefined）→ 仅用内置白名单（保持现状）。
+   */
+  customPassthroughCommands?: string[];
+  /**
    * Custom footer brand label for cards this bot sends. Three states:
    *   • `undefined` (unset)  → default `[botmux](github)` link
    *   • `''` (empty)         → brand suppressed (footer shows only 发送给 if any)
@@ -521,6 +530,21 @@ export function parseBotConfigsFromText(jsonText: string): BotConfig[] {
       if (Object.keys(out).length > 0) quotaState = out;
     }
 
+    // customPassthroughCommands：用户额外放行透传的 slash 命令。归一化：转小写、
+    // 自动补前导 `/`、按 /^\/[a-z0-9][a-z0-9:_-]*$/ 过滤、去重。非法/缺省 → undefined。
+    // 注意：与 daemon 命令的冲突过滤放在 resolvePassthroughCommands（运行时合并）做，
+    // 这里只保证条目本身格式合法，避免在解析期耦合 command-handler 的命令清单。
+    let customPassthroughCommands: string[] | undefined;
+    if (Array.isArray(entry.customPassthroughCommands)) {
+      const normalized = entry.customPassthroughCommands
+        .filter((x: any): x is string => typeof x === 'string')
+        .map((x: string) => x.trim().toLowerCase())
+        .map((x: string) => (x.startsWith('/') ? x : `/${x}`))
+        .filter((x: string) => /^\/[a-z0-9][a-z0-9:_-]*$/.test(x));
+      const uniq = [...new Set<string>(normalized)];
+      if (uniq.length > 0) customPassthroughCommands = uniq;
+    }
+
     // voice：per-bot 语音引擎覆盖。结构化保留（engine ∈ sami|openai，sami/openai
     // 为对象，speaker/rate 透传）；非对象或 engine 非法 → undefined。深度校验
     // （凭证是否可用）在 resolveVoiceConfig 做，这里只挡明显垃圾。
@@ -567,6 +591,7 @@ export function parseBotConfigsFromText(jsonText: string): BotConfig[] {
       messageQuota,
       quotaState,
       restrictGrantCommands: entry.restrictGrantCommands === true || undefined,
+      customPassthroughCommands,
       lang: isLocale(entry.lang) ? entry.lang : undefined,
       // Preserve '' distinctly from undefined: '' means "brand off", undefined
       // means "use default botmux brand". Don't trim-to-undefined here.
