@@ -343,7 +343,7 @@ function formatHeadlessLocalTurnContent(assistantText: string): string | null {
 // ─── Bridge fallback marker (non-adopt) ────────────────────────────────────
 //
 // `botmux send` (cli.ts cmdSend) appends a line
-// `{sentAtMs, messageId, contentFingerprint?, contentLength?}\n` to
+// `{sentAtMs, messageId, contentLength?}\n` to
 // `<DATA_DIR>/turn-sends/<sid>.jsonl` every time the model successfully posts
 // a reply to its OWN session thread. The worker reads these markers at idle
 // and suppresses transcript-driven final_output for any turn whose time window
@@ -2426,8 +2426,11 @@ function handleCodexAppMarker(body: string): void {
     const startedAtMs = typeof payload.startedAtMs === 'number' ? payload.startedAtMs : undefined;
     const completedAtMs = typeof payload.completedAtMs === 'number' ? payload.completedAtMs : Date.now();
     if (startedAtMs !== undefined) {
-      const sentByModel = readSendMarkers().some(m =>
-        m.sentAtMs >= startedAtMs && m.sentAtMs <= completedAtMs + 5_000,
+      const sentByModel = shouldSuppressBridgeEmit(
+        { markTimeMs: startedAtMs, isLocal: false, finalText: payload.content },
+        completedAtMs + 5_001,
+        readSendMarkers(),
+        false,
       );
       if (sentByModel) {
         log(`${cliName()} final_output suppressed (model already called botmux send)`);

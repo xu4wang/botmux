@@ -19,22 +19,25 @@
  *     reason to push it back to the Lark thread.
  *   - Non-adopt + send observed in window: suppress. The window is
  *     [turn.markTimeMs, nextBoundaryMs). Legacy markers only carry time,
- *     so any marker in the window still suppresses. Newer markers also
- *     carry a fingerprint/length of the explicit `botmux send` body; when
- *     the transcript final is available, suppress only if the explicit
- *     send appears to cover that final. This prevents progress updates
- *     from hiding a later substantive final answer. Boundary handling
- *     intentionally also considers
+ *     so any marker in the window still suppresses. Newer markers carry the
+ *     normalized length of the explicit `botmux send` body. When the
+ *     transcript final is available, only emit fallback if that final is
+ *     materially longer than any single explicit send in the same window.
+ *     This lets short progress updates surface a later substantive final
+ *     answer, while same-size rewrites and short acknowledgements stay
+ *     suppressed. Boundary handling intentionally also considers
  *     queue items that haven't reached "ready" yet (passed in via
  *     nextBoundaryMs) — without that, a model that's still mid-tool-use
  *     for turn N+1 could leak a send credit into turn N's window.
  */
 import { normaliseForFingerprint } from './bridge-turn-queue.js';
 
+const MATERIAL_FINAL_LENGTH_RATIO = 2;
+const MATERIAL_FINAL_MIN_EXTRA_CHARS = 120;
+
 export interface BridgeSendMarker {
   sentAtMs: number;
   messageId?: string;
-  contentFingerprint?: string;
   contentLength?: number;
 }
 
@@ -51,24 +54,38 @@ export interface BridgeGateInput {
   finalText?: string;
 }
 
+export function buildBridgeSendMarkerContent(content: string): Pick<BridgeSendMarker, 'contentLength'> | undefined {
+  const normalized = normaliseForFingerprint(content);
+  if (!normalized) return undefined;
+  return { contentLength: normalized.length };
+}
+
+type StructuredBridgeSendMarker = BridgeSendMarker & {
+  contentLength: number;
+};
+
+function hasStructuredContentMarker(marker: BridgeSendMarker): marker is StructuredBridgeSendMarker {
+  return typeof marker.contentLength === 'number';
+}
+
+function finalIsMateriallyLongerThanSends(finalLength: number, markers: readonly StructuredBridgeSendMarker[]): boolean {
+  const maxSentLength = markers.reduce((max, marker) => Math.max(max, marker.contentLength), 0);
+  return finalLength >= maxSentLength * MATERIAL_FINAL_LENGTH_RATIO
+    && finalLength - maxSentLength >= MATERIAL_FINAL_MIN_EXTRA_CHARS;
+}
+
 function markerSetCoversFinal(markers: readonly BridgeSendMarker[], finalText: string | undefined): boolean {
   if (markers.length === 0) return false;
 
   // Back-compat: old marker files only have sentAtMs/messageId. Keep the old
   // conservative behavior for those entries instead of risking duplicates.
-  if (markers.some(m => typeof m.contentFingerprint !== 'string' || typeof m.contentLength !== 'number')) {
-    return true;
-  }
+  if (markers.some(m => !hasStructuredContentMarker(m))) return true;
 
   const finalNormalized = normaliseForFingerprint(finalText ?? '');
   if (!finalNormalized) return true;
 
-  if (markers.some(m => m.contentFingerprint && finalNormalized.includes(m.contentFingerprint))) {
-    return true;
-  }
-
-  const sentLength = markers.reduce((sum, m) => sum + Math.max(0, m.contentLength ?? 0), 0);
-  return sentLength >= Math.floor(finalNormalized.length * 0.8);
+  const structuredMarkers = markers.filter(hasStructuredContentMarker);
+  return !finalIsMateriallyLongerThanSends(finalNormalized.length, structuredMarkers);
 }
 
 export function shouldSuppressBridgeEmit(

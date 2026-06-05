@@ -64,7 +64,7 @@ import {
 import { isLocale, localeForBot, setDefaultLocale, SUPPORTED_LOCALES, type Locale } from './i18n/index.js';
 import { type Brand, chatAppLink, larkHosts, normalizeBrand, sdkDomain } from './im/lark/lark-hosts.js';
 import { readGlobalConfig, setGlobalLocale, globalConfigPath } from './global-config.js';
-import { makeFingerprint, normaliseForFingerprint } from './services/bridge-turn-queue.js';
+import { buildBridgeSendMarkerContent } from './services/bridge-fallback-gate.js';
 
 // Resolve the CLI's UI locale once from the global config file, so subsequent
 // CLI output (and any t() callers that don't pass an explicit locale) honour
@@ -3041,12 +3041,8 @@ async function cmdSend(rest: string[]): Promise<void> {
     try {
       const markerDir = join(resolveDataDir(), 'turn-sends');
       if (!existsSync(markerDir)) mkdirSync(markerDir, { recursive: true });
-      const contentFingerprint = makeFingerprint(sentContent);
       const marker: Record<string, unknown> = { sentAtMs, messageId };
-      if (contentFingerprint) {
-        marker.contentFingerprint = contentFingerprint;
-        marker.contentLength = normaliseForFingerprint(sentContent).length;
-      }
+      Object.assign(marker, buildBridgeSendMarkerContent(sentContent));
       const line = JSON.stringify(marker) + '\n';
       appendFileSync(join(markerDir, `${sid}.jsonl`), line);
     } catch { /* best-effort: marker miss only causes a redundant fallback message */ }
