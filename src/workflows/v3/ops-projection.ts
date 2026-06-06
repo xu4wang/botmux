@@ -79,6 +79,15 @@ export interface RunNodeView {
     maxIterations?: number;
     granted: number;
     lastDecision?: 'exit' | 'continue' | 'exhausted';
+    /** Per-iteration verdict history (enum ONLY — same no-detail rationale).
+     *  Lets the dashboard draw an honest round timeline instead of guessing
+     *  past verdicts from `lastDecision`. */
+    decisions: Array<{ iteration: number; decision: 'exit' | 'continue' | 'exhausted' }>;
+    /** Body template shape (authored ids + body-internal depends) — the
+     *  dashboard lays every round's mini-dag on this skeleton, so a round
+     *  whose later nodes have not dispatched yet still shows its full shape
+     *  (undispatched slots render as pending ghosts). */
+    bodyTemplate: Array<{ id: string; depends: string[] }>;
   };
   /** For loop BODY INSTANCE nodes (`repairLoop.i001.code`): the structured
    *  membership ref from the dispatch event.  The id stays opaque — group by
@@ -100,6 +109,21 @@ interface DagNodeLite {
   goal?: string;
   isLoop?: boolean;
   maxIterations?: number;
+  /** Loop nodes only: body template — body-INTERNAL depends + goal per body
+   *  node id.  Used to give body instances their real intra-round edges (the
+   *  dashboard draws each round as a mini-dag, not a flat chip row). */
+  body?: Map<string, { depends: string[]; goal?: string }>;
+}
+
+/** Flatten a persisted depends entry to its source nodeId for display.
+ *  runDirs persist the NORMALIZED dag (edge-activation design §1.1), so
+ *  entries are `{ from, when? }` objects in new runs and plain strings in
+ *  pre-edge-activation runDirs — the projection accepts both. */
+function dependsToIds(v: unknown): string[] {
+  if (!Array.isArray(v)) return [];
+  return v
+    .map((d) => (typeof d === 'string' ? d : String((d as { from?: unknown } | null)?.from ?? '')))
+    .filter((s) => s.length > 0);
 }
 
 function readDagNodes(runDir: string): DagNodeLite[] {
@@ -109,13 +133,30 @@ function readDagNodes(runDir: string): DagNodeLite[] {
     const dag = JSON.parse(readFileSync(p, 'utf-8')) as { nodes?: unknown };
     if (!dag || !Array.isArray(dag.nodes)) return [];
     return dag.nodes.map((raw): DagNodeLite => {
-      const n = raw as { id?: unknown; depends?: unknown; goal?: unknown; type?: unknown; maxIterations?: unknown };
+      const n = raw as { id?: unknown; depends?: unknown; goal?: unknown; type?: unknown; maxIterations?: unknown; body?: unknown };
+      let body: DagNodeLite['body'];
+      const bodyNodes = (n.body as { nodes?: unknown } | undefined)?.nodes;
+      if (n.type === 'loop' && Array.isArray(bodyNodes)) {
+        body = new Map(
+          bodyNodes.map((b) => {
+            const bn = b as { id?: unknown; depends?: unknown; goal?: unknown };
+            return [
+              String(bn.id),
+              {
+                depends: dependsToIds(bn.depends),
+                goal: typeof bn.goal === 'string' ? bn.goal : undefined,
+              },
+            ];
+          }),
+        );
+      }
       return {
         id: String(n.id),
-        depends: Array.isArray(n.depends) ? n.depends.map(String) : [],
+        depends: dependsToIds(n.depends),
         goal: typeof n.goal === 'string' ? n.goal : undefined,
         isLoop: n.type === 'loop' || undefined,
         maxIterations: typeof n.maxIterations === 'number' ? n.maxIterations : undefined,
+        body,
       };
     });
   } catch {
@@ -138,6 +179,7 @@ export function projectRun(runId: string, runDir: string): RunView {
   const manifests = new Map<string, string>();
   const errors = new Map<string, { errorClass: string; errorCode?: string }>();
   const loopRefs = new Map<string, { loopId: string; iteration: number; bodyNodeId: string }>();
+  const loopDecisions = new Map<string, Array<{ iteration: number; decision: 'exit' | 'continue' | 'exhausted' }>>();
   for (const e of events) {
     if (e.type === 'nodeSessionReady') {
       sessions.set(e.nodeId, { ...e.sessionInfo, ptyLogPath: e.ptyLogPath });
@@ -148,6 +190,10 @@ export function projectRun(runId: string, runDir: string): RunView {
       errors.set(e.nodeId, { errorClass: e.errorClass, errorCode: e.errorCode });
     } else if (e.type === 'nodeDispatched' && e.loop) {
       loopRefs.set(e.nodeId, e.loop);
+    } else if (e.type === 'loopIterationDecision') {
+      // enum only — e.detail can quote agent-written strings, never project it.
+      (loopDecisions.get(e.loopId) ?? loopDecisions.set(e.loopId, []).get(e.loopId)!)
+        .push({ iteration: e.iteration, decision: e.decision });
     }
   }
 
@@ -161,14 +207,33 @@ export function projectRun(runId: string, runDir: string): RunView {
     ? [...dagNodes.map((n) => n.id), ...instanceIds]
     : [...snap.nodes.keys()];
 
+  // (loopId, iteration, bodyNodeId) → instance id, so an instance's template
+  // depends map to its SAME-round sibling instances (structured refs only —
+  // never derived by parsing the opaque instance id).
+  const instByKey = new Map<string, string>();
+  for (const [id, ref] of loopRefs) instByKey.set(`${ref.loopId} ${ref.iteration} ${ref.bodyNodeId}`, id);
+  const instanceMeta = (id: string): { depends: string[]; goal?: string } | undefined => {
+    const ref = loopRefs.get(id);
+    if (!ref) return undefined;
+    const tpl = dagById.get(ref.loopId)?.body?.get(ref.bodyNodeId);
+    if (!tpl) return undefined;
+    return {
+      depends: tpl.depends
+        .map((d) => instByKey.get(`${ref.loopId} ${ref.iteration} ${d}`))
+        .filter((x): x is string => Boolean(x)),
+      goal: tpl.goal,
+    };
+  };
+
   const nodes: RunNodeView[] = ids.map((id) => {
     const status = (snap.nodes.get(id)?.status ?? 'pending') as V3NodeStatus;
     const sess = sessions.get(id);
+    const inst = instanceMeta(id);
     const view: RunNodeView = {
       id,
       status,
-      depends: dagById.get(id)?.depends ?? [],
-      goal: dagById.get(id)?.goal,
+      depends: inst?.depends ?? dagById.get(id)?.depends ?? [],
+      goal: inst?.goal ?? dagById.get(id)?.goal,
       attemptId: snap.attempts.get(id),
       hasPtyLog: Boolean(sess?.ptyLogPath),
       hasManifest: manifests.has(id),
@@ -195,6 +260,8 @@ export function projectRun(runId: string, runDir: string): RunView {
         maxIterations: dagNode?.maxIterations,
         granted: ls.granted,
         lastDecision: ls.lastDecision,
+        decisions: loopDecisions.get(id) ?? [],
+        bodyTemplate: [...(dagNode?.body ?? new Map())].map(([bid, t]) => ({ id: bid, depends: t.depends })),
       };
     }
     const ref = loopRefs.get(id);

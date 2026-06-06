@@ -708,10 +708,25 @@ describe('requestV3LoopGrant + retry loop guard', () => {
       expect(loopNode.isLoop).toBe(true);
       expect(loopNode.status).toBe('done');
       expect(loopNode.loopState).toMatchObject({ iteration: 2, maxIterations: 3, granted: 0, lastDecision: 'exit' });
+      // Per-round verdict history (enum only) — the dashboard timeline's data.
+      expect(loopNode.loopState!.decisions).toEqual([
+        { iteration: 1, decision: 'continue' },
+        { iteration: 2, decision: 'exit' },
+      ]);
+      // Body template shape — the timeline mini-dag's skeleton.
+      expect(loopNode.loopState!.bodyTemplate).toEqual([
+        { id: 'code', depends: [] },
+        { id: 'test', depends: ['code'] },
+      ]);
 
       const inst = view.nodes.find((n) => n.id === 'fix.i001.test')!;
       expect(inst.loop).toEqual({ loopId: 'fix', iteration: 1, bodyNodeId: 'test' });
       expect(inst.status).toBe('done');
+      // Instances carry their REAL intra-round edges (template deps mapped to
+      // same-round sibling instance ids) + the template goal.
+      expect(inst.depends).toEqual(['fix.i001.code']);
+      expect(view.nodes.find((n) => n.id === 'fix.i002.test')!.depends).toEqual(['fix.i002.code']);
+      expect(view.nodes.find((n) => n.id === 'fix.i001.code')!.depends).toEqual([]);
 
       // Public-read invariants: no absolute runDir paths, no free-text
       // decision detail (it can quote agent-written result strings).
