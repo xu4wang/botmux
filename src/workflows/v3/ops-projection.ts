@@ -62,12 +62,19 @@ export interface RunNodeView {
    *  2026-06-02).  A download, if ever needed, goes through a cookie-auth
    *  endpoint that locates the file server-side via runId/nodeId. */
   hasManifest: boolean;
+  /** For blocked/failed nodes: the coarse error class + the node's
+   *  self-reported `manifest.error.code` (e.g. AUTH_REQUIRED).  The free-text
+   *  `message` is deliberately NOT projected — it can quote validator problems
+   *  containing absolute paths, and this view is link-shareable public-read. */
+  errorClass?: string;
+  errorCode?: string;
 }
 
 export interface RunView {
   runId: string;
   runStatus: V3RunStatus;
   failedNodeId?: string;
+  blockedNodeId?: string;
   nodes: RunNodeView[];
 }
 
@@ -109,11 +116,15 @@ export function projectRun(runId: string, runDir: string): RunView {
 
   const sessions = new Map<string, { sessionId: string; webPort?: number; ptyLogPath?: string }>();
   const manifests = new Map<string, string>();
+  const errors = new Map<string, { errorClass: string; errorCode?: string }>();
   for (const e of events) {
     if (e.type === 'nodeSessionReady') {
       sessions.set(e.nodeId, { ...e.sessionInfo, ptyLogPath: e.ptyLogPath });
     } else if (e.type === 'nodeSucceeded') {
       manifests.set(e.nodeId, e.manifestPath);
+      errors.delete(e.nodeId); // a later successful attempt clears the error
+    } else if (e.type === 'nodeFailed' || e.type === 'nodeBlocked') {
+      errors.set(e.nodeId, { errorClass: e.errorClass, errorCode: e.errorCode });
     }
   }
 
@@ -141,10 +152,21 @@ export function projectRun(runId: string, runDir: string): RunView {
         status: status === 'running' ? 'live' : 'closed',
       };
     }
+    const err = errors.get(id);
+    if (err && (status === 'blocked' || status === 'failed')) {
+      view.errorClass = err.errorClass;
+      view.errorCode = err.errorCode;
+    }
     return view;
   });
 
-  return { runId, runStatus: snap.runStatus, failedNodeId: snap.failedNodeId, nodes };
+  return {
+    runId,
+    runStatus: snap.runStatus,
+    failedNodeId: snap.failedNodeId,
+    blockedNodeId: snap.blockedNodeId,
+    nodes,
+  };
 }
 
 /**

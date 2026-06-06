@@ -22,7 +22,8 @@ export type V3NodeStatus =
   | 'gateWaiting'  // humanGate dispatched, awaiting human resolution
   | 'running'      // worker dispatched, in flight
   | 'done'         // succeeded (work + manifest validated)
-  | 'failed';      // work failed, manifest invalid, gate rejected, or timed out
+  | 'blocked'      // semantic/contract failure — recoverable via retry (new attempt)
+  | 'failed';      // infrastructure failure / gate rejected / timed out — needs intervention
 
 export interface V3NodeState {
   status: V3NodeStatus;
@@ -46,7 +47,10 @@ export type V3Action =
   /** Terminal: every node done; the run's product is the sink set. */
   | { kind: 'completeRunSucceeded' }
   /** Terminal (fail-fast): a node failed, so the run cannot proceed. */
-  | { kind: 'completeRunFailed'; failedNodeId: string };
+  | { kind: 'completeRunFailed'; failedNodeId: string }
+  /** Terminal-for-now: a node is blocked (contract failure, recoverable).
+   *  Halts dispatch like failed, but the run can resume via a retry event. */
+  | { kind: 'completeRunBlocked'; blockedNodeId: string };
 
 // ─── Decision function ──────────────────────────────────────────────────────
 
@@ -66,10 +70,17 @@ export function decideNext(dag: V3Dag, state: V3RunState): V3Action[] {
   const nodes = new Map(dag.nodes.map((n) => [n.id, n]));
 
   // Fail-fast sweep first: a single failed node ends the run.  Pick the
-  // earliest in topo order for a deterministic `failedNodeId`.
+  // earliest in topo order for a deterministic `failedNodeId`.  `failed`
+  // (infrastructure, needs intervention) takes priority over `blocked`
+  // (contract failure, retryable) when both exist.
   for (const id of order) {
     if (st(state, id).status === 'failed') {
       return [{ kind: 'completeRunFailed', failedNodeId: id }];
+    }
+  }
+  for (const id of order) {
+    if (st(state, id).status === 'blocked') {
+      return [{ kind: 'completeRunBlocked', blockedNodeId: id }];
     }
   }
 

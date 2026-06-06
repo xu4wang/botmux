@@ -263,6 +263,12 @@ export async function cmdV3(sub: string, rest: string[]): Promise<void> {
   if (outcome.runStatus === 'succeeded') {
     console.log(`\n✅ run 成功 — 产物在 ${outcome.runDir}`);
     process.exit(0);
+  } else if (outcome.runStatus === 'blocked') {
+    // Blocked ≠ failed: a contract/semantic failure that a retry can fix.
+    console.error(
+      `\n⏸️  run 受阻${outcome.blockedNodeId ? `（节点 ${outcome.blockedNodeId}）` : ''} — 可处理后用 \`botmux workflow retry ${dag.runId}\` 重试该节点；详见 ${join(outcome.runDir, 'journal.ndjson')}`,
+    );
+    process.exit(1);
   } else {
     console.error(`\n❌ run 失败${outcome.failedNodeId ? `（节点 ${outcome.failedNodeId}）` : ''} — 详见 ${join(outcome.runDir, 'journal.ndjson')}`);
     process.exit(1);

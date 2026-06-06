@@ -90,8 +90,9 @@ import {
   type WorkflowCommandResult,
 } from './im/lark/workflow-slash-command.js';
 import { workflowRunDetailUrl } from './im/lark/workflow-cards.js';
-import { createV3GateRunner } from './workflows/v3/daemon-run.js';
+import { createV3GateRunner, requestV3Retry } from './workflows/v3/daemon-run.js';
 import { buildV3GateCard } from './im/lark/v3-gate-card.js';
+import { buildV3BlockedCard } from './im/lark/v3-blocked-card.js';
 import { isValidRunId as isValidV3RunId } from './workflows/v3/ops-projection.js';
 import { readRunChatBinding as readV3RunChatBinding, defaultBaseDir as v3DefaultBaseDir } from './workflows/v3/grill-state.js';
 
@@ -1497,11 +1498,29 @@ const v3GateRunner = createV3GateRunner({
       await sendMessage(binding.larkAppId, binding.chatId, card, 'interactive');
     }
   },
+  postBlockedCard: async (binding, info, runId) => {
+    const card = buildV3BlockedCard({
+      runId,
+      nodeId: info.nodeId,
+      attemptId: info.attemptId,
+      errorClass: info.errorClass,
+      errorCode: info.errorCode,
+      message: info.message,
+    });
+    if (binding.rootMessageId) {
+      await sessionReply(binding.rootMessageId, card, 'interactive', binding.larkAppId);
+    } else {
+      await sendMessage(binding.larkAppId, binding.chatId, card, 'interactive');
+    }
+  },
   notifyTerminal: async (binding, runId, outcome) => {
     if (!binding?.rootMessageId) return;
     const msg = outcome.runStatus === 'succeeded'
       ? `✅ v3 workflow \`${runId}\` 跑完了`
-      : `❌ v3 workflow \`${runId}\` 失败${outcome.failedNodeId ? `（节点 ${outcome.failedNodeId}）` : ''}`;
+      : outcome.runStatus === 'blocked'
+        // Fallback only — the blocked path normally posts a retry card instead.
+        ? `⏸️ v3 workflow \`${runId}\` 受阻${outcome.blockedNodeId ? `（节点 ${outcome.blockedNodeId}）` : ''}，可 \`botmux workflow retry ${runId}\` 重试`
+        : `❌ v3 workflow \`${runId}\` 失败${outcome.failedNodeId ? `（节点 ${outcome.failedNodeId}）` : ''}`;
     await sessionReply(binding.rootMessageId, msg, 'text', binding.larkAppId).catch(() => {});
   },
   onError: (runId, err) => {
@@ -1522,6 +1541,11 @@ const cardDeps: CardHandlerDeps = {
     driveRun: (runId) => v3GateRunner.driveDetached(runId),
     // 审批权限：复用 canOperate（话题 owner / allowedUsers / oncall）。无 binding（corrupt /
     // 非 grill 出生的旧卡）→ **拒**（codex follow-up：合法卡一定有 binding，缺失即可疑）.
+    canResolve: (binding, operatorOpenId) =>
+      binding ? canOperate(binding.larkAppId, binding.chatId, operatorOpenId) : false,
+  },
+  v3BlockedDeps: {
+    driveRun: (runId) => v3GateRunner.driveDetached(runId),
     canResolve: (binding, operatorOpenId) =>
       binding ? canOperate(binding.larkAppId, binding.chatId, operatorOpenId) : false,
   },
@@ -1578,6 +1602,37 @@ ipcRoute('POST', '/api/v3/runs/:runId/start', async (_req, res, params) => {
   }
   v3GateRunner.driveDetached(runId);
   return jsonRes(res, 202, { ok: true, runId });
+});
+
+// v3 blocked retry: append the retry intent + re-drive.  Same owner posture as
+// /start.  Body: { nodeId? } (defaults to the run's blockedNodeId).
+ipcRoute('POST', '/api/v3/runs/:runId/retry', async (req, res, params) => {
+  const runId = params.runId;
+  if (!isValidV3RunId(runId)) return jsonRes(res, 400, { ok: false, error: 'bad_run_id' });
+  const binding = readV3RunChatBinding(join(v3DefaultBaseDir(), runId));
+  if (!binding) return jsonRes(res, 404, { ok: false, error: 'unknown_run_or_no_binding' });
+  if (selfV3LarkAppId && binding.larkAppId !== selfV3LarkAppId) {
+    return jsonRes(res, 409, { ok: false, error: 'wrong_daemon', ownerLarkAppId: binding.larkAppId });
+  }
+  let body: { nodeId?: unknown } = {};
+  try {
+    body = await readJsonBody<{ nodeId?: unknown }>(req);
+  } catch {
+    /* empty body is fine — retry the blockedNodeId */
+  }
+  const nodeId = typeof body.nodeId === 'string' && body.nodeId ? body.nodeId : undefined;
+  let outcome;
+  try {
+    outcome = requestV3Retry(v3DefaultBaseDir(), runId, { nodeId });
+  } catch (err) {
+    return jsonRes(res, 500, { ok: false, error: err instanceof Error ? err.message : String(err) });
+  }
+  if (outcome.kind === 'stale-run') {
+    return jsonRes(res, 409, { ok: false, error: outcome.reason === 'missing' ? 'unknown_run' : 'not_blocked' });
+  }
+  // requested / already-requested → make sure the run is moving.
+  v3GateRunner.driveDetached(runId);
+  return jsonRes(res, 202, { ok: true, runId, ...outcome });
 });
 
 function attemptResumeStatus(error: { error: string }): number {

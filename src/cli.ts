@@ -2228,6 +2228,40 @@ async function cmdWorkflowStart(runId: string | undefined, rest: string[]): Prom
   console.log(`✅ v3 run "${runId}" 已交 daemon 驱动；humanGate 会在话题里弹审批卡，点了才继续。`);
 }
 
+/** `botmux workflow retry <runId> [--node <id>]` — blocked 节点重试入口（CLI 侧）。
+ *  走 daemon 的 retry IPC（journal 写入留在 daemon 进程内，单写者），daemon append
+ *  `nodeRetryRequested` 后以新 attempt 重驱动。`resume` 动词归 v0.2，v3 用 retry 避撞。 */
+async function cmdWorkflowRetry(runId: string | undefined, rest: string[]): Promise<void> {
+  if (!runId) {
+    console.error('用法: botmux workflow retry <runId> [--node <nodeId>] [--bot <larkAppId>]');
+    process.exit(1);
+  }
+  const larkAppId = argValue(rest, '--bot') ?? process.env.BOTMUX_LARK_APP_ID;
+  const nodeId = argValue(rest, '--node');
+  const daemon = findDaemon(larkAppId);
+  if (!daemon) {
+    console.error('❌ 没有在线 daemon；blocked 重试需要 daemon 驱动。');
+    process.exit(1);
+  }
+  let res: Response;
+  try {
+    res = await fetch(`http://127.0.0.1:${daemon.ipcPort}/api/v3/runs/${encodeURIComponent(runId)}/retry`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify(nodeId ? { nodeId } : {}),
+    });
+  } catch (err: any) {
+    console.error(`❌ 无法连接 daemon (port=${daemon.ipcPort}): ${err?.message ?? err}`);
+    process.exit(1);
+  }
+  const txt = await res.text();
+  if (!res.ok) {
+    console.error(`❌ retry 失败 (HTTP ${res.status}): ${txt}`);
+    process.exit(1);
+  }
+  console.log(`🔄 v3 run "${runId}" 重试已受理，节点将以新 attempt 重跑。`);
+}
+
 async function cmdResume(): Promise<void> {
   const target = process.argv[3];
   if (!target) {
@@ -4784,6 +4818,11 @@ switch (command) {
       // humanGate posts approval cards).  Needs a live daemon; findDaemon is
       // cli.ts-local so this case handles it instead of cmdWorkflow.
       await cmdWorkflowStart(process.argv[4], process.argv.slice(5));
+      break;
+    }
+    if (wfSub === 'retry') {
+      // v3 blocked-node retry (the `resume` verb belongs to v0.2).
+      await cmdWorkflowRetry(process.argv[4], process.argv.slice(5));
       break;
     }
     const { cmdWorkflow } = await import('./cli/workflow.js');

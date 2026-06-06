@@ -28,8 +28,16 @@ export type V3NodeType = 'goal' | 'host';
 
 export const NODE_KINDS: readonly V3NodeType[] = ['goal', 'host'];
 
-/** Default per-node wall-clock budget when a node omits `timeoutSec`. */
-export const DEFAULT_NODE_TIMEOUT_SEC = 600;
+/** Default per-node wall-clock budget when a node omits `timeoutSec`.
+ *  Generous on purpose: completion is detected by the manifest watcher
+ *  (seconds after the agent finishes), so the timeout only fires for hung
+ *  nodes — a long default costs nothing on the happy path.  The architect is
+ *  prompted to set per-node `timeoutSec` explicitly for long tasks. */
+export const DEFAULT_NODE_TIMEOUT_SEC = 1800;
+
+/** Hard ceiling for per-node `timeoutSec` (4h) — rejects runaway budgets the
+ *  architect might hallucinate while still allowing genuinely long tasks. */
+export const MAX_NODE_TIMEOUT_SEC = 14400;
 
 /** A humanGate frozen at authoring time — the runtime never lets a node
  *  add / skip a gate at runtime (design Q10). */
@@ -50,6 +58,32 @@ export interface V3InputRef {
   from: string;
 }
 
+/**
+ * Opt-in structured-output contract — a deliberately TINY subset of
+ * JSON-Schema (flat object, primitive-typed properties, optional required
+ * list).  Hand-validated (no deps, repo style); anything outside the subset
+ * is rejected at validateDag time so the architect can never author a schema
+ * the runtime's validator cannot execute.
+ *
+ * NOT supported (first slice): nested schemas, array item types, enums,
+ * patterns.  `type:'array'|'object'` properties validate the TOP-LEVEL type
+ * only.
+ */
+export interface V3ResultSchema {
+  type: 'object';
+  properties: Record<string, { type: V3ResultFieldType }>;
+  required?: string[];
+}
+
+export type V3ResultFieldType = 'string' | 'number' | 'boolean' | 'array' | 'object';
+
+const RESULT_FIELD_TYPES: readonly V3ResultFieldType[] = ['string', 'number', 'boolean', 'array', 'object'];
+
+/** Caps on the resultSchema subset (anti-runaway: a giant schema bloats the
+ *  goal prompt and the validator).  Checked at validateDag time. */
+export const RESULT_SCHEMA_MAX_PROPERTIES = 32;
+export const RESULT_SCHEMA_MAX_BYTES = 4096;
+
 export interface V3Node {
   /** Unique within the DAG; also used as a runDir path segment, so it is
    *  constrained to `[A-Za-z0-9._-]`. */
@@ -68,6 +102,10 @@ export interface V3Node {
   timeoutSec?: number;
   /** Optional human approval gate, evaluated *before* the node's work runs. */
   humanGate?: V3HumanGate | null;
+  /** Opt-in structured-output contract: when set, the node must write a
+   *  `result.json` (listed in its manifest files) matching this schema; a
+   *  violation blocks (not fails) the node.  Absent → zero behavior change. */
+  resultSchema?: V3ResultSchema;
 }
 
 /** A `V3Node` narrowed to a goal node — `goal` is guaranteed present.  This is
@@ -174,10 +212,14 @@ export function validateDag(raw: unknown): V3Dag {
     if (n.timeoutSec !== undefined) {
       if (typeof n.timeoutSec !== 'number' || !Number.isFinite(n.timeoutSec) || n.timeoutSec <= 0) {
         problems.push(`node "${id}".timeoutSec must be a positive number`);
+      } else if (n.timeoutSec > MAX_NODE_TIMEOUT_SEC) {
+        problems.push(`node "${id}".timeoutSec ${n.timeoutSec} exceeds the ${MAX_NODE_TIMEOUT_SEC}s (4h) ceiling`);
       } else {
         timeoutSec = n.timeoutSec;
       }
     }
+
+    const resultSchema = normResultSchema(n.resultSchema, id, problems);
 
     let humanGate: V3HumanGate | null = null;
     if (n.humanGate != null) {
@@ -197,6 +239,7 @@ export function validateDag(raw: unknown): V3Dag {
       inputs,
       timeoutSec,
       humanGate,
+      resultSchema,
     });
   }
 
@@ -230,6 +273,83 @@ function normStringArray(v: unknown, where: string, problems: string[]): string[
     return [];
   }
   return v as string[];
+}
+
+/**
+ * Validate the opt-in `resultSchema` against the supported subset.  Strict on
+ * purpose: unknown keywords are REJECTED (not ignored) so a schema the
+ * validator silently wouldn't enforce can never enter a dag (codex v2 of the
+ * blocked design).  Caps: ≤32 properties, ≤4KB serialized, flat (depth 1).
+ */
+function normResultSchema(v: unknown, id: string, problems: string[]): V3ResultSchema | undefined {
+  if (v === undefined || v === null) return undefined;
+  const where = `node "${id}".resultSchema`;
+  if (!isObject(v)) {
+    problems.push(`${where} must be an object`);
+    return undefined;
+  }
+  const knownTop = new Set(['type', 'properties', 'required']);
+  for (const key of Object.keys(v)) {
+    if (!knownTop.has(key)) {
+      problems.push(`${where} has unsupported keyword "${key}" (subset allows: type/properties/required)`);
+      return undefined;
+    }
+  }
+  if (v.type !== 'object') {
+    problems.push(`${where}.type must be "object"`);
+    return undefined;
+  }
+  if (!isObject(v.properties) || Object.keys(v.properties).length === 0) {
+    problems.push(`${where}.properties must be a non-empty object`);
+    return undefined;
+  }
+  const props = Object.entries(v.properties);
+  if (props.length > RESULT_SCHEMA_MAX_PROPERTIES) {
+    problems.push(`${where} has ${props.length} properties (max ${RESULT_SCHEMA_MAX_PROPERTIES})`);
+    return undefined;
+  }
+  const properties: Record<string, { type: V3ResultFieldType }> = {};
+  for (const [name, spec] of props) {
+    if (!isObject(spec)) {
+      problems.push(`${where}.properties.${name} must be an object`);
+      return undefined;
+    }
+    for (const key of Object.keys(spec)) {
+      if (key !== 'type') {
+        problems.push(`${where}.properties.${name} has unsupported keyword "${key}" (subset allows: type)`);
+        return undefined;
+      }
+    }
+    if (!RESULT_FIELD_TYPES.includes(spec.type as V3ResultFieldType)) {
+      problems.push(`${where}.properties.${name}.type must be one of ${RESULT_FIELD_TYPES.join(' | ')}`);
+      return undefined;
+    }
+    properties[name] = { type: spec.type as V3ResultFieldType };
+  }
+  let required: string[] | undefined;
+  if (v.required !== undefined) {
+    if (!Array.isArray(v.required) || v.required.some((x) => typeof x !== 'string')) {
+      problems.push(`${where}.required must be an array of strings`);
+      return undefined;
+    }
+    const unknown = (v.required as string[]).filter((r) => !(r in properties));
+    if (unknown.length > 0) {
+      problems.push(`${where}.required references undeclared properties: ${unknown.join(', ')}`);
+      return undefined;
+    }
+    if (new Set(v.required).size !== v.required.length) {
+      problems.push(`${where}.required has duplicates`);
+      return undefined;
+    }
+    required = v.required as string[];
+  }
+  const schema: V3ResultSchema = required ? { type: 'object', properties, required } : { type: 'object', properties };
+  const bytes = Buffer.byteLength(JSON.stringify(schema), 'utf-8');
+  if (bytes > RESULT_SCHEMA_MAX_BYTES) {
+    problems.push(`${where} serializes to ${bytes} bytes (max ${RESULT_SCHEMA_MAX_BYTES})`);
+    return undefined;
+  }
+  return schema;
 }
 
 function normInputs(v: unknown, id: string, problems: string[]): V3InputRef[] {

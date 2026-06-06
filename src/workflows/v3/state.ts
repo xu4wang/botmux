@@ -18,15 +18,19 @@ import { dirname } from 'node:path';
 import type { StoredEvent } from './journal.js';
 import type { V3NodeState, V3NodeStatus, V3RunState } from './orchestrator.js';
 
-export type V3RunStatus = 'running' | 'succeeded' | 'failed';
+export type V3RunStatus = 'running' | 'succeeded' | 'failed' | 'blocked';
 
 export interface V3RunSnapshot {
   runStatus: V3RunStatus;
   /** Set once `runFailed` is observed — the node that triggered fail-fast. */
   failedNodeId?: string;
+  /** Set once `runBlocked` is observed — the blocked node (cleared back to
+   *  running by a subsequent `nodeRetryRequested` on replay). */
+  blockedNodeId?: string;
   /** nodeId → current node state (the input `decideNext` consumes). */
   nodes: V3RunState;
-  /** nodeId → the attemptId of its latest dispatch (for retry / log paths). */
+  /** nodeId → the attemptId of its latest dispatch — or, after a
+   *  `nodeRetryRequested`, the reserved `nextAttemptId` the retry will use. */
   attempts: Map<string, string>;
 }
 
@@ -37,18 +41,21 @@ export interface V3RunSnapshot {
  * snapshot, which is what makes STATE safe to throw away and re-derive.
  *
  * Node status transitions:
- *   nodeDispatched   → running   (preserve gateCleared across the transition)
- *   nodeSucceeded    → done
- *   nodeFailed       → failed
- *   gateDispatched   → gateWaiting
- *   gateResolved/ok  → pending + gateCleared (next tick dispatches work)
- *   gateResolved/no  → failed
+ *   nodeDispatched     → running   (preserve gateCleared across the transition)
+ *   nodeSucceeded      → done
+ *   nodeFailed         → failed
+ *   nodeBlocked        → blocked
+ *   nodeRetryRequested → pending  (+ attempt reservation; run blocked→running)
+ *   gateDispatched     → gateWaiting
+ *   gateResolved/ok    → pending + gateCleared (next tick dispatches work)
+ *   gateResolved/no    → failed
  */
 export function materialize(events: StoredEvent[]): V3RunSnapshot {
   const nodes: V3RunState = new Map();
   const attempts = new Map<string, string>();
   let runStatus: V3RunStatus = 'running';
   let failedNodeId: string | undefined;
+  let blockedNodeId: string | undefined;
 
   const set = (id: string, status: V3NodeStatus, gateCleared?: boolean): void => {
     const prev = nodes.get(id);
@@ -74,6 +81,20 @@ export function materialize(events: StoredEvent[]): V3RunSnapshot {
       case 'nodeFailed':
         set(e.nodeId, 'failed');
         break;
+      case 'nodeBlocked':
+        set(e.nodeId, 'blocked');
+        break;
+      case 'nodeRetryRequested':
+        // Replay-correct unblock (codex blocker #1 of the blocked design):
+        // the retry is a journal event, so a fresh materialize() yields
+        // pending — NOT a memory-only patch that evaporates on next replay.
+        set(e.nodeId, 'pending');
+        attempts.set(e.nodeId, e.nextAttemptId);
+        if (runStatus === 'blocked') {
+          runStatus = 'running';
+          blockedNodeId = undefined;
+        }
+        break;
       case 'gateDispatched':
         set(e.nodeId, 'gateWaiting');
         break;
@@ -88,10 +109,14 @@ export function materialize(events: StoredEvent[]): V3RunSnapshot {
         runStatus = 'failed';
         failedNodeId = e.failedNodeId;
         break;
+      case 'runBlocked':
+        runStatus = 'blocked';
+        blockedNodeId = e.blockedNodeId;
+        break;
     }
   }
 
-  return { runStatus, failedNodeId, nodes, attempts };
+  return { runStatus, failedNodeId, blockedNodeId, nodes, attempts };
 }
 
 // ─── STATE checkpoint (atomic write / read) ────────────────────────────────
@@ -101,6 +126,7 @@ export function materialize(events: StoredEvent[]): V3RunSnapshot {
 interface StateFile {
   runStatus: V3RunStatus;
   failedNodeId?: string;
+  blockedNodeId?: string;
   nodes: Record<string, V3NodeState>;
   attempts: Record<string, string>;
   updatedAt: number;
@@ -118,6 +144,7 @@ export function writeState(statePath: string, snap: V3RunSnapshot): void {
   const file: StateFile = {
     runStatus: snap.runStatus,
     failedNodeId: snap.failedNodeId,
+    blockedNodeId: snap.blockedNodeId,
     nodes: Object.fromEntries(snap.nodes),
     attempts: Object.fromEntries(snap.attempts),
     updatedAt: Date.now(),
@@ -136,6 +163,7 @@ export function readState(statePath: string): V3RunSnapshot | undefined {
   return {
     runStatus: file.runStatus,
     failedNodeId: file.failedNodeId,
+    blockedNodeId: file.blockedNodeId,
     nodes: new Map(Object.entries(file.nodes)),
     attempts: new Map(Object.entries(file.attempts)),
   };

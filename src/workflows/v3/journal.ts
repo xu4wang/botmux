@@ -19,11 +19,13 @@ import { dirname } from 'node:path';
 
 // ─── Event taxonomy ─────────────────────────────────────────────────────────
 
-/** Why a node failed — drives fail-fast root-cause reporting + (later) retry
- *  policy.  `gateRejected` / `cancelled` are user-driven; the rest are faults. */
+/** Why a node failed — drives fail-fast root-cause reporting + retry policy
+ *  (`classifyTerminal` maps each class to `blocked` or `failed`).
+ *  `gateRejected` / `cancelled` are user-driven; the rest are faults. */
 export type V3ErrorClass =
   | 'workerError'      // ephemeral worker crashed / non-zero exit
   | 'manifestInvalid'  // worker exited ok but manifest failed validation
+  | 'resultInvalid'    // result.json missing / unparsable / fails the node's resultSchema
   | 'timeout'          // node exceeded its wall-clock budget
   | 'gateRejected'     // human rejected the approval gate
   | 'cancelled';       // run cancelled out from under the node
@@ -45,11 +47,35 @@ export type V3Event =
   // write access into a durable artifact (codex security review 2026-06-02).
   | { type: 'nodeSessionReady'; nodeId: string; attemptId: string; sessionInfo: { sessionId: string; webPort?: number }; ptyLogPath?: string }
   | { type: 'nodeSucceeded'; nodeId: string; attemptId: string; manifestPath: string }
-  | { type: 'nodeFailed'; nodeId: string; attemptId: string; errorClass: V3ErrorClass; message?: string }
+  // `errorCode` carries the node's self-reported `manifest.error.code` (e.g.
+  // AUTH_REQUIRED) so dashboards see the real cause, not just the coarse class.
+  | { type: 'nodeFailed'; nodeId: string; attemptId: string; errorClass: V3ErrorClass; errorCode?: string; message?: string }
+  // Semantic/contract failure — recoverable.  classifyTerminal(errorClass,
+  // retryable) decides blocked-vs-failed; blocked halts the run like failed
+  // but is retryable via `nodeRetryRequested` (journal event, NOT in-memory).
+  | { type: 'nodeBlocked'; nodeId: string; attemptId: string; errorClass: V3ErrorClass; errorCode?: string; message?: string }
+  // Retry intent for a blocked node.  Appended by the retry entrypoint (CLI /
+  // daemon card click).  materialize() resets the node to pending and records
+  // `nextAttemptId` as the attempt reservation; the orchestrator then re-
+  // dispatches naturally.  `previousErrorClass`/`previousErrorCode` are copied
+  // from the blocked event purely for audit (grep the journal and see WHY this
+  // retry happened) — they do not participate in the state machine.
+  | {
+      type: 'nodeRetryRequested';
+      nodeId: string;
+      previousAttemptId: string;
+      nextAttemptId: string;
+      reason: 'blockedRetry';
+      previousErrorClass?: V3ErrorClass;
+      previousErrorCode?: string;
+    }
   | { type: 'gateDispatched'; nodeId: string; waitId: string }
   | { type: 'gateResolved'; nodeId: string; waitId: string; resolution: 'approved' | 'rejected'; by: string }
   | { type: 'runSucceeded' }
-  | { type: 'runFailed'; failedNodeId: string };
+  | { type: 'runFailed'; failedNodeId: string }
+  // Terminal-for-now: every non-done path is blocked (recoverable).  A retry
+  // clears it back to running on replay (see state.ts materialize).
+  | { type: 'runBlocked'; blockedNodeId: string };
 
 /** A journal line: the event flattened with its append timestamp (flattened —
  *  not `{ts, event}` — so `grep nodeFailed journal.ndjson` just works). */

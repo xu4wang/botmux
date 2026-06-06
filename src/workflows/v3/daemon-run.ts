@@ -23,6 +23,8 @@ import { loadBotConfigs, type BotConfig } from '../../bot-registry.js';
 import { loadDag } from './dag.js';
 import {
   runWorkflow,
+  nextAttemptIdFor,
+  latestAttemptIdFor,
   type V3RuntimeDeps,
   type V3RuntimeOptions,
   type V3RunOutcome,
@@ -37,7 +39,7 @@ import {
 } from './grill-state.js';
 import { resolveBotConfig, botToSnapshot } from './bot-resolve.js';
 import { readWait, resolveWait, writePendingWait, type GateWaitStatus } from './human-gate.js';
-import { readJournal, appendEvent } from './journal.js';
+import { readJournal, appendEvent, type StoredEvent, type V3ErrorClass } from './journal.js';
 import { materialize } from './state.js';
 import { isValidRunId } from './ops-projection.js';
 import type { ValidateManifest } from './contract.js';
@@ -54,6 +56,34 @@ export function safeRunDir(baseDir: string, runId: string): string {
 
 export type V3TerminalOutcome = Extract<V3RunOutcome, { reason: 'terminal' }>;
 
+/** What the daemon needs to render a blocked-node retry card. */
+export interface V3BlockedInfo {
+  nodeId: string;
+  attemptId: string;
+  errorClass?: V3ErrorClass;
+  errorCode?: string;
+  message?: string;
+}
+
+/** Latest `nodeBlocked` details for a node (card content).  Falls back to a
+ *  bare nodeId/attempt when the journal has no blocked event (shouldn't
+ *  happen for a blocked run, but the card must still render). */
+export function blockedInfoFor(events: StoredEvent[], nodeId: string): V3BlockedInfo {
+  let found: V3BlockedInfo | undefined;
+  for (const e of events) {
+    if (e.type === 'nodeBlocked' && e.nodeId === nodeId) {
+      found = {
+        nodeId,
+        attemptId: e.attemptId,
+        errorClass: e.errorClass,
+        errorCode: e.errorCode,
+        message: e.message,
+      };
+    }
+  }
+  return found ?? { nodeId, attemptId: latestAttemptIdFor(events, nodeId) ?? `${nodeId}/attempts/001` };
+}
+
 export interface V3DaemonRunDeps {
   /** runs root (default ~/.botmux/v3-runs). */
   baseDir?: string;
@@ -65,6 +95,9 @@ export interface V3DaemonRunDeps {
   validateManifest?: ValidateManifest;
   /** Post (or re-post) a humanGate approval card for a pending gate to the bound topic. */
   postGateCard: (binding: RunChatBinding, gate: V3PendingGate, runId: string) => Promise<void>;
+  /** Post a blocked-node retry card.  Optional — when absent (or no binding),
+   *  a blocked outcome falls through to `onTerminal` like failed/succeeded. */
+  postBlockedCard?: (binding: RunChatBinding, info: V3BlockedInfo, runId: string) => Promise<void>;
   /** Report a terminal run (final card / message).  Optional. */
   onTerminal?: (runId: string, outcome: V3TerminalOutcome, binding?: RunChatBinding) => Promise<void>;
   maxParallel?: number;
@@ -127,6 +160,11 @@ export async function driveV3Run(runId: string, deps: V3DaemonRunDeps): Promise<
     for (const gate of outcome.pendingWaits) {
       await deps.postGateCard(binding, gate, runId);
     }
+  } else if (outcome.runStatus === 'blocked' && outcome.blockedNodeId && binding && deps.postBlockedCard) {
+    // Blocked = terminal-for-now: post the retry card instead of a final
+    // notification.  A click appends `nodeRetryRequested` + re-drives.
+    const events = readJournal(join(runDir, 'journal.ndjson'));
+    await deps.postBlockedCard(binding, blockedInfoFor(events, outcome.blockedNodeId), runId);
   } else {
     await deps.onTerminal?.(runId, outcome, binding);
   }
@@ -191,12 +229,114 @@ export function resolveV3GateClick(
   return { kind: 'resolved', resolution: input.resolution };
 }
 
+export type V3RetryOutcome =
+  | { kind: 'requested'; nodeId: string; previousAttemptId: string; nextAttemptId: string }
+  | { kind: 'already-requested'; nodeId: string }
+  | { kind: 'stale-run'; reason: 'missing' | 'not-blocked' | 'stale-attempt' };
+
+/**
+ * Append a retry intent for a blocked node (the resume entrypoint — daemon
+ * card click and `botmux workflow retry` both land here).  Recovery-first +
+ * idempotent (codex v2 of the blocked design):
+ *   1. fresh `materialize(readJournal)` — the journal is the recovery source;
+ *      a node that already succeeded / re-dispatched is seen as such.
+ *   2. the target node must STILL be materialized `blocked`.  A node already
+ *      reset to pending by an unconsumed `nodeRetryRequested` → already-requested
+ *      (no second append); anything else → stale.
+ *   3. `expectedAttemptId` (card clicks pass the card's attempt): the retry is
+ *      only valid for the attempt that is CURRENTLY blocked — a stale card from
+ *      attempt 001 must not advance attempt 002's blocked to 003 (codex
+ *      blocker, slice-1 review).  The card nonce alone only proves the card's
+ *      own integrity, not freshness.  CLI omits it ("retry whatever is blocked").
+ *   4. append `nodeRetryRequested` with the reserved nextAttemptId and the
+ *      previous blocked event's errorClass/errorCode copied in for audit.
+ * The caller re-drives (materialize folds the retry into pending → orchestrator
+ * re-dispatches with the reserved attempt number).
+ */
+export function requestV3Retry(
+  baseDir: string,
+  runId: string,
+  input: { nodeId?: string; expectedAttemptId?: string } = {},
+): V3RetryOutcome {
+  const runDir = safeRunDir(baseDir, runId);
+  const journalPath = join(runDir, 'journal.ndjson');
+  if (!existsSync(journalPath)) return { kind: 'stale-run', reason: 'missing' };
+
+  const events = readJournal(journalPath);
+  const snap = materialize(events);
+  // Target resolution: explicit nodeId > the run's blocked pointer > a node
+  // with an unconsumed retry reservation (a prior retry already cleared the
+  // blocked pointer — the idempotent repeat-call path).
+  const nodeId =
+    input.nodeId ??
+    snap.blockedNodeId ??
+    [...snap.nodes.keys()].find((id) => unconsumedRetryEvent(events, id) !== undefined);
+  if (!nodeId) return { kind: 'stale-run', reason: 'not-blocked' };
+
+  const status = snap.nodes.get(nodeId)?.status;
+  if (status === 'pending') {
+    // An unconsumed retry reservation already reset this node — idempotent
+    // no-op (a second click / a CLI retry racing the card must not double-append).
+    const pendingRetry = unconsumedRetryEvent(events, nodeId);
+    if (pendingRetry) {
+      // The repeat-call is only "the same retry" when it references the attempt
+      // that retry was FOR — a stale older card is not an idempotent repeat.
+      if (input.expectedAttemptId && input.expectedAttemptId !== pendingRetry.previousAttemptId) {
+        return { kind: 'stale-run', reason: 'stale-attempt' };
+      }
+      return { kind: 'already-requested', nodeId };
+    }
+    return { kind: 'stale-run', reason: 'not-blocked' };
+  }
+  if (status !== 'blocked') return { kind: 'stale-run', reason: 'not-blocked' };
+
+  const previousAttemptId = latestAttemptIdFor(events, nodeId);
+  if (!previousAttemptId) return { kind: 'stale-run', reason: 'not-blocked' };
+  const info = blockedInfoFor(events, nodeId);
+  // Freshness gate (codex blocker): the click must target the CURRENTLY
+  // blocked attempt, not an earlier one whose card survived in the chat.
+  if (input.expectedAttemptId && input.expectedAttemptId !== info.attemptId) {
+    return { kind: 'stale-run', reason: 'stale-attempt' };
+  }
+  const nextAttemptId = nextAttemptIdFor(events, nodeId);
+
+  appendEvent(journalPath, {
+    type: 'nodeRetryRequested',
+    nodeId,
+    previousAttemptId,
+    nextAttemptId,
+    reason: 'blockedRetry',
+    previousErrorClass: info.errorClass,
+    previousErrorCode: info.errorCode,
+  });
+  return { kind: 'requested', nodeId, previousAttemptId, nextAttemptId };
+}
+
+/** The node's `nodeRetryRequested` whose reserved attempt has not yet been
+ *  consumed by a matching `nodeDispatched` (undefined when none pending). */
+function unconsumedRetryEvent(
+  events: StoredEvent[],
+  nodeId: string,
+): Extract<StoredEvent, { type: 'nodeRetryRequested' }> | undefined {
+  let pending: Extract<StoredEvent, { type: 'nodeRetryRequested' }> | undefined;
+  for (const e of events) {
+    if (e.type === 'nodeRetryRequested' && e.nodeId === nodeId) pending = e;
+    else if (e.type === 'nodeDispatched' && e.nodeId === nodeId && e.attemptId === pending?.nextAttemptId) {
+      pending = undefined;
+    }
+  }
+  return pending;
+}
+
 export interface V3GateRecovery {
   runId: string;
   runDir: string;
   binding?: RunChatBinding;
   /** pending gates whose approval card the daemon should (re)post. */
   repost: V3PendingGate[];
+  /** blocked node whose retry card the daemon should (re)post — covers the
+   *  crash window between the `runBlocked` append and the card send. */
+  repostBlocked?: V3BlockedInfo;
   /** true when a resolved-but-unjournaled gate was healed → daemon should driveV3Run. */
   resume: boolean;
 }
@@ -206,6 +346,8 @@ export interface V3GateRunnerDeps {
   /** Post (or re-post) a gate's approval card to its topic.  The daemon builds
    *  the card + sends via Lark (kept here so this module has no `im/` import). */
   postCard: (binding: RunChatBinding, gate: V3PendingGate, runId: string) => Promise<void>;
+  /** Post (or re-post) a blocked node's retry card. */
+  postBlockedCard?: (binding: RunChatBinding, info: V3BlockedInfo, runId: string) => Promise<void>;
   /** Notify a terminal run (optional, daemon-supplied). */
   notifyTerminal?: (binding: RunChatBinding | undefined, runId: string, outcome: V3TerminalOutcome) => Promise<void>;
   /** runtime deps passthrough (tests inject; daemon uses real pool). */
@@ -248,6 +390,7 @@ export function createV3GateRunner(deps: V3GateRunnerDeps) {
           validateManifest: deps.validateManifest,
           maxParallel: deps.maxParallel,
           postGateCard: (binding, gate, rid) => deps.postCard(binding, gate, rid),
+          postBlockedCard: deps.postBlockedCard,
           onTerminal: (rid, outcome, binding) =>
             deps.notifyTerminal ? deps.notifyTerminal(binding, rid, outcome) : Promise.resolve(),
         });
@@ -278,6 +421,13 @@ export function createV3GateRunner(deps: V3GateRunnerDeps) {
         for (const gate of rec.repost) {
           try {
             await deps.postCard(rec.binding, gate, rec.runId);
+          } catch (err) {
+            deps.onError?.(rec.runId, err);
+          }
+        }
+        if (rec.repostBlocked && deps.postBlockedCard) {
+          try {
+            await deps.postBlockedCard(rec.binding, rec.repostBlocked, rec.runId);
           } catch (err) {
             deps.onError?.(rec.runId, err);
           }
@@ -314,10 +464,46 @@ export function reconcileV3PendingGates(baseDir: string = defaultBaseDir(), owne
       const journalPath = join(runDir, 'journal.ndjson');
       if (!existsSync(journalPath)) continue;
 
-      const snap = materialize(readJournal(journalPath));
-      if (snap.runStatus !== 'running') continue;
+      const events = readJournal(journalPath);
+      const snap = materialize(events);
+      if (snap.runStatus === 'succeeded' || snap.runStatus === 'failed') continue;
+
+      if (snap.runStatus === 'blocked') {
+        // Blocked run: repost the retry card (covers the crash window between
+        // the runBlocked append and the original card send).  Owner-filtered
+        // like gates; binding-less (CLI/dev) runs are left alone.
+        const grill = readGrillState(runDir);
+        const binding = grill?.chatBinding;
+        if (ownerLarkAppId && binding?.larkAppId !== ownerLarkAppId) continue;
+        if (!binding || !snap.blockedNodeId) continue;
+        out.push({
+          runId, runDir, binding,
+          repost: [],
+          repostBlocked: blockedInfoFor(events, snap.blockedNodeId),
+          resume: false,
+        });
+        continue;
+      }
+
+      // runStatus === 'running'
       const rec = reconcileOneRun(runId, runDir, journalPath, snap, ownerLarkAppId);
-      if (rec) out.push(rec);
+      if (rec) {
+        out.push(rec);
+        continue;
+      }
+      // No gate to reconcile.  If nothing is (phantom-)running, the run died in
+      // a resumable spot — e.g. crash right after a `nodeRetryRequested` append
+      // (before the redrive) or right after start — so re-drive it.  Runs with
+      // phantom `running` nodes are the dangling-attempt recovery gap (worker
+      // fencing backlog) and are deliberately left alone.
+      const hasRunning = [...snap.nodes.values()].some((s) => s.status === 'running');
+      if (!hasRunning) {
+        const grill = readGrillState(runDir);
+        const binding = grill?.chatBinding;
+        if (ownerLarkAppId && binding?.larkAppId !== ownerLarkAppId) continue;
+        if (!binding) continue; // CLI/dev runs are not the daemon's to adopt
+        out.push({ runId, runDir, binding, repost: [], resume: true });
+      }
     } catch {
       // best-effort (codex #3): a single corrupt run (torn journal / bad
       // grill.state / IO error) must not kill the whole cold-attach scan.

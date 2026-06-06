@@ -159,7 +159,7 @@ describe('runWorkflow — research→summarize 最小闭环', () => {
     }
   });
 
-  it('manifest 非法（绝对 path 越权）→ manifestInvalid', async () => {
+  it('manifest 非法（绝对 path 越权）→ manifestInvalid → blocked（两档语义升级）', async () => {
     const base = mkdtempSync(join(tmpdir(), 'v3-rt-bad-'));
     try {
       const runNode: RunNode = async (req) => {
@@ -173,12 +173,14 @@ describe('runWorkflow — research→summarize 最小闭环', () => {
       const deps: V3RuntimeDeps = { runNode, validateManifest, resolveBotSnapshot };
       const outcome = await runWorkflow(validateDag(TWO_NODE), deps, { baseDir: base });
 
-      expect(outcome).toMatchObject({ reason: 'terminal', runStatus: 'failed' });
+      // blocked/failed 两档（blocked 设计稿 §5）：agent 写坏 manifest = 契约性
+      // 失败，重跑可能修好 → blocked（可 retry），不再折成 failed。
+      expect(outcome).toMatchObject({ reason: 'terminal', runStatus: 'blocked' });
       if (outcome.reason !== 'terminal') throw new Error('expected terminal outcome');
       const events = readJournal(join(outcome.runDir, 'journal.ndjson'));
-      const failed = events.find((e) => e.type === 'nodeFailed') as any;
-      expect(failed.nodeId).toBe('research');
-      expect(failed.errorClass).toBe('manifestInvalid');
+      const blocked = events.find((e) => e.type === 'nodeBlocked') as any;
+      expect(blocked.nodeId).toBe('research');
+      expect(blocked.errorClass).toBe('manifestInvalid');
     } finally {
       rmSync(base, { recursive: true, force: true });
     }

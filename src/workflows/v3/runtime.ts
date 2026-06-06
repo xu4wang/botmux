@@ -17,10 +17,10 @@
  * `docs/design/2026-06-01-v3-mvp-engine-split.md`.
  */
 
-import { mkdirSync, writeFileSync, readFileSync } from 'node:fs';
+import { mkdirSync, writeFileSync, readFileSync, existsSync } from 'node:fs';
 import { join, dirname } from 'node:path';
 
-import { DEFAULT_NODE_TIMEOUT_SEC, isGoalNode, type V3Dag, type V3Node } from './dag.js';
+import { DEFAULT_NODE_TIMEOUT_SEC, isGoalNode, type V3Dag, type V3Node, type V3ResultSchema } from './dag.js';
 import { decideNext } from './orchestrator.js';
 import { appendEvent, readJournal, type StoredEvent, type V3ErrorClass } from './journal.js';
 import { materialize, writeState } from './state.js';
@@ -54,10 +54,21 @@ import {
  * Rendered from `contract.ts` constants so the manifest shape stays a single
  * source of truth shared with codex's validator.
  */
-function renderGoalFile(goal: string): string {
+export function renderGoalFile(goal: string, resultSchema?: V3ResultSchema): string {
   const E = GOAL_ENV;
   const kinds = MANIFEST_FILE_KINDS.join(' | ');
   const [okStatus, failStatus] = MANIFEST_STATUSES;
+  const resultSection = resultSchema
+    ? [
+        '## Structured result (REQUIRED for this node)',
+        `This node declares a structured output contract. Write a JSON file \`result.json\` directly under $${E.OUTPUT_DIR} matching this schema (declared property types are enforced at the top level; every \`required\` field must be present):`,
+        '',
+        '  ' + JSON.stringify(resultSchema),
+        '',
+        `List \`result.json\` in the manifest \`files\` array like any other product (its \`path\` is exactly "result.json"). A missing or schema-violating result.json blocks this node.`,
+        '',
+      ]
+    : [];
   return [
     '# botmux v3 节点任务 / botmux v3 node task',
     '',
@@ -83,13 +94,131 @@ function renderGoalFile(goal: string): string {
     '  }',
     '',
     `  - On success: status "${okStatus}", at least one file entry, and NO \`error\` field.`,
-    `  - On failure: status "${failStatus}", \`error\` required, \`files\` may be empty.`,
+    `  - On failure: status "${failStatus}", \`error\` required, \`files\` may be empty. Set \`error.retryable\` honestly: \`true\` when a human can unblock you and a fresh attempt could then succeed; \`false\` when retrying cannot help.`,
     `  - Every file \`path\` is relative to $${E.OUTPUT_DIR} ITSELF. A file you wrote directly into that directory has a path that is JUST its filename, e.g. \`"path": "report.md"\`. Do NOT prepend the directory or its folder name (NOT \`"work/report.md"\`) and do NOT use an absolute path — both are rejected.`,
     '',
+    ...resultSection,
     `You are DONE only after the manifest at $${E.MANIFEST_PATH} exists and every file it references exists.`,
     'If you cannot complete the goal, write a failure manifest and stop.',
+    'If you hit an authentication / authorization / interactive-confirmation wall (a login prompt, an expired token, a permission you cannot grant yourself): do NOT wait for a human and do NOT keep retrying. Immediately write a failure manifest with an \`error.code\` like "AUTH_REQUIRED" and \`error.retryable: true\`, then stop — a human will unblock and retry this node.',
     '',
   ].join('\n');
+}
+
+// ─── Terminal classification + structured-result validation (pure) ──────────
+
+/**
+ * Map a node's failure to its terminal kind (the blocked/failed split):
+ *   - `blocked`  = semantic/contract failure — retryable via a new attempt
+ *   - `failed`   = infrastructure / human-veto / budget — needs intervention
+ *
+ * `selfReportedFail` marks the special case where the manifest is structurally
+ * VALID but declares `status:'fail'` — then the node's own `error.retryable`
+ * decides (`false` → failed; `true`/absent → blocked, the agent presumably
+ * knows a human can unblock it).
+ */
+export function classifyTerminal(
+  errorClass: V3ErrorClass,
+  opts?: { selfReportedFail?: boolean; retryable?: boolean },
+): 'blocked' | 'failed' {
+  if (opts?.selfReportedFail) return opts.retryable === false ? 'failed' : 'blocked';
+  switch (errorClass) {
+    case 'manifestInvalid': // agent wrote a bad manifest — a retry may fix it
+    case 'resultInvalid':   // result.json missing/violating — same
+      return 'blocked';
+    case 'workerError':     // process crash = infrastructure
+    case 'timeout':         // budget exceeded = infrastructure (for now)
+    case 'gateRejected':    // a human said no — retrying won't change that
+    case 'cancelled':
+      return 'failed';
+  }
+}
+
+/** Validation outcome for an opt-in `result.json` against its node schema. */
+export interface ResultValidation {
+  ok: boolean;
+  problems?: string[];
+}
+
+/**
+ * Validate a `result.json` against the node's (already dag-validated) result
+ * schema subset.  Top-level types only — see `V3ResultSchema`.  Undeclared
+ * extra properties are allowed (JSON-Schema default).
+ */
+export function validateResult(filePath: string, schema: V3ResultSchema): ResultValidation {
+  if (!existsSync(filePath)) return { ok: false, problems: [`result.json not found at ${filePath}`] };
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(readFileSync(filePath, 'utf-8'));
+  } catch (err) {
+    return { ok: false, problems: [`result.json is not valid JSON: ${err instanceof Error ? err.message : String(err)}`] };
+  }
+  if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) {
+    return { ok: false, problems: ['result.json root must be a JSON object'] };
+  }
+  const obj = parsed as Record<string, unknown>;
+  const problems: string[] = [];
+  for (const field of schema.required ?? []) {
+    if (!(field in obj)) problems.push(`missing required field "${field}"`);
+  }
+  for (const [name, spec] of Object.entries(schema.properties)) {
+    if (!(name in obj)) continue; // absence is only a problem when required
+    const v = obj[name];
+    const okType =
+      spec.type === 'string' ? typeof v === 'string'
+      : spec.type === 'number' ? typeof v === 'number' && Number.isFinite(v)
+      : spec.type === 'boolean' ? typeof v === 'boolean'
+      : spec.type === 'array' ? Array.isArray(v)
+      : typeof v === 'object' && v !== null && !Array.isArray(v);
+    if (!okType) problems.push(`field "${name}" must be of type ${spec.type}`);
+  }
+  return problems.length > 0 ? { ok: false, problems } : { ok: true };
+}
+
+// ─── Attempt numbering (journal-derived — no hardcoded 001) ──────────────────
+
+const ATTEMPT_NNN_RE = /\/attempts\/(\d{3})$/;
+
+function attemptNumber(attemptId: string): number | undefined {
+  const m = ATTEMPT_NNN_RE.exec(attemptId);
+  return m ? parseInt(m[1]!, 10) : undefined;
+}
+
+/**
+ * Compute the attemptId the NEXT dispatch of `nodeId` must use, from the
+ * journal: an unconsumed `nodeRetryRequested` reservation wins (retry intent
+ * is authoritative for the redrive); otherwise max(seen)+1 — which is 001 for
+ * a first dispatch.  Dispatch events are the authority for "seen"; a
+ * reservation is consumed by a later `nodeDispatched` with the same number.
+ */
+export function nextAttemptIdFor(events: StoredEvent[], nodeId: string): string {
+  let maxSeen = 0;
+  let reserved: number | undefined;
+  for (const e of events) {
+    if (e.type === 'nodeDispatched' && e.nodeId === nodeId) {
+      const n = attemptNumber(e.attemptId);
+      if (n === undefined) continue;
+      maxSeen = Math.max(maxSeen, n);
+      if (reserved === n) reserved = undefined; // reservation consumed
+    } else if (e.type === 'nodeRetryRequested' && e.nodeId === nodeId) {
+      const n = attemptNumber(e.nextAttemptId);
+      if (n === undefined) continue;
+      reserved = n;
+      maxSeen = Math.max(maxSeen, n);
+    }
+  }
+  const n = reserved ?? maxSeen + 1;
+  return `${nodeId}/attempts/${String(n).padStart(3, '0')}`;
+}
+
+/** Latest dispatched attemptId for a node (the `previousAttemptId` a retry
+ *  entrypoint must reference).  Undefined when the node never dispatched. */
+export function latestAttemptIdFor(events: StoredEvent[], nodeId: string): string | undefined {
+  let latest: string | undefined;
+  for (const e of events) {
+    if (e.type === 'nodeDispatched' && e.nodeId === nodeId) latest = e.attemptId;
+  }
+  return latest;
 }
 
 // ─── Injected dependencies + options ────────────────────────────────────────
@@ -135,7 +264,15 @@ export interface V3PendingGate {
 }
 
 export type V3RunOutcome =
-  | { reason: 'terminal'; runStatus: 'succeeded' | 'failed'; failedNodeId?: string; runDir: string }
+  | {
+      reason: 'terminal';
+      // `blocked` is its OWN status — never collapse it into failed (it is the
+      // retryable half of the blocked/failed split).
+      runStatus: 'succeeded' | 'failed' | 'blocked';
+      failedNodeId?: string;
+      blockedNodeId?: string;
+      runDir: string;
+    }
   | { reason: 'awaitingGate'; pendingWaits: V3PendingGate[]; runDir: string };
 
 // ─── Main loop ───────────────────────────────────────────────────────────
@@ -216,13 +353,18 @@ export async function runWorkflow(
     // Terminal sweep: write the run terminal event, then re-tick so the top of
     // the loop observes it and breaks (single exit path).
     const terminal = actions.find(
-      (a) => a.kind === 'completeRunSucceeded' || a.kind === 'completeRunFailed',
+      (a) =>
+        a.kind === 'completeRunSucceeded' ||
+        a.kind === 'completeRunFailed' ||
+        a.kind === 'completeRunBlocked',
     );
     if (terminal) {
       if (terminal.kind === 'completeRunSucceeded') {
         appendEvent(journalPath, { type: 'runSucceeded' });
-      } else {
+      } else if (terminal.kind === 'completeRunFailed') {
         appendEvent(journalPath, { type: 'runFailed', failedNodeId: terminal.failedNodeId });
+      } else {
+        appendEvent(journalPath, { type: 'runBlocked', blockedNodeId: terminal.blockedNodeId });
       }
       continue;
     }
@@ -269,8 +411,15 @@ export async function runWorkflow(
   const finalSnap = materialize(readJournal(journalPath));
   return {
     reason: 'terminal',
-    runStatus: finalSnap.runStatus === 'succeeded' ? 'succeeded' : 'failed',
+    // Map 1:1 — blocked must NOT collapse into failed.  A 'running' snapshot
+    // here means the loop exited via cancel-abort with nothing in flight;
+    // report that as failed (the run did not complete).
+    runStatus:
+      finalSnap.runStatus === 'succeeded' ? 'succeeded'
+      : finalSnap.runStatus === 'blocked' ? 'blocked'
+      : 'failed',
     failedNodeId: finalSnap.failedNodeId,
+    blockedNodeId: finalSnap.blockedNodeId,
     runDir,
   };
 
@@ -282,13 +431,17 @@ export async function runWorkflow(
     botKey: string,
     events: StoredEvent[],
   ): void {
-    const attemptId = `${node.id}/attempts/001`; // MVP: no retry
-    const attemptDir = join(runDir, node.id, 'attempts', '001');
+    // Attempt number derived from the journal: 001 on first dispatch, the
+    // reserved nextAttemptId after a blocked retry (no hardcoded 001 — a retry
+    // must not overwrite the previous attempt's logs/manifest/pty).
+    const attemptId = nextAttemptIdFor(events, node.id);
+    const attemptNNN = attemptId.slice(attemptId.lastIndexOf('/') + 1);
+    const attemptDir = join(runDir, node.id, 'attempts', attemptNNN);
     const outputDir = join(attemptDir, 'work');
     mkdirSync(outputDir, { recursive: true });
 
     const goalPath = join(attemptDir, 'goal.txt');
-    writeFileSync(goalPath, renderGoalFile(node.goal ?? ''));
+    writeFileSync(goalPath, renderGoalFile(node.goal ?? '', node.resultSchema));
 
     const inputsPath = join(attemptDir, 'inputs.json');
     writeFileSync(inputsPath, JSON.stringify(buildInputs(node, events), null, 2));
@@ -357,6 +510,31 @@ export async function runWorkflow(
         const manifestSaysOk = verdict.ok && verdict.manifest?.status === 'ok';
 
         if (result.status === 'ok' && manifestSaysOk) {
+          // Opt-in structured-result contract: the manifest MUST list a
+          // `result.json` entry (so it went through the manifest validator's
+          // path/hash checks like every other product), and the file must
+          // match the node's schema.  A violation BLOCKS (retryable), it does
+          // not fail.
+          if (node.resultSchema) {
+            const entry = verdict.manifest!.files.find((f) => f.path === 'result.json');
+            if (!entry) {
+              appendEvent(journalPath, {
+                type: 'nodeBlocked', nodeId: node.id, attemptId,
+                errorClass: 'resultInvalid',
+                message: 'node declares resultSchema but its manifest lists no "result.json" file',
+              });
+              return;
+            }
+            const res = validateResult(join(outputDir, entry.path), node.resultSchema);
+            if (!res.ok) {
+              appendEvent(journalPath, {
+                type: 'nodeBlocked', nodeId: node.id, attemptId,
+                errorClass: 'resultInvalid',
+                message: (res.problems ?? ['result.json failed schema validation']).join('; '),
+              });
+              return;
+            }
+          }
           appendEvent(journalPath, {
             type: 'nodeSucceeded', nodeId: node.id, attemptId, manifestPath: result.manifestPath,
           });
@@ -365,6 +543,9 @@ export async function runWorkflow(
 
         let errorClass: V3ErrorClass;
         let message: string;
+        let errorCode: string | undefined;
+        let selfReportedFail = false;
+        let retryable: boolean | undefined;
         if (!verdict.ok) {
           // Manifest missing / malformed.  If the process itself also failed,
           // the worker crash is the root cause; otherwise it's a bad manifest.
@@ -373,14 +554,29 @@ export async function runWorkflow(
         } else {
           // Manifest is structurally valid but declares failure (or the
           // process failed despite an ok manifest) — surface the node's own
-          // error when present.
+          // error when present.  A self-reported fail is the agent's "I am
+          // blocked, a human can fix this" channel (e.g. AUTH_REQUIRED with
+          // retryable:true), so it feeds the blocked/failed split below.
           const m = verdict.manifest!;
           errorClass = 'workerError';
-          message = m.status === 'fail' && m.error
-            ? `${m.error.code}: ${m.error.message}`
-            : 'runNode reported process failure';
+          if (m.status === 'fail' && m.error) {
+            message = `${m.error.code}: ${m.error.message}`;
+            errorCode = m.error.code;
+            if (result.status === 'ok') {
+              // Only an intact worker's self-report counts; a crashed process
+              // with a leftover fail manifest is still an infrastructure error.
+              selfReportedFail = true;
+              retryable = m.error.retryable;
+            }
+          } else {
+            message = 'runNode reported process failure';
+          }
         }
-        appendEvent(journalPath, { type: 'nodeFailed', nodeId: node.id, attemptId, errorClass, message });
+        const kind = classifyTerminal(errorClass, { selfReportedFail, retryable });
+        appendEvent(journalPath, {
+          type: kind === 'blocked' ? 'nodeBlocked' : 'nodeFailed',
+          nodeId: node.id, attemptId, errorClass, errorCode, message,
+        });
       })
       .catch((err: unknown) => {
         appendEvent(journalPath, {

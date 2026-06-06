@@ -23,6 +23,12 @@ import {
   type V3GateCardHandlerDeps,
 } from './v3-gate-card-handler.js';
 import type { V3GateActionValue } from './v3-gate-card.js';
+import {
+  handleV3BlockedAction,
+  isV3BlockedAction,
+  type V3BlockedCardHandlerDeps,
+} from './v3-blocked-card-handler.js';
+import type { V3BlockedActionValue } from './v3-blocked-card.js';
 import { handleAskCardAction, isAskCardAction } from './ask-card.js';
 import { createCliAdapterSync } from '../../adapters/cli/registry.js';
 import { logger } from '../../utils/logger.js';
@@ -48,6 +54,8 @@ export interface CardHandlerDeps {
   workflowApprovalResolved?: (runId: string) => void | Promise<void>;
   /** v3 humanGate 审批卡点击处理（driveRun 由 daemon 接的 v3 gate runner 提供）. */
   v3GateDeps?: V3GateCardHandlerDeps;
+  /** v3 blocked 重试卡点击处理（同一个 runner 的 driveRun）. */
+  v3BlockedDeps?: V3BlockedCardHandlerDeps;
 }
 
 interface CardActionData {
@@ -498,6 +506,10 @@ export async function handleCardAction(data: CardActionData, deps: CardHandlerDe
   if (isV3GateAction(value?.action)) {
     if (!deps.v3GateDeps) return;
     return await handleV3GateAction(value as unknown as V3GateActionValue, operatorOpenId, deps.v3GateDeps);
+  }
+  if (isV3BlockedAction(value?.action)) {
+    if (!deps.v3BlockedDeps) return;
+    return await handleV3BlockedAction(value as unknown as V3BlockedActionValue, operatorOpenId, deps.v3BlockedDeps);
   }
 
   const isSensitive = value?.action && ['restart', 'close', 'resume', 'skip_repo', 'retry_last_task', 'get_write_link', 'toggle_stream', 'toggle_display', 'export_text', 'term_action', 'refresh_screenshot', 'takeover', 'disconnect', 'tui_keys', 'tui_text_input', 'wf_approve', 'wf_reject', 'wf_cancel'].includes(value.action);

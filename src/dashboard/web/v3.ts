@@ -20,6 +20,7 @@ const NODE_COLOR: Record<RunNodeView['status'], string> = {
   gateWaiting: '#f9ab00',
   running: '#1a73e8',
   done: '#188038',
+  blocked: '#e8710a', // amber — recoverable (retry), distinct from failed red
   failed: '#d93025',
 };
 const NODE_LABEL: Record<RunNodeView['status'], string> = {
@@ -27,9 +28,10 @@ const NODE_LABEL: Record<RunNodeView['status'], string> = {
   gateWaiting: '等审批',
   running: '运行中',
   done: '完成',
+  blocked: '受阻(可重试)',
   failed: '失败',
 };
-const RUN_COLOR: Record<string, string> = { running: '#1a73e8', succeeded: '#188038', failed: '#d93025' };
+const RUN_COLOR: Record<string, string> = { running: '#1a73e8', succeeded: '#188038', blocked: '#e8710a', failed: '#d93025' };
 
 function esc(s: string): string {
   return s.replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]!));
@@ -146,10 +148,16 @@ function renderV3DetailPage(root: HTMLElement, runId: string): () => void {
       renderedTermSig = null; // force a terminal (re)mount for the new selection
     }
     // Cheap meta updates in place every poll (no iframe involved).
+    const errLine = node.errorClass
+      ? `<p class="muted">原因：${esc(node.errorClass)}${node.errorCode ? ` (${esc(node.errorCode)})` : ''}${
+          node.status === 'blocked' ? ' — 处理后可在飞书卡片或 `botmux workflow retry` 重试' : ''
+        }</p>`
+      : '';
     panelEl.querySelector<HTMLElement>('#v3-node-meta')!.innerHTML = `
       <p><span class="badge" style="background:${NODE_COLOR[node.status]};color:#fff">${NODE_LABEL[node.status]}</span></p>
       ${node.goal ? `<p class="muted">${esc(node.goal)}</p>` : ''}
-      ${node.depends.length ? `<p class="muted">依赖：${node.depends.map(esc).join(', ')}</p>` : ''}`;
+      ${node.depends.length ? `<p class="muted">依赖：${node.depends.map(esc).join(', ')}</p>` : ''}
+      ${errLine}`;
     // Only (re)mount the terminal when its inputs changed (status / webPort /
     // hasPtyLog) — otherwise leave codex's live iframe untouched (no flicker).
     const sig = termSig(node);

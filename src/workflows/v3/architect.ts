@@ -84,6 +84,7 @@ export function buildArchitectGoal(specPath: string, specJsonPath: string): stri
     '- Convert each spec node sketch into one goal node unless the spec explicitly says to merge or drop it.',
     '- Treat input_needs as free-text requirements, NOT as pre-authored edges. Infer depends/inputs only when the dependency is justified by the spec.',
     '- Preserve risk_gate=true as a humanGate prompt on the corresponding node.',
+    '- Estimate a per-node timeoutSec from the task size — err on the GENEROUS side (completion is detected early via the manifest, so an oversized budget costs nothing): quick single-file edits ~600, typical research/writing ~1800, long research / refactor / audit tasks 3600-7200. Hard ceiling 14400 (4h). Omit it only for trivially small nodes (default is 1800).',
     '- Keep node ids path-safe: [A-Za-z0-9._-].',
     '- Ensure the graph is acyclic and every inputs.from also appears in depends.',
     '',
