@@ -236,6 +236,68 @@ export function submitAsk(args: {
   return 'accepted';
 }
 
+/**
+ * 提交一段自定义回复（用户在话题里直接打字作答，替代点按钮）并 settle。
+ *
+ * 校验：askId 存在 / 未 settle / `by` 在 approvers / text trim 后非空。
+ * settle 为 `kind:'answered'`，各问 `answers` 为空数组、`comment` 携带 trim 后原文
+ * （替代语义：没有任何选项被选中，CLI 侧 formatAnswer 用 comment 回落作答）。
+ *
+ * 不需要 nonce：调用方（daemon 消息路由）用 `findPendingAskByAnchor` 从在线
+ * pending 表按话题 anchor 查到 askId，本身就排除了「重启后的陈旧卡片」场景。
+ *
+ * 成功返回 `'accepted'`；非法返回对应 AskClickOutcome。
+ */
+export function submitCustomReply(args: {
+  askId: string;
+  by: string;
+  text: string;
+}): AskClickOutcome {
+  gcSettled();
+  const ask = pending.get(args.askId);
+  if (!ask) return 'stale';
+  if (ask.settled) return 'already_settled';
+  if (!ask.approvers.has(args.by)) return 'unauthorized';
+  const text = args.text.trim();
+  if (!text) return 'stale';
+
+  settle(args.askId, {
+    kind: 'answered',
+    answers: ask.questions.map(() => []),
+    by: args.by,
+    comment: text,
+    timedOut: false,
+  });
+  return 'accepted';
+}
+
+/**
+ * 按话题 anchor 查找一个**未 settle**的 pending ask，供 daemon 判断「这条文字回复
+ * 是不是在回答某个 ask」。匹配条件：
+ *   - larkAppId 相同（不跨 bot 命中）
+ *   - chatId 相同
+ *   - thread-scope：ask.rootMessageId === anchor（话题根 message_id）
+ *   - chat-scope：ask.rootMessageId === null（anchor 实为 chatId，已由 chatId 命中）
+ *
+ * 命中多个时返回最先注册的（实践中同一 anchor 同时最多一个 pending ask，因为发起
+ * ask 的 CLI 此刻正阻塞等待结果）。返回 snapshot，改它不影响 broker 状态。
+ */
+export function findPendingAskByAnchor(args: {
+  larkAppId: string;
+  chatId: string;
+  anchor: string;
+}): PendingAsk | undefined {
+  for (const ask of pending.values()) {
+    if (ask.settled) continue;
+    if (ask.larkAppId !== args.larkAppId) continue;
+    if (ask.chatId !== args.chatId) continue;
+    const matches =
+      ask.rootMessageId === null ? true : ask.rootMessageId === args.anchor;
+    if (matches) return snapshot(ask);
+  }
+  return undefined;
+}
+
 /** Resolve attempt from a card-button click. Returns one of the §10 outcomes;
  *  caller (card click handler) maps to user-facing toast.
  *

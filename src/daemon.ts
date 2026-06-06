@@ -132,6 +132,8 @@ import { AttemptResumeManager } from './workflows/attempt-resume.js';
 import {
   setCardDispatcher as setAskCardDispatcher,
   registerAsk as registerAskBroker,
+  findPendingAskByAnchor,
+  submitCustomReply,
 } from './core/ask-broker.js';
 import { parseAskBody, resolveAskApprovers } from './core/ask-api.js';
 import { createLarkAskCardDispatcher } from './im/lark/ask-card.js';
@@ -2656,6 +2658,31 @@ async function handleThreadReply(data: any, ctx: RoutingContext): Promise<void> 
       }
       await handleCommand(cmd, anchor, cmdMessage, commandDeps, larkAppId);
       return;
+    }
+  }
+
+  // 自定义回复拦截：该话题有未结的 ask 且发送者有答复权限 → 把这条文字当答案，
+  // 走 submitCustomReply settle 掉 ask（替代选项语义），不再当作新一轮指令喂给 CLI。
+  // 此时发起 ask 的 CLI 正阻塞等结果，回什么都得先等 ask 结束，故无副作用。
+  // 仅拦截纯文字（slash 命令 / 回调 URL / workflow 已在上方各自 return，可用来中止）；
+  // 外部 bot 的 open_id 不在 approvers 里，天然不会命中。非授权人 / 空文字则落到正常
+  // 路由。卡片由 broker.onSettle 自动 PATCH 反映答案，无需额外回消息。
+  if (threadSenderOpenId && threadChatId) {
+    const askReplyText = cmdContent.trim();
+    if (askReplyText) {
+      const pendingAsk = findPendingAskByAnchor({ larkAppId, chatId: threadChatId, anchor });
+      if (pendingAsk && pendingAsk.approvers.has(threadSenderOpenId)) {
+        const outcome = submitCustomReply({
+          askId: pendingAsk.askId,
+          by: threadSenderOpenId,
+          text: askReplyText,
+        });
+        if (outcome === 'accepted') {
+          logger.info(`[${anchor.substring(0, 12)}] ask custom reply accepted from ${threadSenderOpenId.substring(0, 12)}`);
+          return;
+        }
+        logger.info(`[${anchor.substring(0, 12)}] ask custom reply not accepted (${outcome}); falling through to normal routing`);
+      }
     }
   }
 

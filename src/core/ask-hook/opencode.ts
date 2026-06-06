@@ -91,16 +91,24 @@ const openCodeAdapter: HookAskAdapter = {
     return { questions, raw: payload };
   },
 
-  formatAnswer(answersByQuestion: ReadonlyArray<ReadonlyArray<string>>, parsed: ParsedAsk): string {
+  formatAnswer(
+    answersByQuestion: ReadonlyArray<ReadonlyArray<string>>,
+    parsed: ParsedAsk,
+    comment?: string | null,
+  ): string {
     const p = parsed.raw as Record<string, unknown> | undefined;
     const toolInput = (p?.tool_input as { questions?: unknown[] } | undefined);
     const hasStructured = Array.isArray(toolInput?.questions) && (toolInput!.questions!.length > 0);
+    const customText = (comment ?? '').trim();
 
     if (hasStructured) {
-      // 结构化路径：answers[i] = 第 i 个 question 选中的 label 数组；跳过填 ['']
+      // 结构化路径：answers[i] = 第 i 个 question 选中的 label 数组；
+      // 无选中项时若有自定义回复则回落到该文字（替代语义），否则填空哨兵 ['']
       const answers: string[][] = parsed.questions.map((q, i) => {
         const selectedKeys = answersByQuestion[i];
-        if (!selectedKeys || selectedKeys.length === 0) return [''];
+        if (!selectedKeys || selectedKeys.length === 0) {
+          return customText ? [customText] : [''];
+        }
         // OpenCode options 以 label 为 key，直接用 key（= label）
         return selectedKeys.map((k) => {
           const opt = q.options.find((o) => o.key === k);
@@ -110,12 +118,12 @@ const openCodeAdapter: HookAskAdapter = {
       return JSON.stringify({ type: 'answer', answers });
     }
 
-    // 旧版：拍平所有答案为 free-text
+    // 旧版：拍平所有答案为 free-text；纯自定义回复时直接用自定义文字
     const flat = answersByQuestion
       .flat()
       .filter((s) => s.length > 0)
       .join(', ');
-    return JSON.stringify({ type: 'answer', text: flat });
+    return JSON.stringify({ type: 'answer', text: flat || customText });
   },
 
   passthrough(_payload: unknown): string {

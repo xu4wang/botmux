@@ -217,6 +217,15 @@ export function buildAskCard(ask: PendingAsk, result?: AskResult): string {
         ],
       });
     }
+
+    // 自定义回复提示：选项都不满意时，直接在话题里回复一句文字即可当答案。
+    elements.push({ tag: 'hr' });
+    elements.push({
+      tag: 'note',
+      elements: [
+        { tag: 'plain_text', content: '💬 选项都不合适？直接在话题里回复你的答案即可。' },
+      ],
+    });
   }
 
   return JSON.stringify({
@@ -309,6 +318,11 @@ function staleToast(): { toast: { type: string; content: string } } {
  */
 function settleStatus(result: AskResult, ask: PendingAsk): string {
   if (result.kind === 'answered') {
+    // 自定义回复（替代语义）：没有任何选中项、只有一段自定义文字 → 单独渲染。
+    const hasSelection = result.answers.some((keys) => keys.length > 0);
+    if (result.comment && !hasSelection) {
+      return `**自定义回复**\n${escapeMd(result.comment)}\n操作人：${escapeMd(short(result.by, 28))}`;
+    }
     // 每问一行：问题N：<选中标签>
     const lines = result.answers.map((keys, i) => {
       const q = ask.questions[i];
@@ -317,7 +331,8 @@ function settleStatus(result: AskResult, ask: PendingAsk): string {
       return `问题${i + 1}：${labels.join(', ')}`;
     });
     const summary = lines.join('\n');
-    return `**已选择**\n${escapeMd(summary)}\n操作人：${escapeMd(short(result.by, 28))}`;
+    const commentLine = result.comment ? `\n补充：${escapeMd(result.comment)}` : '';
+    return `**已选择**\n${escapeMd(summary)}${commentLine}\n操作人：${escapeMd(short(result.by, 28))}`;
   }
   if (result.kind === 'timedOut') {
     return '**超时未答**';

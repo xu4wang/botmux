@@ -12,10 +12,12 @@ import {
   _getPending,
   _pendingCount,
   _resetForTest,
+  findPendingAskByAnchor,
   invalidateAll,
   registerAsk,
   setCardDispatcher,
   submitAsk,
+  submitCustomReply,
   toggleAsk,
   tryResolveAsk,
 } from '../src/core/ask-broker.js';
@@ -485,5 +487,134 @@ describe('toggleAsk + submitAsk', () => {
     registerAsk(makeInput({ sessionId: 'sy' }));
     const ids = _allAskIds();
     expect(ids).toHaveLength(2);
+  });
+});
+
+describe('自定义回复 findPendingAskByAnchor + submitCustomReply', () => {
+  it('findPendingAskByAnchor: 按 (larkAppId, chatId, rootMessageId=anchor) 命中未 settle 的 ask', async () => {
+    const d = mockDispatcher();
+    setCardDispatcher(d);
+    registerAsk(makeInput());
+    await Promise.resolve();
+    await Promise.resolve();
+    const found = findPendingAskByAnchor({ larkAppId: 'cli_app', chatId: 'oc_chat', anchor: 'om_root' });
+    expect(found?.askId).toBe(d.sendCalls[0]!.askId);
+  });
+
+  it('findPendingAskByAnchor: chat-scope（rootMessageId=null）按 chatId 作为 anchor 命中', async () => {
+    const d = mockDispatcher();
+    setCardDispatcher(d);
+    registerAsk(makeInput({ rootMessageId: null }));
+    await Promise.resolve();
+    await Promise.resolve();
+    const found = findPendingAskByAnchor({ larkAppId: 'cli_app', chatId: 'oc_chat', anchor: 'oc_chat' });
+    expect(found?.askId).toBe(d.sendCalls[0]!.askId);
+  });
+
+  it('findPendingAskByAnchor: anchor 不匹配 → undefined', async () => {
+    const d = mockDispatcher();
+    setCardDispatcher(d);
+    registerAsk(makeInput());
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(
+      findPendingAskByAnchor({ larkAppId: 'cli_app', chatId: 'oc_chat', anchor: 'om_other' }),
+    ).toBeUndefined();
+  });
+
+  it('findPendingAskByAnchor: larkAppId 不同 → undefined（不跨 bot 命中）', async () => {
+    const d = mockDispatcher();
+    setCardDispatcher(d);
+    registerAsk(makeInput());
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(
+      findPendingAskByAnchor({ larkAppId: 'other_app', chatId: 'oc_chat', anchor: 'om_root' }),
+    ).toBeUndefined();
+  });
+
+  it('findPendingAskByAnchor: settled 的 ask 不再被命中', async () => {
+    const d = mockDispatcher();
+    setCardDispatcher(d);
+    const p = registerAsk(makeInput());
+    await Promise.resolve();
+    await Promise.resolve();
+    const { askId, nonce } = d.sendCalls[0]!;
+    tryResolveAsk({ askId, nonce, selected: 'yes', by: 'ou_owner' });
+    await p;
+    expect(
+      findPendingAskByAnchor({ larkAppId: 'cli_app', chatId: 'oc_chat', anchor: 'om_root' }),
+    ).toBeUndefined();
+  });
+
+  it('submitCustomReply: 授权用户文字回复 → answered，comment=文字，answers 全空', async () => {
+    const d = mockDispatcher();
+    setCardDispatcher(d);
+    const p = registerAsk(makeInput());
+    await Promise.resolve();
+    await Promise.resolve();
+    const { askId } = d.sendCalls[0]!;
+    expect(submitCustomReply({ askId, by: 'ou_owner', text: '我想先灰度 10% 再全量' })).toBe('accepted');
+    const r = await p;
+    expect(r.kind).toBe('answered');
+    if (r.kind === 'answered') {
+      expect(r.comment).toBe('我想先灰度 10% 再全量');
+      expect(r.answers).toEqual([[]]);
+      expect(r.by).toBe('ou_owner');
+    }
+    expect(_pendingCount()).toBe(0);
+    expect(d.settleCalls).toHaveLength(1);
+  });
+
+  it('submitCustomReply: 前后空白被 trim 后写入 comment', async () => {
+    const d = mockDispatcher();
+    setCardDispatcher(d);
+    const p = registerAsk(makeInput());
+    await Promise.resolve();
+    await Promise.resolve();
+    const { askId } = d.sendCalls[0]!;
+    submitCustomReply({ askId, by: 'ou_owner', text: '  灰度  ' });
+    const r = await p;
+    if (r.kind === 'answered') expect(r.comment).toBe('灰度');
+  });
+
+  it('submitCustomReply: 非授权用户 → unauthorized，状态不变', async () => {
+    const d = mockDispatcher();
+    setCardDispatcher(d);
+    registerAsk(makeInput());
+    await Promise.resolve();
+    await Promise.resolve();
+    const { askId } = d.sendCalls[0]!;
+    expect(submitCustomReply({ askId, by: 'ou_stranger', text: '随便答' })).toBe('unauthorized');
+    expect(_pendingCount()).toBe(1);
+  });
+
+  it('submitCustomReply: 空白文字 → stale，状态不变', async () => {
+    const d = mockDispatcher();
+    setCardDispatcher(d);
+    registerAsk(makeInput());
+    await Promise.resolve();
+    await Promise.resolve();
+    const { askId } = d.sendCalls[0]!;
+    expect(submitCustomReply({ askId, by: 'ou_owner', text: '   ' })).toBe('stale');
+    expect(_pendingCount()).toBe(1);
+  });
+
+  it('submitCustomReply: 未知 askId → stale', () => {
+    const d = mockDispatcher();
+    setCardDispatcher(d);
+    expect(submitCustomReply({ askId: 'no-such', by: 'ou_owner', text: 'x' })).toBe('stale');
+  });
+
+  it('submitCustomReply: 已 settle → already_settled', async () => {
+    const d = mockDispatcher();
+    setCardDispatcher(d);
+    const p = registerAsk(makeInput());
+    await Promise.resolve();
+    await Promise.resolve();
+    const { askId, nonce } = d.sendCalls[0]!;
+    tryResolveAsk({ askId, nonce, selected: 'yes', by: 'ou_owner' });
+    await p;
+    expect(submitCustomReply({ askId, by: 'ou_owner', text: 'late' })).toBe('already_settled');
   });
 });

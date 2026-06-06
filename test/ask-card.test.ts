@@ -106,6 +106,28 @@ describe('buildAskCard', () => {
     expect(text).toContain('继续发布');
   });
 
+  it('未 settle 卡片：含自定义回复提示（直接在话题里回复）', () => {
+    const text = buildAskCard(makePending());
+    expect(text).toContain('直接在话题');
+  });
+
+  it('settled 态（answered + comment）：渲染自定义回复文字与标签', () => {
+    const ask = makePending({
+      questions: [{ prompt: 'q', multiSelect: false, options: [{ key: 'y', label: '是' }, { key: 'n', label: '否' }] }],
+    });
+    const text = buildAskCard(ask, {
+      kind: 'answered',
+      answers: [[]],
+      by: 'ou_u',
+      comment: '我想先灰度 10%',
+      timedOut: false,
+    });
+    expect(text).toContain('自定义回复');
+    expect(text).toContain('我想先灰度 10%');
+    // header 仍为 answered 绿
+    expect(JSON.parse(text).header.template).toBe('green');
+  });
+
   it('多问/多选：使用 buttons + submit，不使用 form/select_static', () => {
     const ask = makePending({
       questions: [

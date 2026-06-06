@@ -4091,7 +4091,7 @@ async function cmdAsk(sub: string, rest: string[]): Promise<void> {
       selected,
       answers: result.kind === 'answered' ? (result.answers as string[][]) : null,
       by: result.kind === 'answered' ? result.by : null,
-      comment: null,
+      comment: result.kind === 'answered' ? result.comment : null,
       timedOut: result.kind === 'timedOut',
     };
     process.stdout.write(JSON.stringify(out) + '\n');
@@ -4227,7 +4227,7 @@ export async function runHook(
   }
 
   if (result.kind === 'answered') {
-    return { stdout: adapter.formatAnswer(result.answers, parsed) };
+    return { stdout: adapter.formatAnswer(result.answers, parsed, result.comment) };
   }
 
   // timedOut / invalidated → passthrough 放行
