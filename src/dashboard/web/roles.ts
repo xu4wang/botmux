@@ -1,7 +1,7 @@
 // Roles page: hierarchical group → bot role editor.
 // Displays groups as collapsible sections with bots nested inside.
 // Each bot has its own per-group role definition selectable for editing.
-import { botOrbStyle, escapeHtml, t } from './ui.js';
+import { botAvatarHtml, escapeHtml, loadNameMaps, t } from './ui.js';
 
 interface BotInfo {
   larkAppId: string;
@@ -152,7 +152,7 @@ function renderTree(filter: string = ''): void {
                  data-group-id="${escapeHtml(g.chatId)}"
                  data-bot-id="${escapeHtml(b.larkAppId)}">
               <span class="roles-bot-indent"></span>
-              <span class="orb-avatar orb-avatar-sm" style="${botOrbStyle(b.botName)}" aria-hidden="true"></span>
+              ${botAvatarHtml({ name: b.botName, larkAppId: b.larkAppId, size: 'sm' })}
               <div class="roles-bot-info">
                 <div class="roles-bot-name">${escapeHtml(b.botName)}</div>
                 <div class="roles-bot-id">${escapeHtml(b.larkAppId)}</div>
@@ -291,6 +291,7 @@ export async function renderRolesPage(root: HTMLElement): Promise<void> {
   resetEditor();
 
   await loadGroups();
+  await loadNameMaps(); // 预热共享头像表，让角色树首屏就能出真实头像
   // Auto-expand groups that have at least one bot with a role
   for (const g of cache) {
     if (botRoleCount(g) > 0) expandedGroups.add(g.chatId);

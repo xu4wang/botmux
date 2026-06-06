@@ -9,6 +9,7 @@ function sampleChats() {
       chatId: 'oc_chat1',
       name: '客户群 A',
       chatMode: 'group',
+      avatar: 'https://avatar.example/chat1.png',
       description: 'private description',
       ownerId: 'ou_owner',
       memberBots: [
@@ -70,6 +71,7 @@ describe('redactGroupsForPublic', () => {
         chatId: 'oc_chat1',
         name: '客户群 A',
         chatMode: 'group',
+        avatar: 'https://avatar.example/chat1.png',
         memberBots: [
           { larkAppId: 'cli_a', botName: 'Claude', inChat: true },
           { larkAppId: 'cli_b', botName: 'Codex', inChat: false },

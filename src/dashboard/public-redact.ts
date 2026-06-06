@@ -20,7 +20,8 @@
  *  doesn't ride along. Dropped: `description`, `ownerId` (group config/PII),
  *  `hasRole` (leaks the role/persona existence matrix even though the roles
  *  page is token-gated), `oncallChat` (carries workingDir), `error`,
- *  `firstSeenAt`. Kept: chat `chatId/name/chatMode` (name-map) and
+ *  `firstSeenAt`. Kept: chat `chatId/name/chatMode/avatar` (name-map + group
+ *  头像，与公开看板已暴露的群名同等敏感度) and
  *  `memberBots[].larkAppId/botName/inChat` (roster). Returns a new array; never
  *  mutates the input. */
 export function redactGroupsForPublic(chats: unknown[]): unknown[] {
@@ -32,6 +33,7 @@ export function redactGroupsForPublic(chats: unknown[]): unknown[] {
       chatId: chat.chatId,
       name: chat.name,
       chatMode: chat.chatMode,
+      avatar: chat.avatar,
     };
     if (Array.isArray(chat.memberBots)) {
       out.memberBots = chat.memberBots.map((mb) => {

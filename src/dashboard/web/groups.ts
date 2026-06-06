@@ -2,7 +2,7 @@
 // The aggregator at /api/groups fans out to all online daemons and merges chats
 // by chatId; the dashboard displays this as a matrix where each cell shows
 // whether a bot is a member of a given chat.
-import { escapeHtml, t } from './ui.js';
+import { chatAvatarHtml, escapeHtml, t } from './ui.js';
 
 let cache: { chats: any[]; bots: any[] } = { chats: [], bots: [] };
 
@@ -321,8 +321,13 @@ export async function renderGroupsPage(root: HTMLElement) {
     }
     body.innerHTML = filtered.map(c => `<tr data-chat="${escapeHtml(c.chatId)}">
       <td>
-        <strong>${escapeHtml(c.name ?? c.chatId)}</strong><br>
-        <small><code>${escapeHtml(c.chatId)}</code></small>
+        <div class="g-chat-cell">
+          ${chatAvatarHtml({ chatId: c.chatId, name: c.name, avatarUrl: c.avatar, size: 'sm' })}
+          <div class="g-chat-meta">
+            <strong>${escapeHtml(c.name ?? c.chatId)}</strong><br>
+            <small><code>${escapeHtml(c.chatId)}</code></small>
+          </div>
+        </div>
       </td>
       ${cache.bots.map(b => {
         const m = c.memberBots.find((m: any) => m.larkAppId === b.larkAppId);

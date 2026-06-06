@@ -39,7 +39,7 @@ export function writeBotInfoFile(dataDir: string): void {
   if (!existsSync(dataDir)) mkdirSync(dataDir, { recursive: true });
 
   // Read existing entries from other daemon processes
-  type BotInfoEntry = { larkAppId: string; botOpenId: string | null; botName: string | null; cliId: string };
+  type BotInfoEntry = { larkAppId: string; botOpenId: string | null; botName: string | null; botAvatarUrl: string | null; cliId: string };
   let existing: BotInfoEntry[] = [];
   try {
     if (existsSync(filePath)) {
@@ -59,6 +59,7 @@ export function writeBotInfoFile(dataDir: string): void {
       larkAppId: b.config.larkAppId,
       botOpenId: b.botOpenId ?? null,
       botName: b.botName ?? null,
+      botAvatarUrl: b.botAvatarUrl ?? null,
       cliId: b.config.cliId,
     });
   }
@@ -118,9 +119,11 @@ export async function probeBotOpenId(larkAppId: string): Promise<void> {
 
   const openId = botData.bot?.open_id;
   const appName = botData.bot?.app_name;
+  const avatarUrl = botData.bot?.avatar_url;
   if (openId) {
     bot.botOpenId = openId;
     if (appName) bot.botName = appName;
+    if (avatarUrl) bot.botAvatarUrl = avatarUrl;
     logger.info(`Bot open_id: ${bot.botOpenId}`);
   } else {
     throw new Error('No open_id in bot info response');

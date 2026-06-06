@@ -174,6 +174,72 @@ export function botOrbStyle(name: string): string {
   return `--c1:${c1};--c2:${c2}`;
 }
 
+// 真实头像（飞书 /bot/v3/info 的 avatar_url）→ 渐变球。两套 key：larkAppId 优先，
+// 再退回 botName，方便只拿得到名字的渲染点（会话行 / 角色树）也能命中。
+const botAvatarByAppId = new Map<string, string>();
+const botAvatarByName = new Map<string, string>();
+
+/** 查 bot 头像 URL：larkAppId 命中优先，再按 botName 兜底；都没有返回 undefined。 */
+export function botAvatarUrlFor(name?: string, larkAppId?: string): string | undefined {
+  return (larkAppId ? botAvatarByAppId.get(larkAppId) : undefined)
+    ?? (name ? botAvatarByName.get(String(name)) : undefined);
+}
+
+export interface BotAvatarOpts {
+  /** 展示名 —— 决定回退渐变球的色相，也用于按名查头像。 */
+  name?: string;
+  /** 主查询键。 */
+  larkAppId?: string;
+  /** 显式头像 URL（调用方已拿到时传，省一次 map 查询、首屏即出图）。 */
+  avatarUrl?: string;
+  /** 尺寸：md=42px（默认），sm=24px。 */
+  size?: 'sm' | 'md';
+  /** 右下角状态点；不传则不渲染圆点。 */
+  dot?: 'ok' | 'busy' | 'warn' | 'off';
+}
+
+/** 全站统一的 bot 头像渲染：有头像出 <img>（盖在渐变球上、加载失败自动回退到
+ *  渐变球），没有就直接渲染渐变球。避免"先球后头像"闪烁靠 CSS 的 .orb-has-img。 */
+export function botAvatarHtml(opts: BotAvatarOpts): string {
+  const name = opts.name ?? '';
+  const url = opts.avatarUrl ?? botAvatarUrlFor(opts.name, opts.larkAppId);
+  const sizeCls = opts.size === 'sm' ? ' orb-avatar-sm' : '';
+  const hasImg = url ? ' orb-has-img' : '';
+  const dot = opts.dot ? `<i class="orb-dot orb-dot-${opts.dot}"></i>` : '';
+  const img = url
+    ? `<img class="orb-img" src="${escapeHtml(url)}" alt="" decoding="async" referrerpolicy="no-referrer" onerror="this.closest('.orb-avatar')?.classList.remove('orb-has-img');this.remove()"/>`
+    : '';
+  return `<span class="orb-avatar${sizeCls}${hasImg}" style="${botOrbStyle(name)}" aria-hidden="true">${img}${dot}</span>`;
+}
+
+/** 查飞书群头像 URL（按 chatId）。 */
+export function chatAvatarUrlFor(chatId?: string): string | undefined {
+  return chatId ? chatAvatarById.get(chatId) : undefined;
+}
+
+export interface ChatAvatarOpts {
+  chatId?: string;
+  /** 群名 —— 决定回退占位的色相。 */
+  name?: string;
+  /** 显式群头像 URL（调用方已有时传，省一次 map 查询）。 */
+  avatarUrl?: string;
+  /** 尺寸：md=42px（默认），sm=24px。 */
+  size?: 'sm' | 'md';
+}
+
+/** 飞书群头像渲染：圆角方形（.orb-square）以区别于圆形的 bot 头像；复用同一套
+ *  占位 / 淡入 / 加载失败回退机制（.orb-has-img / .orb-img）。 */
+export function chatAvatarHtml(opts: ChatAvatarOpts): string {
+  const name = opts.name ?? opts.chatId ?? '';
+  const url = opts.avatarUrl ?? chatAvatarUrlFor(opts.chatId);
+  const sizeCls = opts.size === 'sm' ? ' orb-avatar-sm' : '';
+  const hasImg = url ? ' orb-has-img' : '';
+  const img = url
+    ? `<img class="orb-img" src="${escapeHtml(url)}" alt="" decoding="async" referrerpolicy="no-referrer" onerror="this.closest('.orb-avatar')?.classList.remove('orb-has-img');this.remove()"/>`
+    : '';
+  return `<span class="orb-avatar orb-square${sizeCls}${hasImg}" style="${botOrbStyle(name)}" aria-hidden="true">${img}</span>`;
+}
+
 // ── 跨页共享的展示名解析（bot 友好名 / 群聊标题）────────────────────────────
 // daemon IPC 上报的 SessionRow.botName 历史上填的是 larkAppId（friendly name
 // probe 回来只回写了注册表 descriptor，没回填 IPC 的 cachedBotName），这里用
@@ -181,7 +247,42 @@ export function botOrbStyle(name: string): string {
 // 纯展示增强，不挡核心功能。
 const botNameByAppId = new Map<string, string>();
 const chatNameById = new Map<string, string>();
+const chatAvatarById = new Map<string, string>();
 let nameMapsPromise: Promise<void> | null = null;
+
+// 头像 URL 本地持久化：飞书 CDN 的图本身有 14 天 HTTP 缓存，但「先渲染渐变球、
+// 等 /api/groups 回来再换头像」这一刷会在每次冷加载/切页时出现。把 URL 存进
+// localStorage 并在模块加载时同步回灌，让任意页面首屏就拿得到头像 URL —— 配合
+// 浏览器图片缓存即时出图，彻底消除「球→头像」那一刷。
+const AVATAR_CACHE_KEY = 'botmux.avatarCache.v1';
+
+function hydrateAvatarCache(): void {
+  try {
+    const raw = typeof window !== 'undefined' ? window.localStorage.getItem(AVATAR_CACHE_KEY) : null;
+    if (!raw) return;
+    const c = JSON.parse(raw) as {
+      botByAppId?: Record<string, string>;
+      botByName?: Record<string, string>;
+      chatById?: Record<string, string>;
+    };
+    for (const [k, v] of Object.entries(c.botByAppId ?? {})) botAvatarByAppId.set(k, v);
+    for (const [k, v] of Object.entries(c.botByName ?? {})) botAvatarByName.set(k, v);
+    for (const [k, v] of Object.entries(c.chatById ?? {})) chatAvatarById.set(k, v);
+  } catch { /* 损坏/无 localStorage 时静默 */ }
+}
+
+function persistAvatarCache(): void {
+  try {
+    if (typeof window === 'undefined') return;
+    window.localStorage.setItem(AVATAR_CACHE_KEY, JSON.stringify({
+      botByAppId: Object.fromEntries(botAvatarByAppId),
+      botByName: Object.fromEntries(botAvatarByName),
+      chatById: Object.fromEntries(chatAvatarById),
+    }));
+  } catch { /* 配额/SSR 时静默 */ }
+}
+
+hydrateAvatarCache(); // 模块加载即回灌，先于任何页面渲染
 
 export function loadNameMaps(): Promise<void> {
   nameMapsPromise ??= (async () => {
@@ -193,10 +294,16 @@ export function loadNameMaps(): Promise<void> {
         if (b.larkAppId && b.botName && b.botName !== b.larkAppId) {
           botNameByAppId.set(b.larkAppId, String(b.botName));
         }
+        if (b.botAvatarUrl) {
+          if (b.larkAppId) botAvatarByAppId.set(b.larkAppId, String(b.botAvatarUrl));
+          if (b.botName) botAvatarByName.set(String(b.botName), String(b.botAvatarUrl));
+        }
       }
       for (const c of data.chats ?? []) {
         if (c.chatId && c.name) chatNameById.set(c.chatId, String(c.name));
+        if (c.chatId && c.avatar) chatAvatarById.set(c.chatId, String(c.avatar));
       }
+      persistAvatarCache(); // 刷新本地缓存，下次冷加载首屏即出头像
     } catch {
       // 失败不缓存（dashboard 刚启动 /api/groups 可能短暂 503）——
       // 清掉 memo，下一个页面 mount / strip 重绘再重试；期间显示原始 id。

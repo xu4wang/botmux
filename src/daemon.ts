@@ -565,6 +565,8 @@ const DAEMON_REGISTRY_DIR = join(homedir(), '.botmux', 'data', 'dashboard-daemon
 interface DaemonDescriptor {
   larkAppId: string;
   botName: string;
+  /** Lark app avatar URL (from /bot/v3/info); absent until the open_id probe lands. */
+  botAvatarUrl?: string;
   botIndex: number;
   ipcPort: number;
   pid: number;
@@ -3065,8 +3067,17 @@ export async function startDaemon(botIndex?: number): Promise<void> {
     probeBotOpenId(cfg.larkAppId).then(() => {
       writeBotInfoFile(config.session.dataDir);
       const probedName = bot.botName;
+      const probedAvatar = bot.botAvatarUrl;
+      let descChanged = false;
       if (probedName && probedName !== desc.botName) {
         desc.botName = probedName;
+        descChanged = true;
+      }
+      if (probedAvatar && probedAvatar !== desc.botAvatarUrl) {
+        desc.botAvatarUrl = probedAvatar;
+        descChanged = true;
+      }
+      if (descChanged) {
         try { writeDaemonDescriptor(desc); } catch { /* best effort */ }
       }
       // SessionRow.botName 同步换成友好名——否则 dashboard 会话行一直显示

@@ -618,7 +618,7 @@ const server = createServer(async (req, res) => {
       // prompt strip + keeps /api/bots oncall removal honest).
       return jsonRes(res, 200, {
         chats: authed ? sorted : redactGroupsForPublic(sorted),
-        bots: onlineBots.map(b => ({ larkAppId: b.larkAppId, botName: b.botName })),
+        bots: onlineBots.map(b => ({ larkAppId: b.larkAppId, botName: b.botName, botAvatarUrl: b.botAvatarUrl })),
       });
     }
 

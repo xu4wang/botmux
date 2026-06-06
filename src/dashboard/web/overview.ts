@@ -3,8 +3,8 @@
 import { store } from './store.js';
 import {
   attentionReason,
+  botAvatarHtml,
   botDisplayName,
-  botOrbStyle,
   chatDisplayTitle,
   escapeHtml,
   loadNameMaps,
@@ -28,6 +28,7 @@ async function loadGroupsSnapshot(): Promise<void> {
 type BotCard = {
   botName: string;
   larkAppId?: string;
+  botAvatarUrl?: string;
   cliId: string;
   online: boolean;
   sessions: any[];
@@ -60,6 +61,7 @@ function buildBotCards(sessions: any[]): BotCard[] {
     const card = ensure(b.larkAppId ?? b.botName ?? '-');
     card.online = true;
     if (b.botName) card.botName = b.botName;
+    if (b.botAvatarUrl) card.botAvatarUrl = b.botAvatarUrl;
   }
   // 两遍：先 active 建卡，再让 closed 会话只补充已有卡（不为其单独出卡）
   const ordered = [...sessions].sort((a, b) => Number(a.status === 'closed') - Number(b.status === 'closed'));
@@ -111,7 +113,7 @@ function mateCardHtml(card: BotCard): string {
         : `<span class="tag tag-ok">${escapeHtml(t('overview.botReady'))}</span>`;
   return `<article class="mate${needsYou ? ' mate-attn' : ''}${offline ? ' mate-off' : ''}">
     <div class="mate-top">
-      <span class="orb-avatar" style="${botOrbStyle(card.botName)}"><i class="orb-dot orb-dot-${dotClass}"></i></span>
+      ${botAvatarHtml({ name: card.botName, larkAppId: card.larkAppId, avatarUrl: card.botAvatarUrl, dot: dotClass })}
       <div class="mate-id">
         <b>${escapeHtml(card.botName)}</b>
         <span class="mate-role">${escapeHtml(card.cliId)}</span>
@@ -128,7 +130,7 @@ function mateCardHtml(card: BotCard): string {
 function attentionCardHtml(s: any): string {
   const botName = botDisplayName(s);
   return `<article class="qcard" data-id="${escapeHtml(s.sessionId)}">
-    <span class="orb-avatar orb-avatar-sm" style="${botOrbStyle(botName)}"></span>
+    ${botAvatarHtml({ name: botName, larkAppId: s.larkAppId, size: 'sm' })}
     <div class="qcard-tx">
       <b>${escapeHtml(botName)} · ${escapeHtml((stripMentionPrefix(s.title) || s.sessionId).slice(0, 56))}</b>
       <span>${escapeHtml(attentionReason(s) ?? '')} · ${relTime(s.lastMessageAt)}</span>
@@ -140,7 +142,7 @@ function attentionCardHtml(s: any): string {
 function activeSessionHtml(s: any): string {
   const botName = botDisplayName(s);
   return `<li class="sess-row">
-    <span class="orb-avatar orb-avatar-sm" style="${botOrbStyle(botName)}"></span>
+    ${botAvatarHtml({ name: botName, larkAppId: s.larkAppId, size: 'sm' })}
     <div class="sess-tx">
       <b>${escapeHtml((stripMentionPrefix(s.title) || s.sessionId).slice(0, 64))}</b>
       <span>${escapeHtml(botName)} · ${escapeHtml(chatDisplayTitle(s) ?? s.cliId ?? 'unknown')} · ${relTime(s.lastMessageAt)}</span>

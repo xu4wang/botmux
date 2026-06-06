@@ -4,7 +4,7 @@
 // after the save; existing chats are left alone, and chats already auto-bound
 // once stay user-controlled.
 import { store } from './store.js';
-import { botOrbStyle, escapeHtml, t } from './ui.js';
+import { botAvatarHtml, escapeHtml, loadNameMaps, t } from './ui.js';
 
 let cache: { bots: any[] } = { bots: [] };
 let loadError: string | null = null;
@@ -141,7 +141,7 @@ export async function renderBotDefaultsPage(root: HTMLElement) {
       ? `<span class="bd-roster-flag">oncall</span>`
       : '';
     return `<div class="bd-roster-item${b.larkAppId === selectedAppId ? ' on' : ''}" data-appid="${escapeHtml(b.larkAppId)}" role="button" tabindex="0">
-      <span class="orb-avatar orb-avatar-sm" style="${botOrbStyle(name)}" aria-hidden="true"></span>
+      ${botAvatarHtml({ name, larkAppId: b.larkAppId, size: 'sm' })}
       <div class="bd-roster-tx">
         <b>${escapeHtml(name)}</b>
         <span>${escapeHtml(cli || b.larkAppId.slice(0, 14))}</span>
@@ -154,7 +154,7 @@ export async function renderBotDefaultsPage(root: HTMLElement) {
     if (b.error) {
       return `<article class="bd-card bd-profile" data-appid="${escapeHtml(b.larkAppId)}">
         <header class="bd-profile-head">
-          <span class="orb-avatar" style="${botOrbStyle(b.botName ?? b.larkAppId)}" aria-hidden="true"></span>
+          ${botAvatarHtml({ name: b.botName ?? b.larkAppId, larkAppId: b.larkAppId })}
           <div class="bd-profile-id"><strong>${escapeHtml(b.botName ?? b.larkAppId)}</strong>
           <code>${escapeHtml(b.larkAppId)}</code></div>
         </header>
@@ -167,7 +167,7 @@ export async function renderBotDefaultsPage(root: HTMLElement) {
     const cli = cliIdOf(b.larkAppId);
     return `<article class="bd-card bd-profile" data-appid="${escapeHtml(b.larkAppId)}">
       <header class="bd-profile-head">
-        <span class="orb-avatar" style="${botOrbStyle(name)}" aria-hidden="true"><i class="orb-dot orb-dot-ok"></i></span>
+        ${botAvatarHtml({ name, larkAppId: b.larkAppId, dot: 'ok' })}
         <div class="bd-profile-id">
           <strong>${escapeHtml(name)}</strong>
           ${cli ? `<span class="mate-role">${escapeHtml(cli)}</span>` : ''}
@@ -757,5 +757,6 @@ export async function renderBotDefaultsPage(root: HTMLElement) {
   }
 
   rerender();
+  void loadNameMaps().then(rerender); // 头像表就绪后重绘，让 /api/bots 这边也出真实头像
   form.addEventListener('input', rerender);
 }

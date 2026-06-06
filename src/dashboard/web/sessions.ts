@@ -9,7 +9,7 @@ import {
 import { store } from './store.js';
 import {
   botDisplayName,
-  botOrbStyle,
+  botAvatarHtml,
   chatDisplayTitle,
   escapeHtml,
   loadNameMaps,
@@ -244,7 +244,7 @@ export function renderSessionsPage(root: HTMLElement) {
     const signal = boardSignalLabel(s);
     return `<article class="session-card${isSelected ? ' selected' : ''}" data-id="${escapeHtml(s.sessionId)}" aria-pressed="${isSelected}">
       <div class="session-card-top">
-        <span class="orb-avatar orb-avatar-sm" style="${botOrbStyle(botName)}" aria-hidden="true"></span>
+        ${botAvatarHtml({ name: botName, larkAppId: s.larkAppId, size: 'sm' })}
         <div class="session-card-title">
           <strong title="${escapeHtml(String(s.title ?? title))}">${escapeHtml(String(title).slice(0, 72))}</strong>
           <span>${escapeHtml(botName)} · ${escapeHtml(chatTitle ?? s.cliId ?? 'unknown')}</span>
