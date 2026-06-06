@@ -72,6 +72,7 @@ export function renderGoalFile(
   const E = GOAL_ENV;
   const kinds = MANIFEST_FILE_KINDS.join(' | ');
   const [okStatus, failStatus] = MANIFEST_STATUSES;
+  const hasEnum = resultSchema && Object.values(resultSchema.properties).some((p) => p.enum);
   const resultSection = resultSchema
     ? [
         '## Structured result (REQUIRED for this node)',
@@ -79,6 +80,12 @@ export function renderGoalFile(
         '',
         '  ' + JSON.stringify(resultSchema),
         '',
+        ...(hasEnum
+          ? [
+              'Fields declaring an `enum` MUST use one of the listed values EXACTLY (case-sensitive) — downstream routing decisions read these values, and anything outside the vocabulary blocks this node.',
+              '',
+            ]
+          : []),
         `List \`result.json\` in the manifest \`files\` array like any other product (its \`path\` is exactly "result.json"). A missing or schema-violating result.json blocks this node.`,
         '',
       ]
@@ -107,7 +114,7 @@ export function renderGoalFile(
     'You are an autonomous agent completing exactly ONE botmux v3 workflow node.',
     'Work toward the goal above until it is done, then stop. Do not ask the user any questions.',
     '',
-    `- Upstream inputs: the file at $${E.INPUTS_PATH} is a JSON object \`{ "inputs": [...] }\` listing upstream products, each with an absolute \`path\`. Read only the ones the goal needs (it may be empty).`,
+    `- Upstream inputs: the file at $${E.INPUTS_PATH} is a JSON object \`{ "inputs": [...] }\` listing upstream products, each with an absolute \`path\`. Read only the ones the goal needs (it may be empty). If an \`omitted\` array is present, those declared inputs were intentionally not produced (their workflow branch was not taken) — treat their absence as by-design, do NOT invent their content.`,
     `- Output: write ALL products under the directory at $${E.OUTPUT_DIR}. Do NOT write anything outside that directory.`,
     `- Manifest (required): before you finish, write a JSON manifest to $${E.MANIFEST_PATH} with exactly this shape:`,
     '',
@@ -198,7 +205,16 @@ export function validateResult(filePath: string, schema: V3ResultSchema): Result
       : spec.type === 'boolean' ? typeof v === 'boolean'
       : spec.type === 'array' ? Array.isArray(v)
       : typeof v === 'object' && v !== null && !Array.isArray(v);
-    if (!okType) problems.push(`field "${name}" must be of type ${spec.type}`);
+    if (!okType) {
+      problems.push(`field "${name}" must be of type ${spec.type}`);
+      continue;
+    }
+    // Enum enforcement (edge-activation design §1.3): a declared vocabulary
+    // is part of the contract — an out-of-vocabulary value is `resultInvalid`
+    // (blocked, retryable), same as a type violation.
+    if (spec.type === 'string' && spec.enum && !spec.enum.includes(v as string)) {
+      problems.push(`field "${name}" must be one of [${spec.enum.join(', ')}] (got ${JSON.stringify(v)})`);
+    }
   }
   return problems.length > 0 ? { ok: false, problems } : { ok: true };
 }
@@ -713,7 +729,7 @@ export async function runWorkflow(
       ...bodyDef,
       id: loopInstanceId(ref.loopId, ref.iteration, ref.bodyNodeId),
       bot: bodyDef.bot ?? loopNode.bot,
-      depends: bodyDef.depends.map((d) => loopInstanceId(ref.loopId, ref.iteration, d)),
+      depends: bodyDef.depends.map((d) => ({ from: loopInstanceId(ref.loopId, ref.iteration, d.from) })),
       inputs: bodyDef.inputs.map((r) => ({ from: loopInstanceId(ref.loopId, ref.iteration, r.from) })),
     };
   }
@@ -821,9 +837,20 @@ export async function runWorkflow(
    *  every body node may read what the loop consumes — and (b) from iteration
    *  2 on, the previous iteration's `feedback` products, labeled
    *  `previous.<bodyId>` so the agent can tell rework context from fresh
-   *  upstream input. */
-  function buildInputs(node: V3Node, events: StoredEvent[], loopRef?: V3LoopRef): GoalInputs {
+   *  upstream input.
+   *
+   *  `omitted` (edge-activation design §6): declared inputs the engine layer
+   *  determined must NOT be injected (edge inactive / source skipped) — they
+   *  are excluded from resolution AND surfaced to the agent so the absence
+   *  reads as by-design.  Empty/absent → exactly today's behavior. */
+  function buildInputs(
+    node: V3Node,
+    events: StoredEvent[],
+    loopRef?: V3LoopRef,
+    omitted?: GoalInputs['omitted'],
+  ): GoalInputs {
     const inputs: GoalInputs['inputs'] = [];
+    const omittedFrom = new Set((omitted ?? []).map((o) => o.from));
 
     const latestSuccess = (nodeId: string) =>
       [...events]
@@ -852,7 +879,10 @@ export async function runWorkflow(
       }
     };
 
-    for (const ref of node.inputs) pushFrom(ref.from, ref.from);
+    for (const ref of node.inputs) {
+      if (omittedFrom.has(ref.from)) continue; // branch not taken — surfaced via `omitted`
+      pushFrom(ref.from, ref.from);
+    }
 
     if (loopRef) {
       const loopNode = nodesById.get(loopRef.loopId) as V3LoopNode;
@@ -889,6 +919,7 @@ export async function runWorkflow(
         seen.add(key);
         return true;
       }),
+      ...(omitted && omitted.length > 0 ? { omitted } : {}),
     };
   }
 }

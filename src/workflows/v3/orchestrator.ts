@@ -152,7 +152,9 @@ export function decideNext(
       const ls = loops.get(id);
       if (!ls) {
         // Not started: like a plain node, wait for outer deps.
-        const depsOk = node.depends.every((dep) => st(state, dep).status === 'done');
+        // NOTE(edge-activation): `.from`-only gating — `when` predicates and
+        // triggerRule are engine-layer work (design §5), landing next.
+        const depsOk = node.depends.every((dep) => st(state, dep.from).status === 'done');
         if (depsOk) actions.push({ kind: 'startLoop', loopId: id });
         continue;
       }
@@ -187,7 +189,7 @@ export function decideNext(
         if (bs.status === 'running' || bs.status === 'gateWaiting') continue;
         const bodyDef = bodyById.get(bodyId)!;
         const depsOk = bodyDef.depends.every(
-          (dep) => st(state, loopInstanceId(id, ls.iteration, dep)).status === 'done',
+          (dep) => st(state, loopInstanceId(id, ls.iteration, dep.from)).status === 'done',
         );
         if (!depsOk) continue;
         actions.push({
@@ -211,7 +213,9 @@ export function decideNext(
 
     // s.status === 'pending'
     pending++;
-    const depsOk = node.depends.every((dep) => st(state, dep).status === 'done');
+    // NOTE(edge-activation): `.from`-only gating — `when` predicates and
+    // triggerRule are engine-layer work (design §5), landing next.
+    const depsOk = node.depends.every((dep) => st(state, dep.from).status === 'done');
     if (!depsOk) continue;
 
     if (node.humanGate && !s.gateCleared) {
@@ -240,7 +244,7 @@ function currentInstanceIds(node: V3Node, loops: V3LoopRunState): string[] {
  *  output.  Pure helper for the runtime's success path. */
 export function findSinks(dag: V3Dag): string[] {
   const referenced = new Set<string>();
-  for (const node of dag.nodes) for (const dep of node.depends) referenced.add(dep);
+  for (const node of dag.nodes) for (const dep of node.depends) referenced.add(dep.from);
   return dag.nodes.map((n) => n.id).filter((id) => !referenced.has(id));
 }
 

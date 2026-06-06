@@ -93,6 +93,14 @@ export interface GoalInputs {
     kind: ManifestFileKind;
     preview?: string;
   }>;
+  /** Declared inputs NOT injected because their edge resolved inactive or
+   *  their source was skipped (edge-activation design §6).  Only meaningful
+   *  on one_success / quorum nodes — telling the agent "this absence is by
+   *  design" stops it from hallucinating the missing product. */
+  omitted?: Array<{
+    from: string;
+    reason: 'edgeInactive' | 'sourceSkipped';
+  }>;
 }
 
 // ─── goal-mode env contract (runtime fills, skill reads) ────────────────────

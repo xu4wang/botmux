@@ -63,19 +63,53 @@ export interface V3InputRef {
 }
 
 /**
+ * A normalized incoming edge (edge-activation design 2026-06-06 §1.1).
+ * Authored as either a plain string (`"build"`) or an object
+ * (`{ "from": "review", "when": {...} }`); validateDag normalizes both to this
+ * shape.  No `when` = unconditional (source `done` ⇒ active).  With `when`,
+ * the edge's activation is decided ONCE by the runtime reading the source's
+ * `result.json` and journaled as `edgeResolved` — never re-read afterwards.
+ *
+ * `from` values are deduped per node: P0 supports at most ONE edge per
+ * (from, to) pair, so `(from, to)` is a stable idempotency key for
+ * `edgeResolved`.  Express OR over outcomes inside the source's structured
+ * result instead of authoring parallel conditional edges.
+ */
+export interface V3DependRef {
+  from: string;
+  /** Predicate over the SOURCE node's structured result — same shape and
+   *  validation as a loop exit predicate (`result.<key>` + exactly one
+   *  comparison operator, declared + required + type-compatible). */
+  when?: V3EdgeWhen;
+}
+
+/** Edge predicates reuse the loop-exit predicate shape verbatim. */
+export type V3EdgeWhen = V3LoopExitWhen;
+
+/**
+ * Join semantics over a node's incoming edges (design §1.2).  Evaluated ONCE,
+ * only after every incoming edge has settled (source done/skipped and any
+ * predicate journaled) — no early release, no loser cancellation in P0.
+ */
+export type V3TriggerRule = 'all_success' | 'one_success' | { quorum: number };
+
+/**
  * Opt-in structured-output contract — a deliberately TINY subset of
  * JSON-Schema (flat object, primitive-typed properties, optional required
  * list).  Hand-validated (no deps, repo style); anything outside the subset
  * is rejected at validateDag time so the architect can never author a schema
  * the runtime's validator cannot execute.
  *
- * NOT supported (first slice): nested schemas, array item types, enums,
- * patterns.  `type:'array'|'object'` properties validate the TOP-LEVEL type
- * only.
+ * NOT supported (first slice): nested schemas, array item types, patterns.
+ * `type:'array'|'object'` properties validate the TOP-LEVEL type only.
+ * `enum` is supported on STRING properties only (edge-activation design §1.3)
+ * — it is the decision-vocabulary anchor for edge predicates: validateDag
+ * cross-checks `equals`/`notEquals` operands against the source field's enum,
+ * so a typo'd decision value fails at validate time, not at runtime.
  */
 export interface V3ResultSchema {
   type: 'object';
-  properties: Record<string, { type: V3ResultFieldType }>;
+  properties: Record<string, { type: V3ResultFieldType; enum?: string[] }>;
   required?: string[];
 }
 
@@ -87,6 +121,11 @@ const RESULT_FIELD_TYPES: readonly V3ResultFieldType[] = ['string', 'number', 'b
  *  goal prompt and the validator).  Checked at validateDag time. */
 export const RESULT_SCHEMA_MAX_PROPERTIES = 32;
 export const RESULT_SCHEMA_MAX_BYTES = 4096;
+
+/** Caps on a string property's `enum` (anti prompt-bloat; counted inside the
+ *  4KB schema budget like everything else). */
+export const RESULT_ENUM_MAX_VALUES = 16;
+export const RESULT_ENUM_MAX_VALUE_LENGTH = 64;
 
 /** Backstop ceiling for `maxIterations` — like the timeout cap, it rejects a
  *  runaway budget the architect might hallucinate; a human can still grant
@@ -144,8 +183,14 @@ export interface V3Node {
   /** Which bot/CLI runs this node.  MVP dogfoods a single CLI, but the field
    *  is per-node so a mixed-backend DAG is a non-breaking extension. */
   bot?: string;
-  /** Upstream node ids that must reach `done` before this node dispatches. */
-  depends: string[];
+  /** Normalized incoming edges.  Authored as `string | {from, when?}`;
+   *  validateDag normalizes to `V3DependRef[]` (edge-activation design §1.1).
+   *  Unconditional edges gate on source `done`; `when` edges additionally
+   *  gate on the journaled `edgeResolved` verdict. */
+  depends: V3DependRef[];
+  /** Join semantics over incoming edges; defaults to 'all_success' (exactly
+   *  today's behavior).  Only meaningful on nodes with ≥1 incoming edge. */
+  triggerRule?: V3TriggerRule;
   /** Upstream products to thread in as inputs (every `from` ⊆ `depends`). */
   inputs: V3InputRef[];
   /** Wall-clock budget in seconds; falls back to DEFAULT_NODE_TIMEOUT_SEC. */
@@ -249,9 +294,11 @@ function isObject(v: unknown): v is Record<string, unknown> {
  *
  * Checks: runId shape; non-empty unique path-safe node ids; known `type`;
  * `goal` non-empty for goal nodes; `host` rejected (executor not yet built);
- * `depends` reference existing nodes, no self-dep, no dups; `inputs.from`
- * reference existing nodes AND appear in `depends`; acyclic (delegated to
- * `topologicalOrder`).
+ * `depends` reference existing nodes, no self-dep, no dup `from` (P0: one
+ * edge per (from,to)); edge predicates validated against the SOURCE's
+ * resultSchema (goal-with-schema sources only); `triggerRule` shape/bounds;
+ * `inputs.from` reference existing nodes AND appear in `depends`; acyclic
+ * (delegated to `topologicalOrder`, conditional edges included).
  */
 export function validateDag(raw: unknown): V3Dag {
   const problems: string[] = [];
@@ -268,6 +315,9 @@ export function validateDag(raw: unknown): V3Dag {
 
   const ids = new Set<string>();
   const nodes: V3Node[] = [];
+  // Edge predicates parked until every node (and thus every source's
+  // resultSchema) is collected — validated in the cross-node pass below.
+  const pendingWhens: PendingWhen[] = [];
 
   for (let i = 0; i < raw.nodes.length; i++) {
     const n = raw.nodes[i];
@@ -297,9 +347,12 @@ export function validateDag(raw: unknown): V3Dag {
       continue;
     }
 
-    const depends = normStringArray(n.depends, `node "${id}".depends`, problems);
-    if (depends.includes(id)) problems.push(`node "${id}" depends on itself`);
-    if (new Set(depends).size !== depends.length) problems.push(`node "${id}".depends has duplicates`);
+    const depends = normDepends(n.depends, `node "${id}"`, problems, { ownerId: id, list: pendingWhens });
+    const fromList = depends.map((d) => d.from);
+    if (fromList.includes(id)) problems.push(`node "${id}" depends on itself`);
+    if (new Set(fromList).size !== fromList.length) problems.push(`node "${id}".depends has duplicates`);
+
+    const triggerRule = normTriggerRule(n.triggerRule, depends.length, `node "${id}"`, problems);
 
     const inputs = normInputs(n.inputs, id, problems);
 
@@ -312,6 +365,7 @@ export function validateDag(raw: unknown): V3Dag {
           goal: typeof n.goal === 'string' ? n.goal : undefined,
           bot: typeof n.bot === 'string' ? n.bot : undefined,
           depends,
+          triggerRule,
           inputs,
           humanGate: null,
           ...loopFields,
@@ -343,6 +397,7 @@ export function validateDag(raw: unknown): V3Dag {
       goal: typeof n.goal === 'string' ? n.goal : undefined,
       bot: typeof n.bot === 'string' ? n.bot : undefined,
       depends,
+      triggerRule,
       inputs,
       timeoutSec,
       humanGate,
@@ -353,15 +408,43 @@ export function validateDag(raw: unknown): V3Dag {
   // Cross-node reference checks — only meaningful once ids are collected.
   for (const node of nodes) {
     for (const dep of node.depends) {
-      if (!ids.has(dep)) problems.push(`node "${node.id}" depends on unknown node "${dep}"`);
+      if (!ids.has(dep.from)) problems.push(`node "${node.id}" depends on unknown node "${dep.from}"`);
     }
     for (const inp of node.inputs) {
       if (!ids.has(inp.from)) {
         problems.push(`node "${node.id}".inputs references unknown node "${inp.from}"`);
-      } else if (!node.depends.includes(inp.from)) {
+      } else if (!node.depends.some((d) => d.from === inp.from)) {
         problems.push(`node "${node.id}".inputs.from "${inp.from}" must also be in depends`);
       }
     }
+  }
+
+  // Edge-predicate validation (design §2): the source must be a goal node
+  // declaring a resultSchema — loop sources are forbidden in P0 (a loop's
+  // outward manifest belongs to its output-projection body node; put an
+  // explicit verifier goal after the loop instead), and host sources are
+  // unreachable (host itself is rejected above).  The predicate reuses the
+  // loop-exit validator: declared + required key, exactly one operator,
+  // type-compatible, enum-reconciled.
+  const nodeById = new Map(nodes.map((nn) => [nn.id, nn]));
+  for (const pw of pendingWhens) {
+    const source = nodeById.get(pw.ref.from);
+    if (!source) continue; // unknown `from` already reported above
+    if (source.type !== 'goal') {
+      problems.push(
+        `${pw.where}: conditional edge source "${pw.ref.from}" must be a goal node ` +
+          `(P0 forbids loop sources — add a verifier goal after the loop and branch on ITS result)`,
+      );
+      continue;
+    }
+    if (!source.resultSchema) {
+      problems.push(
+        `${pw.where}: conditional edge source "${pw.ref.from}" must declare a resultSchema — the predicate reads its structured result`,
+      );
+      continue;
+    }
+    const when = normLoopExitWhen(pw.raw, source.resultSchema, pw.where, problems);
+    if (when) pw.ref.when = when;
   }
 
   // Loop expansion namespace guard: iteration instances run under
@@ -395,6 +478,110 @@ function normStringArray(v: unknown, where: string, problems: string[]): string[
     return [];
   }
   return v as string[];
+}
+
+/** An edge predicate parked during the per-node pass: validated against the
+ *  SOURCE node's resultSchema in the cross-node pass, then written back into
+ *  `ref.when`. */
+interface PendingWhen {
+  where: string;
+  ref: V3DependRef;
+  raw: Record<string, unknown>;
+}
+
+/**
+ * Normalize a `depends` array of `string | { from, when? }` entries into
+ * `V3DependRef[]`.  `when` objects are NOT validated here (the source's
+ * resultSchema may not be collected yet) — they are parked in `whenSink` for
+ * the cross-node pass.  `whenSink === undefined` means conditional edges are
+ * not allowed in this position (loop bodies, first cut).
+ */
+function normDepends(
+  v: unknown,
+  where: string,
+  problems: string[],
+  whenSink?: { ownerId: string; list: PendingWhen[] },
+): V3DependRef[] {
+  if (v === undefined) return [];
+  if (!Array.isArray(v)) {
+    problems.push(`${where}.depends must be an array of nodeId strings or { from, when? } objects`);
+    return [];
+  }
+  const out: V3DependRef[] = [];
+  for (let j = 0; j < v.length; j++) {
+    const entry = v[j];
+    if (typeof entry === 'string') {
+      out.push({ from: entry });
+      continue;
+    }
+    if (isObject(entry) && typeof entry.from === 'string') {
+      const extra = Object.keys(entry).filter((k) => k !== 'from' && k !== 'when');
+      if (extra.length > 0) {
+        problems.push(`${where}.depends[${j}] has unsupported key(s): ${extra.join(', ')} (allowed: from, when)`);
+        continue;
+      }
+      const ref: V3DependRef = { from: entry.from };
+      if (entry.when !== undefined) {
+        if (!whenSink) {
+          problems.push(`${where}.depends[${j}].when: conditional edges are not supported inside a loop body (first cut)`);
+          continue;
+        }
+        if (!isObject(entry.when)) {
+          problems.push(`${where}.depends[${j}].when must be an object`);
+          continue;
+        }
+        whenSink.list.push({
+          where: `${where}.depends[${j}].when (edge "${entry.from}" -> "${whenSink.ownerId}")`,
+          ref,
+          raw: entry.when,
+        });
+      }
+      out.push(ref);
+      continue;
+    }
+    problems.push(`${where}.depends[${j}] must be a nodeId string or { from, when? }`);
+  }
+  return out;
+}
+
+/**
+ * Validate `triggerRule` (design §1.2).  Bounds depend on the node's indegree:
+ * a join rule on a node with no incoming edges is an authoring error, and a
+ * quorum must be satisfiable (1..indegree).
+ */
+function normTriggerRule(
+  v: unknown,
+  indegree: number,
+  where: string,
+  problems: string[],
+): V3TriggerRule | undefined {
+  if (v === undefined) return undefined;
+  if (v === 'all_success' || v === 'one_success') {
+    if (indegree === 0) {
+      problems.push(`${where}.triggerRule requires at least one incoming edge (depends is empty)`);
+      return undefined;
+    }
+    return v;
+  }
+  if (isObject(v)) {
+    const extra = Object.keys(v).filter((k) => k !== 'quorum');
+    if (extra.length > 0) {
+      problems.push(`${where}.triggerRule object only supports { quorum: N } (got extra: ${extra.join(', ')})`);
+      return undefined;
+    }
+    if (indegree === 0) {
+      problems.push(`${where}.triggerRule requires at least one incoming edge (depends is empty)`);
+      return undefined;
+    }
+    const q = v.quorum;
+    if (typeof q !== 'number' || !Number.isInteger(q) || q < 1 || q > indegree) {
+      problems.push(`${where}.triggerRule.quorum must be an integer in [1, ${indegree}] (got ${JSON.stringify(q)})`);
+      return undefined;
+    }
+    return { quorum: q };
+  }
+  problems.push(`${where}.triggerRule must be 'all_success' | 'one_success' | { quorum: N }`);
+  return undefined;
 }
 
 function normTimeoutSec(v: unknown, where: string, problems: string[]): number | undefined {
@@ -488,9 +675,14 @@ function normLoopFields(
     if (b.humanGate != null) {
       problems.push(`${where}.body node "${bid}".humanGate is not supported inside a loop body (first cut)`);
     }
-    const bdepends = normStringArray(b.depends, `${where}.body node "${bid}".depends`, problems);
-    if (bdepends.includes(bid)) problems.push(`${where}.body node "${bid}" depends on itself`);
-    if (new Set(bdepends).size !== bdepends.length) problems.push(`${where}.body node "${bid}".depends has duplicates`);
+    if (b.triggerRule !== undefined) {
+      problems.push(`${where}.body node "${bid}".triggerRule is not supported inside a loop body (first cut)`);
+    }
+    // No whenSink: conditional edges are rejected inside a body (first cut).
+    const bdepends = normDepends(b.depends, `${where}.body node "${bid}"`, problems);
+    const bFromList = bdepends.map((d) => d.from);
+    if (bFromList.includes(bid)) problems.push(`${where}.body node "${bid}" depends on itself`);
+    if (new Set(bFromList).size !== bFromList.length) problems.push(`${where}.body node "${bid}".depends has duplicates`);
     const binputs = normInputs(b.inputs, `${id}.body.${bid}`, problems);
     const btimeout = normTimeoutSec(b.timeoutSec, `${where}.body node "${bid}"`, problems);
     const bschema = normResultSchema(b.resultSchema, `${id}.body.${bid}`, problems);
@@ -509,12 +701,12 @@ function normLoopFields(
   // Body-internal references.
   for (const bn of bodyNodes) {
     for (const dep of bn.depends) {
-      if (!bodyIds.has(dep)) problems.push(`${where}.body node "${bn.id}" depends on unknown body node "${dep}"`);
+      if (!bodyIds.has(dep.from)) problems.push(`${where}.body node "${bn.id}" depends on unknown body node "${dep.from}"`);
     }
     for (const inp of bn.inputs) {
       if (!bodyIds.has(inp.from)) {
         problems.push(`${where}.body node "${bn.id}".inputs references unknown body node "${inp.from}"`);
-      } else if (!bn.depends.includes(inp.from)) {
+      } else if (!bn.depends.some((d) => d.from === inp.from)) {
         problems.push(`${where}.body node "${bn.id}".inputs.from "${inp.from}" must also be in depends`);
       }
     }
@@ -659,6 +851,15 @@ function normLoopExitWhen(
       problems.push(`${where}.${op} must be a ${prop.type} to match "${key}"`);
       return undefined;
     }
+    // Enum reconciliation (edge-activation design §2.3): when the field
+    // declares a vocabulary, an operand outside it is a validate-time typo,
+    // not a runtime surprise — the seedclaw `decision_values` equivalent.
+    if (prop.type === 'string' && prop.enum && !prop.enum.includes(operand as string)) {
+      problems.push(
+        `${where}.${op} value ${JSON.stringify(operand)} is not in "${key}"'s enum [${prop.enum.join(', ')}]`,
+      );
+      return undefined;
+    }
   }
   return { path: v.path as string, [op]: operand } as V3LoopExitWhen;
 }
@@ -696,15 +897,15 @@ function normResultSchema(v: unknown, id: string, problems: string[]): V3ResultS
     problems.push(`${where} has ${props.length} properties (max ${RESULT_SCHEMA_MAX_PROPERTIES})`);
     return undefined;
   }
-  const properties: Record<string, { type: V3ResultFieldType }> = {};
+  const properties: Record<string, { type: V3ResultFieldType; enum?: string[] }> = {};
   for (const [name, spec] of props) {
     if (!isObject(spec)) {
       problems.push(`${where}.properties.${name} must be an object`);
       return undefined;
     }
     for (const key of Object.keys(spec)) {
-      if (key !== 'type') {
-        problems.push(`${where}.properties.${name} has unsupported keyword "${key}" (subset allows: type)`);
+      if (key !== 'type' && key !== 'enum') {
+        problems.push(`${where}.properties.${name} has unsupported keyword "${key}" (subset allows: type, enum)`);
         return undefined;
       }
     }
@@ -712,7 +913,34 @@ function normResultSchema(v: unknown, id: string, problems: string[]): V3ResultS
       problems.push(`${where}.properties.${name}.type must be one of ${RESULT_FIELD_TYPES.join(' | ')}`);
       return undefined;
     }
-    properties[name] = { type: spec.type as V3ResultFieldType };
+    let enumValues: string[] | undefined;
+    if (spec.enum !== undefined) {
+      // enum on STRING fields only (edge-activation design §1.3) — it anchors
+      // edge-predicate vocabulary; other types have nothing to enumerate.
+      if (spec.type !== 'string') {
+        problems.push(`${where}.properties.${name}.enum is only supported on string fields (it is ${String(spec.type)})`);
+        return undefined;
+      }
+      if (!Array.isArray(spec.enum) || spec.enum.length === 0 || spec.enum.some((x) => typeof x !== 'string' || x.length === 0)) {
+        problems.push(`${where}.properties.${name}.enum must be a non-empty array of non-empty strings`);
+        return undefined;
+      }
+      if (spec.enum.length > RESULT_ENUM_MAX_VALUES) {
+        problems.push(`${where}.properties.${name}.enum has ${spec.enum.length} values (max ${RESULT_ENUM_MAX_VALUES})`);
+        return undefined;
+      }
+      if (new Set(spec.enum).size !== spec.enum.length) {
+        problems.push(`${where}.properties.${name}.enum has duplicates`);
+        return undefined;
+      }
+      const tooLong = (spec.enum as string[]).filter((x) => x.length > RESULT_ENUM_MAX_VALUE_LENGTH);
+      if (tooLong.length > 0) {
+        problems.push(`${where}.properties.${name}.enum value(s) exceed ${RESULT_ENUM_MAX_VALUE_LENGTH} chars: ${tooLong.join(', ')}`);
+        return undefined;
+      }
+      enumValues = spec.enum as string[];
+    }
+    properties[name] = enumValues ? { type: spec.type as V3ResultFieldType, enum: enumValues } : { type: spec.type as V3ResultFieldType };
   }
   let required: string[] | undefined;
   if (v.required !== undefined) {
@@ -798,9 +1026,12 @@ export function topologicalOrder(dag: V3Dag): string[] {
     if (!adj.has(node.id)) adj.set(node.id, []);
   }
   for (const node of dag.nodes) {
+    // Conditional and unconditional edges alike count for ordering/acyclicity
+    // (edge-activation design H2): an edge that may never activate is still a
+    // structural edge — the graph must be acyclic regardless of run outcomes.
     for (const dep of node.depends) {
       indeg.set(node.id, (indeg.get(node.id) ?? 0) + 1);
-      adj.get(dep)!.push(node.id);
+      adj.get(dep.from)!.push(node.id);
     }
   }
 
