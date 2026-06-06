@@ -101,14 +101,14 @@ function botWorkingDir(bot: BotConfig, override: string | undefined): string {
  *  Non-TTY without `--yes` rejects with a clear message (gates need a human or
  *  the daemon's card). */
 function makeAwaitDecision(autoApprove: boolean) {
-  return async (wait: GateWait): Promise<{ resolution: 'approved' | 'rejected'; by: string }> => {
+  return async (wait: GateWait): Promise<{ resolution: 'approved' | 'rejected'; by: string; selected?: string }> => {
     if (autoApprove) {
       console.log(`\n🔓 [gate ${wait.nodeId}] 自动批准 (--yes): ${wait.prompt}`);
-      return { resolution: 'approved', by: 'cli:--yes' };
+      return { resolution: 'approved', by: 'cli:--yes', selected: wait.approveOptions[0] };
     }
     if (!process.stdin.isTTY) {
       console.error(`\n⛔ [gate ${wait.nodeId}] 需要人工批准但 stdin 非交互；用 --yes 自动批准，或在 daemon 内跑以走飞书审批卡片。`);
-      return { resolution: 'rejected', by: 'cli:non-tty' };
+      return { resolution: 'rejected', by: 'cli:non-tty', selected: firstRejectOption(wait) };
     }
     const rl = createInterface({ input: process.stdin, output: process.stdout });
     try {
@@ -116,11 +116,19 @@ function makeAwaitDecision(autoApprove: boolean) {
         rl.question(`\n🛑 [gate ${wait.nodeId}] ${wait.prompt}\n   批准? (y/N): `, res);
       })).trim().toLowerCase();
       const approved = answer === 'y' || answer === 'yes';
-      return { resolution: approved ? 'approved' : 'rejected', by: 'cli:tty' };
+      return {
+        resolution: approved ? 'approved' : 'rejected',
+        by: 'cli:tty',
+        selected: approved ? wait.approveOptions[0] : firstRejectOption(wait),
+      };
     } finally {
       rl.close();
     }
   };
+}
+
+function firstRejectOption(wait: GateWait): string | undefined {
+  return wait.options.find((opt) => !wait.approveOptions.includes(opt));
 }
 
 function parseArgs(rest: string[]): V3RunArgs {

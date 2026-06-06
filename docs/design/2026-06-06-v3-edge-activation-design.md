@@ -413,3 +413,35 @@ validateDag 的 fail-loud 立场覆盖新字段的非法形态。
 
 顺序所有权：schema 层（claude）先合入 → 引擎层（codex）基于其上 → 各自测试
 随模块走 + 一套共享的 golden 重放套件。
+
+## 12. P1 附录：humanGate options / approvers
+
+P1 只扩展 humanGate 的审批表达力，不引入任意 option goto；流程控制仍是
+二值 gate：
+
+```ts
+humanGate: {
+  prompt: string,
+  options?: string[],
+  approveOptions?: string[],
+  approvers?: string[],
+}
+```
+
+- `options` 缺省为 `['approve', 'reject']`；必须非空、去重，最多 8 个，每个
+  option 最多 32 字符。
+- `approveOptions` 必须是 `options` 的非空子集；缺省规则是：若 options 含
+  `approve`，则为 `['approve']`，否则取 `options[0]`。
+- `approvers` 是 open_id 白名单；空数组或缺省表示不额外限制，仍受 daemon
+  外层 `canOperate` 权限约束。
+- 卡片按 `options` 渲染按钮，按钮 value 带 `selected`；runtime / daemon 将
+  `selected ∈ approveOptions` 映射为 `resolution:'approved'`，否则映射为
+  `resolution:'rejected'`。
+- `gateResolved` 增加可选 `selected` 字段；materialize 继续只看旧的
+  `resolution` 二值字段，因此旧 journal 无 `selected` 时重放语义不变。
+- wait 文件持久化 `options` / `approveOptions` / `approvers` / `selected`；
+  daemon 冷启动重挂卡片时从 wait 文件恢复按钮和白名单。若 crash 发生在
+  `gateDispatched` 后、wait 文件写入前，则从已验证 dag 的 humanGate 配置重建
+  wait 文件。
+- approver allowlist 在 wait 权威层校验；非白名单点击返回 toast，不改 wait，
+  不追加 `gateResolved`，不 redrive。

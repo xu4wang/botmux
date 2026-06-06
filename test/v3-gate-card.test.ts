@@ -35,9 +35,24 @@ describe('v3-gate-card — buildV3GateCard', () => {
     const reject = vals.find((v) => v.action === V3_GATE_REJECT_ACTION);
     expect(approve).toEqual({
       action: V3_GATE_APPROVE_ACTION, runId: base.runId, waitId: base.waitId, nodeId: base.nodeId,
-      nonce: v3GateCardNonce(base.runId, base.waitId),
+      nonce: v3GateCardNonce(base.runId, base.waitId), selected: 'approve',
     });
-    expect(reject).toMatchObject({ action: V3_GATE_REJECT_ACTION, runId: base.runId, waitId: base.waitId });
+    expect(reject).toMatchObject({ action: V3_GATE_REJECT_ACTION, runId: base.runId, waitId: base.waitId, selected: 'reject' });
+  });
+
+  it('custom options：每个 option 渲染按钮，approveOptions 映射 primary/approve action', () => {
+    const card = parse(buildV3GateCard({
+      ...base,
+      options: ['ship', 'hold', 'cancel'],
+      approveOptions: ['ship'],
+    }));
+    const actionEl = card.elements.find((el: any) => el.tag === 'action' && el.actions?.some((a: any) => a.value?.selected === 'ship'));
+    const buttons = actionEl.actions;
+    expect(buttons.map((b: any) => b.value.selected)).toEqual(['ship', 'hold', 'cancel']);
+    expect(buttons[0].type).toBe('primary');
+    expect(buttons[0].value.action).toBe(V3_GATE_APPROVE_ACTION);
+    expect(buttons[1].type).toBe('danger');
+    expect(buttons[1].value.action).toBe(V3_GATE_REJECT_ACTION);
   });
 
   it('resolution=approved → green header、无 approve/reject 按钮（冻结防重复点）', () => {

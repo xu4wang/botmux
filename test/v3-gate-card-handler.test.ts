@@ -26,8 +26,14 @@ describe('isV3GateAction', () => {
 
 describe('handleV3GateAction', () => {
   it('resolved → 返回冻结卡（green header / 已通过）+ driveRun 被调一次', async () => {
-    const { deps: d, driveRun } = deps({ resolveClick: () => ({ kind: 'resolved', resolution: 'approved' }) });
+    const resolveClick = vi.fn(() => ({ kind: 'resolved', resolution: 'approved' } as const));
+    const { deps: d, driveRun } = deps({ resolveClick: resolveClick as any });
     const res = await handleV3GateAction(VALUE, 'ou_user', d) as any;
+    expect(resolveClick).toHaveBeenCalledWith('/tmp/x', 'r1', {
+      waitId: 'deploy-gate',
+      selected: 'approve',
+      by: 'ou_user',
+    });
     expect(driveRun).toHaveBeenCalledWith('r1');
     expect(res.header.template).toBe('green');
     expect(res.header.title.content).toContain('已通过');
@@ -61,6 +67,13 @@ describe('handleV3GateAction', () => {
     expect(resolveClick).not.toHaveBeenCalled();
     expect(driveRun).not.toHaveBeenCalled();
     expect(res.toast.content).toContain('权限');
+  });
+
+  it('core unauthorized → 审批人名单 toast，不 driveRun', async () => {
+    const { deps: d, driveRun } = deps({ resolveClick: () => ({ kind: 'unauthorized' }) });
+    const res = await handleV3GateAction(VALUE, 'ou_stranger', d) as any;
+    expect(driveRun).not.toHaveBeenCalled();
+    expect(res.toast.content).toContain('审批人');
   });
 
   it('resolveClick throw（append 失败）→ error toast，不假装成功（codex #5）', async () => {

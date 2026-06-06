@@ -1489,7 +1489,15 @@ function fireSessionlessCommandDetached(
 // run logic + in-flight guard live in createV3GateRunner.
 const v3GateRunner = createV3GateRunner({
   postCard: async (binding, gate, runId) => {
-    const card = buildV3GateCard({ runId, waitId: gate.waitId, nodeId: gate.nodeId, prompt: gate.prompt });
+    const card = buildV3GateCard({
+      runId,
+      waitId: gate.waitId,
+      nodeId: gate.nodeId,
+      prompt: gate.prompt,
+      options: gate.options,
+      approveOptions: gate.approveOptions,
+      approvers: gate.approvers,
+    });
     // codex blocker #3: never silently skip — a missing rootMessageId would
     // leave the run stuck at awaitingGate forever.  Reply in-thread when we have
     // an anchor; otherwise post to the chat directly.

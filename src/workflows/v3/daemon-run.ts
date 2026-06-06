@@ -38,7 +38,15 @@ import {
   type RunChatBinding,
 } from './grill-state.js';
 import { resolveBotConfig, botToSnapshot } from './bot-resolve.js';
-import { readWait, resolveWait, writePendingWait, type GateWaitStatus } from './human-gate.js';
+import {
+  canResolveGateWait,
+  normalizeGateWaitInput,
+  readWait,
+  resolveWait,
+  selectedResolution,
+  writePendingWait,
+  type GateWaitStatus,
+} from './human-gate.js';
 import { readJournal, appendEvent, type StoredEvent, type V3ErrorClass } from './journal.js';
 import { materialize } from './state.js';
 import { isValidRunId } from './ops-projection.js';
@@ -220,6 +228,7 @@ function defaultMakeRunNode(
 export type V3GateClickOutcome =
   | { kind: 'resolved'; resolution: 'approved' | 'rejected' }
   | { kind: 'already-settled'; status: GateWaitStatus }
+  | { kind: 'unauthorized' }
   | { kind: 'stale-run'; reason: 'terminal' | 'missing' | 'no-wait' };
 
 /**
@@ -241,7 +250,7 @@ export type V3GateClickOutcome =
 export function resolveV3GateClick(
   baseDir: string,
   runId: string,
-  input: { waitId: string; resolution: 'approved' | 'rejected'; by: string },
+  input: { waitId: string; selected: string; by: string },
 ): V3GateClickOutcome {
   const runDir = safeRunDir(baseDir, runId);
   const journalPath = join(runDir, 'journal.ndjson');
@@ -252,8 +261,11 @@ export function resolveV3GateClick(
   const wait = readWait(runDir, input.waitId);
   if (!wait) return { kind: 'stale-run', reason: 'no-wait' };
   if (wait.status !== 'pending') return { kind: 'already-settled', status: wait.status };
+  if (!canResolveGateWait(wait, input.by)) return { kind: 'unauthorized' };
+  const resolution = selectedResolution(wait, input.selected);
+  if (!resolution) return { kind: 'stale-run', reason: 'no-wait' };
 
-  resolveWait(runDir, input.waitId, input.resolution, input.by);
+  resolveWait(runDir, input.waitId, resolution, input.by, input.selected);
   appendEvent(journalPath, {
     type: 'gateResolved',
     // nodeId from the WAIT FILE, not caller input (codex review #1): the wait is
@@ -261,10 +273,11 @@ export function resolveV3GateClick(
     // gateResolved for a different node.
     nodeId: wait.nodeId,
     waitId: input.waitId,
-    resolution: input.resolution,
+    resolution,
     by: input.by,
+    selected: input.selected,
   });
-  return { kind: 'resolved', resolution: input.resolution };
+  return { kind: 'resolved', resolution };
 }
 
 export type V3RetryOutcome =
@@ -666,11 +679,11 @@ function reconcileOneRun(
   if (ownerLarkAppId && binding?.larkAppId !== ownerLarkAppId) return undefined;
 
   // dag (for humanGate.prompt when re-creating a missing wait).
-  const dagNodePrompt = new Map<string, string>();
+  const dagNodeGate = new Map<string, ReturnType<typeof normalizeGateWaitInput>>();
   if (grill?.dagPath && existsSync(grill.dagPath)) {
     try {
       for (const n of loadDag(grill.dagPath).nodes) {
-        if (n.humanGate?.prompt) dagNodePrompt.set(n.id, n.humanGate.prompt);
+        if (n.humanGate?.prompt) dagNodeGate.set(n.id, normalizeGateWaitInput(n.humanGate));
       }
     } catch {
       /* dag unreadable — fall back to a generic prompt below */
@@ -683,16 +696,28 @@ function reconcileOneRun(
     const waitId = `${nodeId}-gate`;
     let wait = readWait(runDir, waitId);
     if (!wait) {
-      const prompt = dagNodePrompt.get(nodeId) ?? '(humanGate — 等待人工审批)';
-      wait = writePendingWait(runDir, { waitId, nodeId, prompt });
+      const gate = dagNodeGate.get(nodeId) ?? normalizeGateWaitInput({ prompt: '(humanGate — 等待人工审批)' });
+      wait = writePendingWait(runDir, { waitId, nodeId, ...gate });
     }
     if (wait.status === 'pending') {
-      repost.push({ nodeId, waitId, prompt: wait.prompt });
+      repost.push({
+        nodeId,
+        waitId,
+        prompt: wait.prompt,
+        options: wait.options,
+        approveOptions: wait.approveOptions,
+        approvers: wait.approvers,
+      });
     } else {
       // resolved wait but node still gateWaiting → journal lost gateResolved → heal.
       // nodeId from the wait file (authoritative, codex #1).
       appendEvent(journalPath, {
-        type: 'gateResolved', nodeId: wait.nodeId, waitId, resolution: wait.status, by: wait.by ?? 'system',
+        type: 'gateResolved',
+        nodeId: wait.nodeId,
+        waitId,
+        resolution: wait.status,
+        by: wait.by ?? 'system',
+        selected: wait.selected,
       });
       resume = true;
     }

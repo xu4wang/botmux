@@ -18,11 +18,13 @@
  *     `listPendingWaits`.
  *
  * The wait shape mirrors v0.2's `waitKind: 'human-gate'` lineage but is
- * deliberately minimal for the MVP (no deadline / allow-list yet).
+ * deliberately scoped to v3's gate needs: no deadline, but options /
+ * approveOptions / approvers are persisted for crash-safe card recovery.
  */
 
 import { writeFileSync, readFileSync, existsSync, mkdirSync, renameSync, readdirSync } from 'node:fs';
 import { join } from 'node:path';
+import { DEFAULT_HUMAN_GATE_OPTIONS, type V3HumanGate } from './dag.js';
 import type { V3RuntimeDeps } from './runtime.js';
 
 export type GateWaitStatus = 'pending' | 'approved' | 'rejected';
@@ -31,11 +33,16 @@ export interface GateWait {
   waitId: string;
   nodeId: string;
   prompt: string;
+  options: string[];
+  approveOptions: string[];
+  approvers: string[];
   status: GateWaitStatus;
   createdAt: number;
   resolvedAt?: number;
   /** open_id (or 'system') of the resolver, once resolved. */
   by?: string;
+  /** The concrete option selected by the reviewer. */
+  selected?: string;
 }
 
 /** The concrete (non-optional) shape the runtime injects as `resolveGate`. */
@@ -64,12 +71,18 @@ function atomicWriteJson(path: string, value: unknown): void {
  *  file at the same waitId (a re-dispatched gate). */
 export function writePendingWait(
   runDir: string,
-  input: { waitId: string; nodeId: string; prompt: string },
+  input: { waitId: string; nodeId: string; prompt: string } &
+    Partial<Pick<GateWait, 'options' | 'approveOptions' | 'approvers'>>,
 ): GateWait {
+  const options = input.options ?? [...DEFAULT_HUMAN_GATE_OPTIONS];
+  const approveOptions = input.approveOptions ?? (options.includes('approve') ? ['approve'] : [options[0]!]);
   const wait: GateWait = {
     waitId: input.waitId,
     nodeId: input.nodeId,
     prompt: input.prompt,
+    options,
+    approveOptions,
+    approvers: input.approvers ?? [],
     status: 'pending',
     createdAt: Date.now(),
   };
@@ -81,7 +94,7 @@ export function writePendingWait(
 export function readWait(runDir: string, waitId: string): GateWait | undefined {
   const path = waitPath(runDir, waitId);
   if (!existsSync(path)) return undefined;
-  return JSON.parse(readFileSync(path, 'utf-8')) as GateWait;
+  return normalizeWaitFile(JSON.parse(readFileSync(path, 'utf-8')) as Partial<GateWait>);
 }
 
 /** Transition a wait to approved / rejected.  Throws if the wait is missing
@@ -91,12 +104,35 @@ export function resolveWait(
   waitId: string,
   resolution: 'approved' | 'rejected',
   by: string,
+  selected?: string,
 ): GateWait {
   const existing = readWait(runDir, waitId);
   if (!existing) throw new Error(`v3 human-gate: no pending wait "${waitId}" in ${runDir}`);
-  const resolved: GateWait = { ...existing, status: resolution, resolvedAt: Date.now(), by };
+  const resolved: GateWait = { ...existing, status: resolution, resolvedAt: Date.now(), by, selected };
   atomicWriteJson(waitPath(runDir, waitId), resolved);
   return resolved;
+}
+
+export function normalizeGateWaitInput(gate: V3HumanGate): Pick<GateWait, 'prompt' | 'options' | 'approveOptions' | 'approvers'> {
+  const options = gate.options ?? [...DEFAULT_HUMAN_GATE_OPTIONS];
+  return {
+    prompt: gate.prompt,
+    options,
+    approveOptions: gate.approveOptions ?? (options.includes('approve') ? ['approve'] : [options[0]!]),
+    approvers: gate.approvers ?? [],
+  };
+}
+
+export function selectedResolution(
+  wait: Pick<GateWait, 'options' | 'approveOptions'>,
+  selected: string,
+): 'approved' | 'rejected' | undefined {
+  if (!wait.options.includes(selected)) return undefined;
+  return wait.approveOptions.includes(selected) ? 'approved' : 'rejected';
+}
+
+export function canResolveGateWait(wait: Pick<GateWait, 'approvers'>, by: string | undefined): boolean {
+  return wait.approvers.length === 0 || (!!by && wait.approvers.includes(by));
 }
 
 /** All still-pending waits in the runDir — the daemon's restart-recovery scan
@@ -108,13 +144,30 @@ export function listPendingWaits(runDir: string): GateWait[] {
   for (const name of readdirSync(dir)) {
     if (!name.endsWith('.json') || name.endsWith('.tmp')) continue;
     try {
-      const wait = JSON.parse(readFileSync(join(dir, name), 'utf-8')) as GateWait;
+      const wait = normalizeWaitFile(JSON.parse(readFileSync(join(dir, name), 'utf-8')) as Partial<GateWait>);
       if (wait.status === 'pending') out.push(wait);
     } catch {
       // skip a torn / unparseable wait file (mid-write crash)
     }
   }
   return out;
+}
+
+function normalizeWaitFile(raw: Partial<GateWait>): GateWait {
+  const options = raw.options ?? [...DEFAULT_HUMAN_GATE_OPTIONS];
+  return {
+    waitId: raw.waitId ?? '',
+    nodeId: raw.nodeId ?? '',
+    prompt: raw.prompt ?? '',
+    options,
+    approveOptions: raw.approveOptions ?? (options.includes('approve') ? ['approve'] : [options[0]!]),
+    approvers: raw.approvers ?? [],
+    status: raw.status ?? 'pending',
+    createdAt: raw.createdAt ?? 0,
+    resolvedAt: raw.resolvedAt,
+    by: raw.by,
+    selected: raw.selected,
+  };
 }
 
 // ─── Gate resolver (injected into the runtime) ──────────────────────────────
@@ -130,12 +183,12 @@ export function listPendingWaits(runDir: string): GateWait[] {
  * IO, which is why this factory is unit-testable with a fake decision source.
  */
 export function createFileGate(deps: {
-  awaitDecision: (wait: GateWait) => Promise<{ resolution: 'approved' | 'rejected'; by: string }>;
+  awaitDecision: (wait: GateWait) => Promise<{ resolution: 'approved' | 'rejected'; by: string; selected?: string }>;
 }): GateResolver {
   return async ({ nodeId, prompt, waitId, runDir }) => {
     const wait = writePendingWait(runDir, { waitId, nodeId, prompt });
-    const { resolution, by } = await deps.awaitDecision(wait);
-    resolveWait(runDir, waitId, resolution, by);
-    return resolution;
+    const { resolution, by, selected } = await deps.awaitDecision(wait);
+    resolveWait(runDir, waitId, resolution, by, selected);
+    return { resolution, by, selected };
   };
 }

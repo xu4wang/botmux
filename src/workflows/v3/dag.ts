@@ -48,7 +48,17 @@ export const MAX_NODE_TIMEOUT_SEC = 14400;
 export interface V3HumanGate {
   /** Approval-card body shown to the human reviewer. */
   prompt: string;
+  /** Button option keys shown on the approval card. */
+  options?: string[];
+  /** Selecting any of these options maps to `resolution:'approved'`. */
+  approveOptions?: string[];
+  /** Empty = any operator allowed by the outer daemon permission gate. */
+  approvers?: string[];
 }
+
+export const DEFAULT_HUMAN_GATE_OPTIONS: readonly string[] = ['approve', 'reject'];
+export const MAX_HUMAN_GATE_OPTIONS = 8;
+export const MAX_HUMAN_GATE_OPTION_LENGTH = 32;
 
 /**
  * Declares that this node consumes an upstream node's products.  MVP pulls the
@@ -382,14 +392,7 @@ export function validateDag(raw: unknown): V3Dag {
 
     const resultSchema = normResultSchema(n.resultSchema, id, problems);
 
-    let humanGate: V3HumanGate | null = null;
-    if (n.humanGate != null) {
-      if (!isObject(n.humanGate) || typeof n.humanGate.prompt !== 'string' || n.humanGate.prompt.trim() === '') {
-        problems.push(`node "${id}".humanGate must be { prompt: <non-empty string> } or null`);
-      } else {
-        humanGate = { prompt: n.humanGate.prompt };
-      }
-    }
+    const humanGate = normHumanGate(n.humanGate, `node "${id}"`, problems);
 
     nodes.push({
       id,
@@ -469,6 +472,97 @@ export function validateDag(raw: unknown): V3Dag {
   // loadDag rejects a cyclic DAG up front rather than mid-run.
   topologicalOrder(dag);
   return dag;
+}
+
+function normHumanGate(raw: unknown, where: string, problems: string[]): V3HumanGate | null {
+  if (raw == null) return null;
+  if (!isObject(raw) || typeof raw.prompt !== 'string' || raw.prompt.trim() === '') {
+    problems.push(`${where}.humanGate must be { prompt: <non-empty string>, options?, approveOptions?, approvers? } or null`);
+    return null;
+  }
+
+  let options = [...DEFAULT_HUMAN_GATE_OPTIONS];
+  if (raw.options !== undefined) {
+    if (!Array.isArray(raw.options)) {
+      problems.push(`${where}.humanGate.options must be a non-empty string array`);
+    } else {
+      const parsed = parseUniqueStringList(
+        raw.options,
+        `${where}.humanGate.options`,
+        problems,
+        { allowEmptyList: false, maxItems: MAX_HUMAN_GATE_OPTIONS, maxLength: MAX_HUMAN_GATE_OPTION_LENGTH },
+      );
+      if (parsed) options = parsed;
+    }
+  }
+
+  let approveOptions: string[] | undefined;
+  if (raw.approveOptions !== undefined) {
+    if (!Array.isArray(raw.approveOptions)) {
+      problems.push(`${where}.humanGate.approveOptions must be a non-empty string array`);
+    } else {
+      approveOptions = parseUniqueStringList(
+        raw.approveOptions,
+        `${where}.humanGate.approveOptions`,
+        problems,
+        { allowEmptyList: false, maxLength: MAX_HUMAN_GATE_OPTION_LENGTH },
+      );
+    }
+  }
+  approveOptions ??= options.includes('approve') ? ['approve'] : [options[0]!];
+  for (const opt of approveOptions) {
+    if (!options.includes(opt)) {
+      problems.push(`${where}.humanGate.approveOptions value ${JSON.stringify(opt)} must also appear in options`);
+    }
+  }
+
+  let approvers: string[] = [];
+  if (raw.approvers !== undefined) {
+    if (!Array.isArray(raw.approvers)) {
+      problems.push(`${where}.humanGate.approvers must be a string array`);
+    } else {
+      approvers = parseUniqueStringList(
+        raw.approvers,
+        `${where}.humanGate.approvers`,
+        problems,
+        { allowEmptyList: true },
+      ) ?? [];
+    }
+  }
+
+  return { prompt: raw.prompt, options, approveOptions, approvers };
+}
+
+function parseUniqueStringList(
+  raw: unknown[],
+  where: string,
+  problems: string[],
+  opts: { allowEmptyList: boolean; maxItems?: number; maxLength?: number },
+): string[] | undefined {
+  const values: string[] = [];
+  const seen = new Set<string>();
+  if (!opts.allowEmptyList && raw.length === 0) {
+    problems.push(`${where} must not be empty`);
+  }
+  if (opts.maxItems !== undefined && raw.length > opts.maxItems) {
+    problems.push(`${where} supports at most ${opts.maxItems} entries`);
+  }
+  for (const item of raw) {
+    if (typeof item !== 'string' || item.trim() === '') {
+      problems.push(`${where} entries must be non-empty strings`);
+      continue;
+    }
+    if (opts.maxLength !== undefined && item.length > opts.maxLength) {
+      problems.push(`${where} entry ${JSON.stringify(item)} exceeds ${opts.maxLength} characters`);
+    }
+    if (seen.has(item)) {
+      problems.push(`${where} has duplicate value ${JSON.stringify(item)}`);
+      continue;
+    }
+    seen.add(item);
+    values.push(item);
+  }
+  return problems.some((p) => p.startsWith(where)) ? undefined : values;
 }
 
 function normStringArray(v: unknown, where: string, problems: string[]): string[] {

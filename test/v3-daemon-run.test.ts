@@ -157,12 +157,13 @@ describe('resolveV3GateClick — 幂等 + terminal-safe（codex #5/#1/#2）', ()
       const runDir = toAwaitingGate(base);
       await driveV3Run('gate-run', stubDeps(base).deps); // 写出 pending wait + running journal
 
-      const out = resolveV3GateClick(base, 'gate-run', { waitId: 'deploy-gate', resolution: 'approved', by: 'ou_user' });
+      const out = resolveV3GateClick(base, 'gate-run', { waitId: 'deploy-gate', selected: 'approve', by: 'ou_user' });
       expect(out).toEqual({ kind: 'resolved', resolution: 'approved' });
       expect(readWait(runDir, 'deploy-gate')?.status).toBe('approved');
       const gr = readJournal(join(runDir, 'journal.ndjson')).find((e) => e.type === 'gateResolved') as any;
       expect(gr).toBeTruthy();
       expect(gr.resolution).toBe('approved');
+      expect(gr.selected).toBe('approve');
       expect(gr.nodeId).toBe('deploy'); // = wait.nodeId（不是 caller 传的）
     } finally {
       rmSync(base, { recursive: true, force: true });
@@ -174,14 +175,39 @@ describe('resolveV3GateClick — 幂等 + terminal-safe（codex #5/#1/#2）', ()
     try {
       const runDir = toAwaitingGate(base);
       await driveV3Run('gate-run', stubDeps(base).deps);
-      resolveV3GateClick(base, 'gate-run', { waitId: 'deploy-gate', resolution: 'approved', by: 'ou_user' });
+      resolveV3GateClick(base, 'gate-run', { waitId: 'deploy-gate', selected: 'approve', by: 'ou_user' });
       const before = readJournal(join(runDir, 'journal.ndjson')).filter((e) => e.type === 'gateResolved').length;
 
-      const out = resolveV3GateClick(base, 'gate-run', { waitId: 'deploy-gate', resolution: 'rejected', by: 'ou_other' });
+      const out = resolveV3GateClick(base, 'gate-run', { waitId: 'deploy-gate', selected: 'reject', by: 'ou_other' });
       expect(out).toEqual({ kind: 'already-settled', status: 'approved' });
       const after = readJournal(join(runDir, 'journal.ndjson')).filter((e) => e.type === 'gateResolved').length;
       expect(after).toBe(before);
       expect(readWait(runDir, 'deploy-gate')?.status).toBe('approved');
+    } finally {
+      rmSync(base, { recursive: true, force: true });
+    }
+  });
+
+  it('approvers allowlist 不匹配 → unauthorized，不消费 wait / 不写 gateResolved', async () => {
+    const base = freshBase();
+    try {
+      const runDir = toAwaitingGate(base);
+      await driveV3Run('gate-run', stubDeps(base).deps);
+      const wait = readWait(runDir, 'deploy-gate')!;
+      writePendingWait(runDir, {
+        waitId: wait.waitId,
+        nodeId: wait.nodeId,
+        prompt: wait.prompt,
+        options: wait.options,
+        approveOptions: wait.approveOptions,
+        approvers: ['ou_owner'],
+      });
+
+      const out = resolveV3GateClick(base, 'gate-run', { waitId: 'deploy-gate', selected: 'approve', by: 'ou_intruder' });
+
+      expect(out).toEqual({ kind: 'unauthorized' });
+      expect(readWait(runDir, 'deploy-gate')?.status).toBe('pending');
+      expect(readJournal(join(runDir, 'journal.ndjson')).some((e) => e.type === 'gateResolved')).toBe(false);
     } finally {
       rmSync(base, { recursive: true, force: true });
     }
@@ -194,7 +220,7 @@ describe('resolveV3GateClick — 幂等 + terminal-safe（codex #5/#1/#2）', ()
       await driveV3Run('gate-run', stubDeps(base).deps);
       appendEvent(join(runDir, 'journal.ndjson'), { type: 'runSucceeded' } as any);
 
-      const out = resolveV3GateClick(base, 'gate-run', { waitId: 'deploy-gate', resolution: 'approved', by: 'ou_user' });
+      const out = resolveV3GateClick(base, 'gate-run', { waitId: 'deploy-gate', selected: 'approve', by: 'ou_user' });
       expect(out).toEqual({ kind: 'stale-run', reason: 'terminal' });
       expect(readWait(runDir, 'deploy-gate')?.status).toBe('pending');
     } finally {
@@ -207,7 +233,7 @@ describe('resolveV3GateClick — 幂等 + terminal-safe（codex #5/#1/#2）', ()
     try {
       const runDir = seedApprovedRun(base, 'gate-run', { binding: BINDING });
       appendEvent(join(runDir, 'journal.ndjson'), { type: 'runStarted', runId: 'gate-run' } as any);
-      const out = resolveV3GateClick(base, 'gate-run', { waitId: 'nope-gate', resolution: 'approved', by: 'u' });
+      const out = resolveV3GateClick(base, 'gate-run', { waitId: 'nope-gate', selected: 'approve', by: 'u' });
       expect(out).toEqual({ kind: 'stale-run', reason: 'no-wait' });
     } finally {
       rmSync(base, { recursive: true, force: true });
@@ -218,7 +244,7 @@ describe('resolveV3GateClick — 幂等 + terminal-safe（codex #5/#1/#2）', ()
     const base = freshBase();
     try {
       seedApprovedRun(base, 'gate-run', { binding: BINDING });
-      const out = resolveV3GateClick(base, 'gate-run', { waitId: 'deploy-gate', resolution: 'approved', by: 'u' });
+      const out = resolveV3GateClick(base, 'gate-run', { waitId: 'deploy-gate', selected: 'approve', by: 'u' });
       expect(out).toEqual({ kind: 'stale-run', reason: 'missing' });
     } finally {
       rmSync(base, { recursive: true, force: true });
@@ -228,7 +254,7 @@ describe('resolveV3GateClick — 幂等 + terminal-safe（codex #5/#1/#2）', ()
   it('非法 runId（路径穿越）→ 抛错（codex #2 path guard）', async () => {
     const base = freshBase();
     try {
-      expect(() => resolveV3GateClick(base, '../escape', { waitId: 'w', resolution: 'approved', by: 'u' })).toThrow(/invalid runId/);
+      expect(() => resolveV3GateClick(base, '../escape', { waitId: 'w', selected: 'approve', by: 'u' })).toThrow(/invalid runId/);
       await expect(driveV3Run('a/b', stubDeps(base).deps)).rejects.toThrow(/invalid runId/);
     } finally {
       rmSync(base, { recursive: true, force: true });
@@ -257,7 +283,14 @@ describe('reconcileV3PendingGates — 重启恢复 + 原子窗口（codex #2/#3�
       const rec = recs.find((r) => r.runId === 'gw-run')!;
       expect(rec).toBeTruthy();
       expect(rec.resume).toBe(false);
-      expect(rec.repost).toEqual([{ nodeId: 'deploy', waitId: 'deploy-gate', prompt: '批准部署？' }]);
+      expect(rec.repost).toEqual([{
+        nodeId: 'deploy',
+        waitId: 'deploy-gate',
+        prompt: '批准部署？',
+        options: ['approve', 'reject'],
+        approveOptions: ['approve'],
+        approvers: [],
+      }]);
       // 补写出了 pending wait（prompt 取自 dag.humanGate.prompt）
       expect(readWait(runDir, 'deploy-gate')).toMatchObject({ status: 'pending', prompt: '批准部署？' });
       expect(rec.binding).toEqual(BINDING);

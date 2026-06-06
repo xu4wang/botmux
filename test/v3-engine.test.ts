@@ -354,9 +354,15 @@ describe('journal + state', () => {
   it('gate 批准 → pending+gateCleared；拒绝 → failed', () => {
     const approved = materialize([
       { ts: 1, type: 'gateDispatched', nodeId: 'a', waitId: 'w1' },
-      { ts: 2, type: 'gateResolved', nodeId: 'a', waitId: 'w1', resolution: 'approved', by: 'u' },
+      { ts: 2, type: 'gateResolved', nodeId: 'a', waitId: 'w1', resolution: 'approved', selected: 'ship', by: 'u' },
     ]);
     expect(approved.nodes.get('a')).toEqual({ status: 'pending', gateCleared: true });
+
+    const oldApproved = materialize([
+      { ts: 1, type: 'gateDispatched', nodeId: 'a', waitId: 'w1' },
+      { ts: 2, type: 'gateResolved', nodeId: 'a', waitId: 'w1', resolution: 'approved', by: 'u' },
+    ]);
+    expect(oldApproved.nodes.get('a')).toEqual({ status: 'pending', gateCleared: true });
 
     const rejected = materialize([
       { ts: 1, type: 'gateDispatched', nodeId: 'a', waitId: 'w1' },

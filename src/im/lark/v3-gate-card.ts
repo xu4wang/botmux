@@ -2,13 +2,14 @@
  * v3 humanGate 审批卡 — 复用 v0.2 审批卡的视觉（header 配色 / 字段 / freeze 态），
  * 但**自带 action namespace + value 形态**（codex review #4）：
  *   - action: `v3_gate_approve` / `v3_gate_reject`
- *   - value: `{ action, runId, waitId, nodeId, nonce }`
+ *   - value: `{ action, runId, waitId, nodeId, nonce, selected }`
  * 刻意不复用 v0.2 `workflow-card-handler` 的 wait path —— v3 的 wait 权威是
  * `waits/<id>.json + journal.ndjson`，跟 v0.2 events schema 不同（见 humanGate
  * daemon-card 设计 §4.3）。本文件**纯函数**，不碰 daemon / IO，单测友好。
  */
 
 import { config } from '../../config.js';
+import { DEFAULT_HUMAN_GATE_OPTIONS } from '../../workflows/v3/dag.js';
 
 export const V3_GATE_APPROVE_ACTION = 'v3_gate_approve';
 export const V3_GATE_REJECT_ACTION = 'v3_gate_reject';
@@ -23,6 +24,7 @@ export interface V3GateActionValue {
   waitId: string;
   nodeId: string;
   nonce: string;
+  selected?: string;
 }
 
 export interface V3GateCardInput {
@@ -34,8 +36,11 @@ export interface V3GateCardInput {
   nonce?: string;
   webDetailUrl?: string;
   promptMaxChars?: number;
+  options?: string[];
+  approveOptions?: string[];
+  approvers?: string[];
   /** 有值 → 渲染冻结的「已通过 / 已拒绝」卡（无按钮，防 stale UI 重复提交）。 */
-  resolution?: { kind: V3GateResolutionKind; by?: string };
+  resolution?: { kind: V3GateResolutionKind; by?: string; selected?: string };
 }
 
 const DEFAULT_PROMPT_MAX_CHARS = 500;
@@ -56,6 +61,8 @@ export function buildV3GateCard(input: V3GateCardInput): string {
   const promptMax = input.promptMaxChars ?? DEFAULT_PROMPT_MAX_CHARS;
   const prompt = truncate(input.prompt, promptMax);
   const resolution = input.resolution;
+  const options = input.options ?? [...DEFAULT_HUMAN_GATE_OPTIONS];
+  const approveOptions = input.approveOptions ?? (options.includes('approve') ? ['approve'] : [options[0]!]);
 
   const title = resolution
     ? `${resolutionPrefix(resolution.kind)}：${titleText(input.nodeId)}`
@@ -85,26 +92,14 @@ export function buildV3GateCard(input: V3GateCardInput): string {
         tag: 'lark_md',
         content:
           (resolution.kind === 'approved' ? '✅ 已通过' : '❌ 已拒绝') +
+          (resolution.selected ? ` · ${escapeMd(short(resolution.selected, 20))}` : '') +
           (resolution.by ? ` · by ${escapeMd(short(resolution.by, 20))}` : ''),
       },
     });
   } else {
     elements.push({
       tag: 'action',
-      actions: [
-        {
-          tag: 'button',
-          text: { tag: 'plain_text', content: '✅ 通过' },
-          type: 'primary',
-          value: actionValue(V3_GATE_APPROVE_ACTION, input.runId, input.waitId, input.nodeId, nonce),
-        },
-        {
-          tag: 'button',
-          text: { tag: 'plain_text', content: '❌ 拒绝' },
-          type: 'danger',
-          value: actionValue(V3_GATE_REJECT_ACTION, input.runId, input.waitId, input.nodeId, nonce),
-        },
-      ],
+      actions: options.map((opt) => optionButton(opt, approveOptions, input, nonce)),
     });
   }
 
@@ -135,8 +130,35 @@ function actionValue(
   waitId: string,
   nodeId: string,
   nonce: string,
+  selected?: string,
 ): V3GateActionValue {
-  return { action, runId, waitId, nodeId, nonce };
+  return { action, runId, waitId, nodeId, nonce, selected };
+}
+
+function optionButton(
+  selected: string,
+  approveOptions: string[],
+  input: V3GateCardInput,
+  nonce: string,
+): Record<string, unknown> {
+  const approved = approveOptions.includes(selected);
+  const label =
+    selected === 'approve' ? '✅ 通过'
+    : selected === 'reject' ? '❌ 拒绝'
+    : selected;
+  return {
+    tag: 'button',
+    text: { tag: 'plain_text', content: label },
+    type: approved ? 'primary' : 'danger',
+    value: actionValue(
+      approved ? V3_GATE_APPROVE_ACTION : V3_GATE_REJECT_ACTION,
+      input.runId,
+      input.waitId,
+      input.nodeId,
+      nonce,
+      selected,
+    ),
+  };
 }
 
 function resolutionPrefix(kind: V3GateResolutionKind): string {

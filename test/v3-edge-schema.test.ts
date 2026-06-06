@@ -75,7 +75,7 @@ describe('validateDag: depends 归一化', () => {
         ]),
       ),
     );
-    expect(problems.some((p) => p.includes('duplicates'))).toBe(true);
+    expect(problems.some((p) => p.includes('duplicate'))).toBe(true);
   });
 
   it('object 形式 self-dep → 报错', () => {
@@ -229,6 +229,67 @@ describe('validateDag: triggerRule', () => {
       dag([goal('a'), goal('b'), goal('c', { depends: ['a', 'b'], triggerRule: { quorum: 2 } })]),
     );
     expect(d.nodes.find((n) => n.id === 'c')!.triggerRule).toEqual({ quorum: 2 });
+  });
+});
+
+// ─── humanGate options / approvers ─────────────────────────────────────────
+
+describe('validateDag: humanGate options / approvers', () => {
+  it('humanGate 缺省 options/approveOptions/approvers 会归一化', () => {
+    const d = validateDag(dag([goal('deploy', { humanGate: { prompt: 'approve?' } })]));
+    expect(d.nodes[0]!.humanGate).toEqual({
+      prompt: 'approve?',
+      options: ['approve', 'reject'],
+      approveOptions: ['approve'],
+      approvers: [],
+    });
+  });
+
+  it('custom options + approveOptions + approvers 保留', () => {
+    const d = validateDag(dag([goal('deploy', {
+      humanGate: {
+        prompt: 'ship?',
+        options: ['ship', 'hold', 'cancel'],
+        approveOptions: ['ship'],
+        approvers: ['ou_a', 'ou_b'],
+      },
+    })]));
+    expect(d.nodes[0]!.humanGate).toEqual({
+      prompt: 'ship?',
+      options: ['ship', 'hold', 'cancel'],
+      approveOptions: ['ship'],
+      approvers: ['ou_a', 'ou_b'],
+    });
+  });
+
+  it('approveOptions 缺省：无 approve 时取 options[0]', () => {
+    const d = validateDag(dag([goal('deploy', {
+      humanGate: { prompt: 'ship?', options: ['ship', 'hold'] },
+    })]));
+    expect(d.nodes[0]!.humanGate?.approveOptions).toEqual(['ship']);
+  });
+
+  it('options 非空去重、≤8、单项≤32；approveOptions 必须是非空子集', () => {
+    const problems = problemsOf(() => validateDag(dag([
+      goal('deploy', {
+        humanGate: {
+          prompt: 'ship?',
+          options: ['ship', 'ship', 'x'.repeat(33), 'a', 'b', 'c', 'd', 'e', 'f'],
+          approveOptions: ['missing'],
+        },
+      }),
+    ])));
+    expect(problems.some((p) => p.includes('duplicate'))).toBe(true);
+    expect(problems.some((p) => p.includes('at most 8'))).toBe(true);
+    expect(problems.some((p) => p.includes('exceeds 32'))).toBe(true);
+    expect(problems.some((p) => p.includes('must also appear in options'))).toBe(true);
+  });
+
+  it('approvers 必须是 string array 且去重', () => {
+    const problems = problemsOf(() => validateDag(dag([
+      goal('deploy', { humanGate: { prompt: 'ship?', approvers: ['ou_a', 'ou_a'] } }),
+    ])));
+    expect(problems.some((p) => p.includes('approvers') && p.includes('duplicate'))).toBe(true);
   });
 });
 

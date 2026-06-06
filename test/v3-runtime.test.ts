@@ -412,7 +412,14 @@ describe('runWorkflow — humanGate suspend mode', () => {
       expect(first).toEqual({
         reason: 'awaitingGate',
         runDir: join(base, 'gate-run'),
-        pendingWaits: [{ nodeId: 'deploy', waitId: 'deploy-gate', prompt: '批准部署？' }],
+        pendingWaits: [{
+          nodeId: 'deploy',
+          waitId: 'deploy-gate',
+          prompt: '批准部署？',
+          options: ['approve', 'reject'],
+          approveOptions: ['approve'],
+          approvers: [],
+        }],
       });
       expect(runNodeCalls).toBe(0);
       expect(readWait(first.runDir, 'deploy-gate')).toMatchObject({
@@ -474,7 +481,14 @@ describe('runWorkflow — humanGate suspend mode', () => {
 
       expect(outcome).toMatchObject({ reason: 'awaitingGate' });
       if (outcome.reason !== 'awaitingGate') throw new Error('expected awaitingGate outcome');
-      expect(outcome.pendingWaits).toEqual([{ nodeId: 'approval', waitId: 'approval-gate', prompt: '批准？' }]);
+      expect(outcome.pendingWaits).toEqual([{
+        nodeId: 'approval',
+        waitId: 'approval-gate',
+        prompt: '批准？',
+        options: ['approve', 'reject'],
+        approveOptions: ['approve'],
+        approvers: [],
+      }]);
       const events = readJournal(join(outcome.runDir, 'journal.ndjson'));
       expect(events.some((e) => e.type === 'nodeSucceeded' && e.nodeId === 'research')).toBe(true);
       expect(readWait(outcome.runDir, 'approval-gate')?.status).toBe('pending');
@@ -559,7 +573,7 @@ describe('human-gate 文件等待存储', () => {
         },
       });
       const res = await gate({ nodeId: 'a', prompt: '批？', waitId: 'g1', runDir: dir });
-      expect(res).toBe('approved');
+      expect(res).toEqual({ resolution: 'approved', by: 'ou_z', selected: undefined });
       expect(statusAtDecision).toBe('pending');
       expect(readWait(dir, 'g1')!.status).toBe('approved');
     } finally {

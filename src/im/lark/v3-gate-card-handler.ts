@@ -69,14 +69,14 @@ export async function handleV3GateAction(
     return { toast: { type: 'warning', content: '你没有权限审批这个 gate' } };
   }
 
-  const resolution = value.action === V3_GATE_APPROVE_ACTION ? 'approved' : 'rejected';
+  const selected = value.selected ?? (value.action === V3_GATE_APPROVE_ACTION ? 'approve' : 'reject');
   const resolveClick = deps.resolveClick ?? resolveV3GateClick;
 
   let outcome;
   try {
     outcome = resolveClick(baseDir, value.runId, {
       waitId: value.waitId,
-      resolution,
+      selected,
       by: operatorOpenId ?? 'unknown',
     });
   } catch (err) {
@@ -106,6 +106,14 @@ export async function handleV3GateAction(
       },
     };
   }
+  if (outcome.kind === 'unauthorized') {
+    return {
+      toast: {
+        type: 'warning',
+        content: '你不在这个 gate 的审批人名单中',
+      },
+    };
+  }
 
   // resolved → drive the run forward (fresh replay) + freeze this card.
   deps.driveRun(value.runId);
@@ -115,7 +123,7 @@ export async function handleV3GateAction(
     waitId: value.waitId,
     nodeId: value.nodeId,
     prompt,
-    resolution: { kind: resolution, by: operatorOpenId },
+    resolution: { kind: outcome.resolution, by: operatorOpenId, selected },
   });
   return JSON.parse(frozen);
 }

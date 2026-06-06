@@ -34,7 +34,7 @@ import {
 import { decideNext, type V3Action } from './orchestrator.js';
 import { appendEvent, readJournal, type StoredEvent, type V3ErrorClass, type V3LoopRef } from './journal.js';
 import { materialize, writeState } from './state.js';
-import { writePendingWait } from './human-gate.js';
+import { normalizeGateWaitInput, writePendingWait } from './human-gate.js';
 import {
   GOAL_ENV,
   MANIFEST_FILE_KINDS,
@@ -302,7 +302,7 @@ export interface V3RuntimeDeps {
     prompt: string;
     waitId: string;
     runDir: string;
-  }) => Promise<'approved' | 'rejected'>;
+  }) => Promise<{ resolution: 'approved' | 'rejected'; by: string; selected?: string }>;
 }
 
 export interface V3RuntimeOptions {
@@ -323,6 +323,9 @@ export interface V3PendingGate {
   nodeId: string;
   waitId: string;
   prompt: string;
+  options: string[];
+  approveOptions: string[];
+  approvers: string[];
 }
 
 export type V3RunOutcome =
@@ -712,11 +715,11 @@ export async function runWorkflow(
 
   function startGate(node: V3Node): void {
     const waitId = `${node.id}-gate`; // MVP: one gate per node
-    const prompt = node.humanGate!.prompt;
+    const gate = normalizeGateWaitInput(node.humanGate!);
     appendEvent(journalPath, { type: 'gateDispatched', nodeId: node.id, waitId });
 
     if (gateMode === 'suspend') {
-      writePendingWait(runDir, { waitId, nodeId: node.id, prompt });
+      writePendingWait(runDir, { waitId, nodeId: node.id, ...gate });
       return;
     }
 
@@ -727,9 +730,9 @@ export async function runWorkflow(
     }
     const key = `${node.id}::gate`;
     const p = deps
-      .resolveGate({ nodeId: node.id, prompt, waitId, runDir })
-      .then((resolution) => {
-        appendEvent(journalPath, { type: 'gateResolved', nodeId: node.id, waitId, resolution, by: 'human' });
+      .resolveGate({ nodeId: node.id, prompt: gate.prompt, waitId, runDir })
+      .then(({ resolution, by, selected }) => {
+        appendEvent(journalPath, { type: 'gateResolved', nodeId: node.id, waitId, resolution, by, selected });
       })
       .catch(() => {
         // A gate that errors out is treated as rejected (fail-fast); the
@@ -894,7 +897,8 @@ export async function runWorkflow(
       if (state.get(node.id)?.status !== 'gateWaiting') continue;
       const prompt = node.humanGate?.prompt;
       if (!prompt) continue;
-      waits.push({ nodeId: node.id, waitId: `${node.id}-gate`, prompt });
+      const gate = normalizeGateWaitInput(node.humanGate!);
+      waits.push({ nodeId: node.id, waitId: `${node.id}-gate`, ...gate });
     }
     return waits;
   }

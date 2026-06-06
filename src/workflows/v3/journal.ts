@@ -84,7 +84,7 @@ export type V3Event =
       previousErrorCode?: string;
     }
   | { type: 'gateDispatched'; nodeId: string; waitId: string }
-  | { type: 'gateResolved'; nodeId: string; waitId: string; resolution: 'approved' | 'rejected'; by: string }
+  | { type: 'gateResolved'; nodeId: string; waitId: string; resolution: 'approved' | 'rejected'; by: string; selected?: string }
   // ── edge activation lifecycle ──
   // Conditional edge predicates read a source node's validated result.json
   // exactly once, then persist the verdict here.  Replay / dashboards /
