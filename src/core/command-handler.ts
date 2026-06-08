@@ -19,7 +19,7 @@ import { claimPairing } from '../services/pairing-store.js';
 import { logger } from '../utils/logger.js';
 import { killWorker, forkWorker, forkAdoptWorker, getCurrentCliVersion, postFreshStreamingCard, postPrivateSnapshotCard, resolvePrivateCardAudience, deliverEphemeralOrReply } from './worker-pool.js';
 import { expandHome, getSessionWorkingDir, getProjectScanDir, getProjectScanDirs, rememberLastCliInput } from './session-manager.js';
-import { discoverSlashCommands, listMcpServerNames } from './command-discovery.js';
+import { discoverSlashCommandsForAdapter, listMcpServerNames, supportsFilesystemCommandDiscovery } from './command-discovery.js';
 import { validateWorkingDir } from './working-dir.js';
 import { discoverAdoptableSessions, validateAdoptTarget, adoptTargetKey, adoptTargetLabel, type AdoptableSession } from './session-discovery.js';
 import { discoverAdoptableZellijSessions, validateZellijAdoptTarget, type ZellijAdoptableSession } from './zellij-adopt-discovery.js';
@@ -1988,20 +1988,30 @@ export async function handleCommand(
         // 列出本 bot 当前可用的 slash 命令，分三段：
         //   ① botmux 固定放行的透传白名单（PASSTHROUGH_COMMANDS）
         //   ② 用户在 bots.json 自定义配置的额外透传命令（customPassthroughCommands）
-        //   ③ 文件系统自动发现的 .claude 自定义命令 / skill / 插件（discoverSlashCommands）
+        //   ③ 文件系统自动发现的 CLI 自定义命令 / skill / 插件
         // MCP 的 /mcp__<server>__<prompt> 需运行时握手才能枚举，这里仅按 .mcp.json 提示 server 名。
         const botCfg = ds
           ? getBot(ds.larkAppId).config
           : (larkAppId ? getBot(larkAppId).config : getAllBots()[0]?.config);
-        const cliName = getCliDisplayName(botCfg?.cliId ?? 'claude-code');
+        const cliId = botCfg?.cliId ?? 'claude-code';
+        const cliName = getCliDisplayName(cliId);
         const workingDir = getSessionWorkingDir(ds);
         const builtin = [...PASSTHROUGH_COMMANDS];
         const custom = botCfg?.customPassthroughCommands ?? [];
-        const discovered = discoverSlashCommands(workingDir);
+        let cliAdapter;
+        try {
+          cliAdapter = createCliAdapterSync(cliId, botCfg?.cliPathOverride);
+        } catch (err) {
+          logger.warn(`[${logTag}] /list-slash-command could not create adapter for ${cliId}: ${err instanceof Error ? err.message : String(err)}`);
+        }
+        const discoverySupported = supportsFilesystemCommandDiscovery(cliAdapter);
+        const discovered = cliAdapter && discoverySupported
+          ? discoverSlashCommandsForAdapter(workingDir, cliAdapter)
+          : [];
         const mcpServers = listMcpServerNames(workingDir);
 
         const card = buildSlashListCard(
-          { cliName, builtin, custom, discovered, workingDir, mcpServers },
+          { cliName, builtin, custom, discovered, workingDir, mcpServers, discoverySupported },
           loc,
         );
         await sessionReply(rootId, card, 'interactive');

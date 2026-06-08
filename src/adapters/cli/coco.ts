@@ -276,6 +276,8 @@ export function createCocoAdapter(pathOverride?: string): CliAdapter {
     // dequeue-deferral — see codex.ts and CodexBridgeQueue's HOL-block-drop.
     supportsTypeAhead: true,
     altScreen: false,
+    // CoCo/Trae CLI reads the same skill root as the Trae-flavoured adapter.
+    skillsDir: '~/.trae/skills',
     modelChoices: [
       'Seed-Dogfooding-2.0',
       'Doubao-Seed-2.0-Code',

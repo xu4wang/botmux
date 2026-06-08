@@ -130,6 +130,7 @@ vi.mock('../src/im/lark/card-builder.js', () => ({
     (sid: string) =>
       `{"header":{"title":{"content":"🛑 会话已关闭"}},"action":"resume","cmd":"botmux resume ${sid.substring(0, 12)}"}`,
   ),
+  buildSlashListCard: vi.fn((params: any) => JSON.stringify(params)),
   buildRelayPickerCard: vi.fn(
     (entries: any[], targetChatId: string, rootMessageId: string) => JSON.stringify({
       schema: '2.0',
@@ -258,6 +259,12 @@ vi.mock('../src/services/codex-app-threads.js', () => ({
   listCodexAppThreads: vi.fn(async () => []),
 }));
 
+vi.mock('../src/core/command-discovery.js', () => ({
+  discoverSlashCommandsForAdapter: vi.fn(() => [{ name: '/project-cmd', description: 'Project command' }]),
+  supportsFilesystemCommandDiscovery: vi.fn((adapter: any) => !!(adapter?.claudeDataDir || adapter?.skillsDir || adapter?.pluginDir)),
+  listMcpServerNames: vi.fn(() => []),
+}));
+
 vi.mock('../src/utils/user-token.js', () => ({
   generateAuthUrl: vi.fn(() => ({ authUrl: 'https://open.feishu.cn/auth/v1/test' })),
   getTokenStatus: vi.fn(() => 'User token: active'),
@@ -319,6 +326,7 @@ import * as sessionStore from '../src/services/session-store.js';
 import * as scheduleStore from '../src/services/schedule-store.js';
 import * as scheduler from '../src/core/scheduler.js';
 import { deleteMessage, sendMessage, listChatBotMembers } from '../src/im/lark/client.js';
+import { buildSlashListCard } from '../src/im/lark/card-builder.js';
 import { createGroupWithBots } from '../src/services/group-creator.js';
 import { getAllBots, getBot } from '../src/bot-registry.js';
 import { generateAuthUrl, getTokenStatus } from '../src/utils/user-token.js';
@@ -327,6 +335,7 @@ import { existsSync, statSync, readFileSync } from 'node:fs';
 import { scanMultipleProjects } from '../src/services/project-scanner.js';
 import { discoverAdoptableSessions } from '../src/core/session-discovery.js';
 import { listCodexAppThreads } from '../src/services/codex-app-threads.js';
+import { discoverSlashCommandsForAdapter } from '../src/core/command-discovery.js';
 
 // ─── Fixtures ───────────────────────────────────────────────────────────────
 
@@ -460,6 +469,55 @@ describe('DAEMON_COMMANDS set', () => {
   it('contains the /list-slash-command lister and its /slash alias', () => {
     expect(DAEMON_COMMANDS.has('/list-slash-command')).toBe(true);
     expect(DAEMON_COMMANDS.has('/slash')).toBe(true);
+  });
+});
+
+describe('/list-slash-command discovery', () => {
+  beforeEach(() => {
+    vi.mocked(discoverSlashCommandsForAdapter).mockClear();
+    vi.mocked(buildSlashListCard).mockClear();
+  });
+
+  it('uses the Codex adapter directory instead of Claude .claude commands', async () => {
+    const ds = makeDaemonSession({
+      larkAppId: 'app-2',
+      session: makeSession({ cliId: 'codex' }),
+    });
+    const deps = makeDeps(ds);
+
+    await handleCommand('/slash', ROOT_ID, makeLarkMessage('/slash'), deps, 'app-2');
+
+    expect(discoverSlashCommandsForAdapter).toHaveBeenCalledWith(
+      '/home/testuser/projects',
+      expect.objectContaining({ id: 'codex', skillsDir: '~/.codex/skills' }),
+    );
+    expect(buildSlashListCard).toHaveBeenCalledWith(
+      expect.objectContaining({
+        cliName: 'codex',
+        discovered: [{ name: '/project-cmd', description: 'Project command' }],
+        discoverySupported: true,
+      }),
+      expect.anything(),
+    );
+  });
+
+  it('keeps Claude-family filesystem discovery enabled', async () => {
+    const deps = makeDeps(makeDaemonSession());
+
+    await handleCommand('/slash', ROOT_ID, makeLarkMessage('/slash'), deps, LARK_APP_ID);
+
+    expect(discoverSlashCommandsForAdapter).toHaveBeenCalledWith(
+      '/home/testuser/projects',
+      expect.objectContaining({ id: 'claude-code', claudeDataDir: expect.any(String) }),
+    );
+    expect(buildSlashListCard).toHaveBeenCalledWith(
+      expect.objectContaining({
+        cliName: 'Claude',
+        discovered: [{ name: '/project-cmd', description: 'Project command' }],
+        discoverySupported: true,
+      }),
+      expect.anything(),
+    );
   });
 });
 

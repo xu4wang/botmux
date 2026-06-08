@@ -238,6 +238,10 @@ describe('coco buildArgs', () => {
     expect(idx).toBeGreaterThanOrEqual(0);
     expect(args[idx + 1]).toBe('model.name=Doubao-Seed-2.0-Code');
   });
+
+  it('uses Trae skill root for filesystem skill discovery', () => {
+    expect(adapter.skillsDir).toBe('~/.trae/skills');
+  });
 });
 
 describe('codex buildArgs', () => {
