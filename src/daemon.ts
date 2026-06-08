@@ -25,6 +25,7 @@ import { parseEventMessage, resolveNonsupportMessage, stripLeadingMentions, type
 import { expandMergeForward } from './im/lark/merge-forward.js';
 import { buildQuoteHint } from './im/lark/quote-hint.js';
 import { logger } from './utils/logger.js';
+import { BoundedMap } from './utils/bounded-map.js';
 import { checkAllowedChatGroupsConfig } from './services/allowed-chat-groups.js';
 import type { Session } from './types.js';
 import { ensureCjkFontsInstalled } from './utils/font-installer.js';
@@ -230,8 +231,12 @@ const workflowAttemptResumes = new AttemptResumeManager({
     }
   },
 });
-// Cache last /repo scan results per chat for /repo <number> fallback
-const lastRepoScan = new Map<string, import('./services/project-scanner.js').ProjectInfo[]>();
+// Cache last /repo scan results per chat for /repo <number> fallback.
+// Bounded: this is a transient picker cache keyed by chatId (unbounded over a
+// long-lived daemon's chat set), so cap it instead of retaining one
+// ProjectInfo[] per chat forever.
+const lastRepoScan: Map<string, import('./services/project-scanner.js').ProjectInfo[]> =
+  new BoundedMap(500);
 const cliVersionCache = new Map<string, { version: string; lastCheckAt: number }>();
 const VERSION_CHECK_INTERVAL = 60_000; // cache 1 min
 
