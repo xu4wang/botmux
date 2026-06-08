@@ -124,6 +124,7 @@ export function renderGoalFile(
     'Work toward the goal above until it is done, then stop. Do NOT ask the user with interactive tools (they are disabled in this mode). If you genuinely need a human DECISION to proceed, use the human-ask escape hatch described below (also available as the `botmux-goal-ask` skill).',
     '',
     `- Upstream inputs: the file at $${E.INPUTS_PATH} is a JSON object \`{ "inputs": [...] }\` listing upstream products, each with an absolute \`path\`. Read only the ones the goal needs (it may be empty). If it includes a \`human/answer\` input, read it before continuing. If an \`omitted\` array is present, those declared inputs were intentionally not produced (their workflow branch was not taken) — treat their absence as by-design, do NOT invent their content.`,
+    `- Revisit feedback: if any input has \`"from": "revisit"\`, a DOWNSTREAM node sent this node back because its product was inadequate. You MUST read these before doing anything else: \`reason\` (why you were sent back), \`source:*\` (the downstream node's output — the evidence of what was wrong), and \`previous:*\` (YOUR OWN previous output — edit/fix it, do not rewrite from scratch). Address the reason; do not just reproduce the prior output.`,
     `- Output: write ALL products under the directory at $${E.OUTPUT_DIR}. Do NOT write anything outside that directory.`,
     `- Manifest (required): before you finish, write a JSON manifest to $${E.MANIFEST_PATH} with exactly this shape:`,
     '',
@@ -800,7 +801,7 @@ export async function runWorkflow(
             }
             // goal-node dispatches always carry instanceId (首派 #001); the
             // fallback keeps the type total for the legacy/no-instance path.
-            appendRevisitEvents(node.id, instanceId ?? node.id, attemptId, revisit.request);
+            appendRevisitEvents(node.id, instanceId ?? node.id, attemptId, revisit.request, result.manifestPath);
             return;
           }
           // Opt-in structured-result contract: the manifest MUST list a
@@ -933,13 +934,33 @@ export async function runWorkflow(
     instanceId: string,
     attemptId: string,
     request: { toNodeId: string; reason?: string },
+    sourceManifestPath: string,
   ): void {
+    // Capture feedback paths BEFORE the supersede sweep, while the target's
+    // current effective instance + its successful manifest are still resolvable.
+    const events0 = readJournal(journalPath);
+    const snap = materialize(events0);
+    const targetEff = snap.nodes.get(request.toNodeId)?.effectiveInstanceId;
+    const targetSucc = targetEff
+      ? [...events0].reverse().find((e): e is StoredEvent & { type: 'nodeSucceeded' } =>
+          e.type === 'nodeSucceeded' && (e.instanceId ?? e.nodeId) === targetEff)
+      : undefined;
+    // Persist the reason as a file the target's fresh instance can Read.
+    let reasonPath: string | undefined;
+    if (request.reason) {
+      const dir = join(runDir, 'revisits');
+      mkdirSync(dir, { recursive: true });
+      reasonPath = join(dir, `${instanceId.replace(/[#/]/g, '-')}-reason.md`);
+      writeFileSync(reasonPath, `# Revisit reason (from ${nodeId} / ${instanceId})\n\n${request.reason}\n`);
+    }
     appendEvent(journalPath, {
       type: 'nodeRevisitRequested',
       nodeId, instanceId, attemptId, toNodeId: request.toNodeId,
       ...(request.reason ? { reason: request.reason } : {}),
+      ...(reasonPath ? { reasonPath } : {}),
+      sourceManifestPath,
+      ...(targetSucc ? { targetPreviousManifestPath: targetSucc.manifestPath } : {}),
     });
-    const snap = materialize(readJournal(journalPath));
     for (const affectedNodeId of affectedNodesFrom(request.toNodeId)) {
       const eff = snap.nodes.get(affectedNodeId)?.effectiveInstanceId;
       if (!eff) continue; // never-dispatched downstream node has nothing to supersede
@@ -1265,6 +1286,31 @@ export async function runWorkflow(
       }
     };
 
+    // Push every file of a manifest at a known (absolute) path — used for
+    // revisit feedback where the manifest is referenced directly off the
+    // nodeRevisitRequested event (requester / target-prior), not via a
+    // nodeSucceeded lookup.  Names are prefixed so the agent can tell the
+    // feedback pieces apart (`revisit/source:…`, `revisit/previous:…`).
+    const pushManifestByPath = (label: string, manifestPath: string | undefined, namePrefix: string): void => {
+      if (!manifestPath || !existsSync(manifestPath)) return;
+      let manifest: Manifest;
+      try {
+        manifest = JSON.parse(readFileSync(manifestPath, 'utf-8')) as Manifest;
+      } catch {
+        return;
+      }
+      const outDir = join(dirname(manifestPath), 'work');
+      for (const f of manifest.files) {
+        inputs.push({
+          from: label,
+          name: `${namePrefix}:${f.name}`,
+          path: join(outDir, f.path),
+          kind: f.kind,
+          preview: f.preview,
+        });
+      }
+    };
+
     // P3 selector misses collected during resolution — merged into `omitted`
     // so the agent reads the gap as a known contract issue, not silence.
     const selectorMisses: Array<{ from: string; reason: 'selectorMiss' }> = [];
@@ -1283,6 +1329,23 @@ export async function runWorkflow(
     for (const ref of node.inputs) {
       if (omittedFrom.has(ref.from)) continue; // branch not taken — surfaced via `omitted`
       pushRef(ref);
+    }
+
+    // Cross-node revisit feedback: when THIS node is a revisit target, its fresh
+    // instance is sent back blind unless we hand it (1) WHY it was sent back,
+    // (2) the requester's output (where it went wrong), (3) its OWN prior output
+    // (so it edits rather than rewrites).  All as `from:"revisit"` inputs; the
+    // goal.txt instructs the agent to read them first.  A plain first run / a
+    // cone node that wasn't the target has no such event → nothing injected.
+    const revisitReq = [...events].reverse().find(
+      (e): e is StoredEvent & { type: 'nodeRevisitRequested' } =>
+        e.type === 'nodeRevisitRequested' && e.toNodeId === node.id);
+    if (revisitReq) {
+      if (revisitReq.reasonPath) {
+        inputs.push({ from: 'revisit', name: 'reason', path: revisitReq.reasonPath, kind: 'markdown', preview: revisitReq.reason });
+      }
+      pushManifestByPath('revisit', revisitReq.sourceManifestPath, 'source');
+      pushManifestByPath('revisit', revisitReq.targetPreviousManifestPath, 'previous');
     }
 
     if (loopRef) {

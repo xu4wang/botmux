@@ -655,8 +655,14 @@ describe('runWorkflow — 跨节点 revisit A→B→C', () => {
       });
       let cRuns = 0;
       let bSawAContent = '';
+      let aRevisitFeedback: GoalInputs['inputs'] = [];
       const runNode: RunNode = async (req) => {
         if (req.node.id === 'A') {
+          // A#002 是回溯目标的重跑：捕获注入的 from:revisit 反馈。
+          if (req.attemptId.startsWith('A#002')) {
+            const inputs = JSON.parse(readFileSync(req.inputsPath, 'utf-8')) as GoalInputs;
+            aRevisitFeedback = inputs.inputs.filter((i) => i.from === 'revisit');
+          }
           // 第二次跑(A#002)产出不同内容,用来验证 B#002 读到的是新版
           const content = req.attemptId.startsWith('A#002') ? 'A-v2' : 'A-v1';
           return { status: 'ok', manifestPath: writeManifest(req, {
@@ -703,6 +709,13 @@ describe('runWorkflow — 跨节点 revisit A→B→C', () => {
       expect(events.some((e) => e.type === 'nodeSucceeded' && (e as any).instanceId === 'C#001')).toBe(false);
       // B#002 的 inputs 来自 A#002（新版产物），不是 A#001
       expect(bSawAContent).toBe('A-v2');
+      // A#002(回溯目标重跑)拿到三件套 feedback:reason + 下游(C)产出 + A 自己旧产出。
+      expect(aRevisitFeedback.some((i) => i.name === 'reason' && (i.preview ?? '').includes('缺计费规则'))).toBe(true);
+      expect(aRevisitFeedback.some((i) => i.name.startsWith('source:'))).toBe(true); // C 的 result.json
+      // previous: A#001 的旧产物 a.md(内容 'A-v1')
+      const prev = aRevisitFeedback.find((i) => i.name.startsWith('previous:'));
+      expect(prev).toBeDefined();
+      expect(readFileSync(prev!.path, 'utf-8')).toBe('A-v1');
       // C 一共跑了 2 次（#001 回溯 + #002 成功）
       expect(cRuns).toBe(2);
     } finally {

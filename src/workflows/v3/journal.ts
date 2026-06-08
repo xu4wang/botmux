@@ -156,6 +156,16 @@ export type V3Event =
       attemptId: string;
       toNodeId: string;
       reason?: string;
+      // Feedback paths (runDir-relative) the target's fresh instance reads via
+      // `from:"revisit"` inputs — so it knows WHY it was sent back, WHAT the
+      // downstream found, and WHAT it itself produced last time, instead of
+      // re-running blind.  reasonPath: the reason text file (runtime-written);
+      // sourceManifestPath: the requesting node's manifest (its products are the
+      // "where it went wrong" evidence); targetPreviousManifestPath: the target's
+      // own prior (now-superseded) manifest (so it edits, not rewrites).
+      reasonPath?: string;
+      sourceManifestPath?: string;
+      targetPreviousManifestPath?: string;
     }
   // The revisit invalidates a runtime instance: the target's current effective
   // instance AND every already-materialized instance in its downstream cone are
