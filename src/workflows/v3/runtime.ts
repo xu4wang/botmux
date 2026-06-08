@@ -954,7 +954,7 @@ export async function runWorkflow(
     const waitId = `${node.id}-gate`; // MVP: one gate per node
     const gate = normalizeGateWaitInput(node.humanGate!);
     // gateDispatched carries instanceId (journal layer, accepted in 3239cf8);
-    // DEFERRED: instance-level waitId + stale-card guard (菲菲 review) — needs a
+    // DEFERRED: instance-level waitId + stale-card guard (code review) — needs a
     // waitId migration / card-action change, off the A→B→C critical path.
     appendEvent(journalPath, { type: 'gateDispatched', nodeId: node.id, ...(instanceId ? { instanceId } : {}), waitId });
 
@@ -1209,7 +1209,7 @@ export async function runWorkflow(
     const inputs: GoalInputs['inputs'] = [];
     const omittedFrom = new Set((omitted ?? []).map((o) => o.from));
     // Resolve upstream products by the source's CURRENT effective instance, NOT
-    // by nodeId-latest (菲菲 blocker): after a revisit, a stale `A#001` worker
+    // by nodeId-latest (stale-instance blocker): after a revisit, a stale `A#001` worker
     // can settle LATE; nodeId-latest would then hand `A#001`'s old product to
     // `B#002`.  Keying by effectiveInstanceId pins it to `A#002`.
     const snap = materialize(events);

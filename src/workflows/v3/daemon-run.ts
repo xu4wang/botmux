@@ -481,7 +481,7 @@ export function requestV3LoopGrant(
 /** The `nodeRetryRequested` for `key` whose reserved attempt has not yet been
  *  consumed by a matching `nodeDispatched` (undefined when none pending).  `key`
  *  matches by `(instanceId ?? nodeId)` so a stale retry on an OLD instance isn't
- *  mistaken for the current instance's pending retry (constraint 5 / 菲菲 #3). */
+ *  mistaken for the current instance's pending retry (constraint 5 / review #3). */
 function unconsumedRetryEvent(
   events: StoredEvent[],
   key: string,

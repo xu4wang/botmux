@@ -281,7 +281,7 @@ export function decideNext(
       continue;
     }
     // Every plain-node dispatch runs under a runtime instance (constraint 4 +
-    // 菲菲: 首派也要 #001).  decideNext — not the runtime — owns the id:
+    // design rule: 首派也要 #001).  decideNext — not the runtime — owns the id:
     //   - blocked / human-ask RETRY stays in the SAME instance (constraint 5):
     //     the node still carries `effectiveInstanceId`, so reuse it (the retry
     //     is a new attempt INSIDE it, e.g. A#001/attempts/002).
@@ -401,7 +401,7 @@ function firstUnresolved(activities: EdgeActivity[]): Extract<EdgeActivity, { ki
 }
 
 /** The edge key for the source's CURRENT effective instance — mirrors the key
- *  materialize stores edgeResolved under (verdict bound to SOURCE instance, 菲菲
+ *  materialize stores edgeResolved under (verdict bound to SOURCE instance, per code
  *  review).  A source revisit (`A#001`→`A#002`) reads a fresh `A#002->B`, never
  *  the superseded `A#001->B`.  Target is keyed by nodeId (it has no instance at
  *  edge-resolve time); a target-only revisit reusing the verdict is a known,
@@ -561,10 +561,10 @@ function st(state: V3RunState, id: string): V3NodeState {
 
 /** The next runtime instance id for a definition node, computed from every
  *  instance that has EVER appeared for it (`running/done/blocked/superseded`,
- *  per 菲菲's review — not just the effective/terminal ones, else a re-dispatch
+ *  per code review — not just the effective/terminal ones, else a re-dispatch
  *  could collide with an existing `A#002`).  First dispatch (no instances) →
  *  `#001`; a revisit re-dispatch → `#002`, … — instance is the real runtime
- *  node, so EVERY plain-node dispatch gets one (菲菲: 首派也要 #001).  Instance
+ *  node, so EVERY plain-node dispatch gets one (design rule: 首派也要 #001).  Instance
  *  ids are `<nodeId>#NNN`, zero-padded to mirror attempt `001`. */
 function nextInstanceId(nodeId: string, instances: V3RunState): string {
   const prefix = `${nodeId}#`;

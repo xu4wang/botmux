@@ -106,7 +106,7 @@ export function materialize(events: StoredEvent[]): V3RunSnapshot {
   const recordInstance = (nodeId: string, instanceId: string, status: V3NodeStatus, makeEffective: boolean): void => {
     // A superseded instance is FROZEN: a stale late settle from its old worker
     // (nodeSucceeded/Failed/Blocked) must NOT revive it to done/failed — the
-    // refresh state is what the dashboard shows (菲菲 review blocker 1).
+    // refresh state is what the dashboard shows (review blocker 1).
     if (instances.get(instanceId)?.status === 'superseded') return;
     instances.set(instanceId, { status });
     if (makeEffective) {
@@ -232,7 +232,7 @@ export function materialize(events: StoredEvent[]): V3RunSnapshot {
         break;
       }
       case 'edgeResolved': {
-        // Verdict is bound to the SOURCE effective instance only (菲菲 review):
+        // Verdict is bound to the SOURCE effective instance only (code review):
         // the edge resolves BEFORE the target dispatches, so the target has no
         // instance yet — key is `<sourceInstance>-><targetNodeId>`.  This makes
         // `A#001->B` and `A#002->B` distinct, so a SOURCE revisit's fresh verdict

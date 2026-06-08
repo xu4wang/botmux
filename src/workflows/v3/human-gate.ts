@@ -34,7 +34,7 @@ export interface GateWait {
   nodeId: string;
   /** The runtime instance this gate belongs to (`A#001`).  A revisit makes a
    *  fresh instance + fresh gate; resolve-time validation rejects a stale card
-   *  whose instance is no longer the node's effective one (菲菲 review). */
+   *  whose instance is no longer the node's effective one (code review). */
   instanceId?: string;
   prompt: string;
   options: string[];
