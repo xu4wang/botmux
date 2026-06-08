@@ -255,12 +255,13 @@ export interface ResultValidation {
  *  revisit `DEFAULT_REVISIT_BUDGET_PER_PAIR` times, and the whole run
  *  `DEFAULT_REVISIT_BUDGET_PER_RUN` times, each extendable by a
  *  `revisitBudgetGranted` event.  Counts revisits ALREADY made; returns
- *  `{ok:false, detail}` when this next revisit would exceed either tier. */
+ *  `{ok:false, tier, detail}` when this next revisit would exceed a tier —
+ *  `tier` tells the grant card which scope to extend (菲菲 review). */
 export function revisitBudgetStatus(
   events: StoredEvent[],
   sourceNodeId: string,
   toNodeId: string,
-): { ok: true } | { ok: false; detail: string } {
+): { ok: true } | { ok: false; tier: 'pair' | 'run'; detail: string } {
   let pairUsed = 0;
   let runUsed = 0;
   let pairGranted = 0;
@@ -277,10 +278,10 @@ export function revisitBudgetStatus(
   const pairLimit = DEFAULT_REVISIT_BUDGET_PER_PAIR + pairGranted;
   const runLimit = DEFAULT_REVISIT_BUDGET_PER_RUN + runGranted;
   if (pairUsed >= pairLimit) {
-    return { ok: false, detail: `revisit budget exhausted for ${sourceNodeId}->${toNodeId} (${pairUsed}/${pairLimit}) — grant +1 (this pair) to continue` };
+    return { ok: false, tier: 'pair', detail: `revisit budget exhausted for ${sourceNodeId}->${toNodeId} (${pairUsed}/${pairLimit}) — grant +1 (this pair) to continue` };
   }
   if (runUsed >= runLimit) {
-    return { ok: false, detail: `run-wide revisit budget exhausted (${runUsed}/${runLimit}) — grant +1 (run) to continue` };
+    return { ok: false, tier: 'run', detail: `run-wide revisit budget exhausted (${runUsed}/${runLimit}) — grant +1 (run) to continue` };
   }
   return { ok: true };
 }
@@ -843,6 +844,7 @@ export async function runWorkflow(
               appendEvent(journalPath, {
                 type: 'nodeBlocked', nodeId: node.id, ...(instanceId ? { instanceId } : {}), attemptId,
                 errorClass: 'resultInvalid', errorCode: 'REVISIT_BUDGET_EXHAUSTED', message: budget.detail,
+                revisitTo: revisit.request.toNodeId,
               });
               return;
             }

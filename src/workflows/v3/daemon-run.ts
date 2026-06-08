@@ -25,6 +25,7 @@ import {
   runWorkflow,
   nextAttemptIdFor,
   latestAttemptIdFor,
+  revisitBudgetStatus,
   type V3RuntimeDeps,
   type V3RuntimeOptions,
   type V3RunOutcome,
@@ -75,6 +76,9 @@ export interface V3BlockedInfo {
    *  the agent's question → the daemon posts an ask card instead of a plain
    *  retry card. */
   ask?: GoalAsk;
+  /** Present when errorCode === 'REVISIT_BUDGET_EXHAUSTED': the ancestor this
+   *  node tried to revisit → the daemon posts a revisit-grant card. */
+  revisitTo?: string;
 }
 
 /** Latest `nodeBlocked` details for a node (card content).  Falls back to a
@@ -91,10 +95,40 @@ export function blockedInfoFor(events: StoredEvent[], nodeId: string): V3Blocked
         errorCode: e.errorCode,
         message: e.message,
         ...(e.ask ? { ask: e.ask } : {}),
+        ...(e.revisitTo ? { revisitTo: e.revisitTo } : {}),
       };
     }
   }
   return found ?? { nodeId, attemptId: latestAttemptIdFor(events, nodeId) ?? `${nodeId}/attempts/001` };
+}
+
+/** What the daemon needs to render a revisit-budget grant card.  Derived from
+ *  the blocked event (source/target/attempt) + a re-run budget check (which tier
+ *  is exhausted — the card must grant the RIGHT scope, 菲菲 review).  Returns
+ *  undefined when `nodeId` isn't actually blocked on REVISIT_BUDGET_EXHAUSTED. */
+export interface V3RevisitBudgetBlockedInfo {
+  sourceNodeId: string;
+  toNodeId: string;
+  attemptId: string;
+  tier: 'pair' | 'run';
+  detail: string;
+}
+export function revisitBudgetBlockedInfoFor(
+  events: StoredEvent[],
+  nodeId: string,
+): V3RevisitBudgetBlockedInfo | undefined {
+  const info = blockedInfoFor(events, nodeId);
+  if (info.errorCode !== 'REVISIT_BUDGET_EXHAUSTED' || !info.revisitTo) return undefined;
+  const status = revisitBudgetStatus(events, nodeId, info.revisitTo);
+  // Exhausted at block time; if a grant already lifted it the card is stale —
+  // fall back to 'pair' tier + the recorded message for a still-renderable card.
+  return {
+    sourceNodeId: nodeId,
+    toNodeId: info.revisitTo,
+    attemptId: info.attemptId,
+    tier: status.ok ? 'pair' : status.tier,
+    detail: status.ok ? (info.message ?? 'revisit budget') : status.detail,
+  };
 }
 
 /** What the daemon needs to render an exhausted-loop grant card. */
@@ -137,6 +171,10 @@ export interface V3DaemonRunDeps {
   /** Post an exhausted-loop grant card (+1 iteration).  Optional — same
    *  fallthrough semantics as postBlockedCard. */
   postLoopGrantCard?: (binding: RunChatBinding, info: V3LoopExhaustedInfo, runId: string) => Promise<void>;
+  /** Post a revisit-budget grant card (+1 revisit).  Optional — same fallthrough
+   *  semantics as postBlockedCard.  Chosen over the plain blocked card when the
+   *  block is a `REVISIT_BUDGET_EXHAUSTED`. */
+  postRevisitGrantCard?: (binding: RunChatBinding, info: V3RevisitBudgetBlockedInfo, runId: string) => Promise<void>;
   /** Report a terminal run (final card / message).  Optional. */
   onTerminal?: (runId: string, outcome: V3TerminalOutcome, binding?: RunChatBinding) => Promise<void>;
   maxParallel?: number;
@@ -206,11 +244,15 @@ export async function driveV3Run(runId: string, deps: V3DaemonRunDeps): Promise<
     //   - blocked node/instance (contract failure) → retry card (new attempt).
     const events = readJournal(join(runDir, 'journal.ndjson'));
     const isLoop = materialize(events).loops.has(outcome.blockedNodeId);
+    const revisitBudget = revisitBudgetBlockedInfoFor(events, outcome.blockedNodeId);
     if (isLoop && deps.postLoopGrantCard) {
       const info = loopExhaustedInfoFor(events, outcome.blockedNodeId);
       const loopNode = dag.nodes.find((n) => n.id === outcome.blockedNodeId);
       if (loopNode && isLoopNode(loopNode)) info.maxIterations = loopNode.maxIterations;
       await deps.postLoopGrantCard(binding, info, runId);
+    } else if (revisitBudget && deps.postRevisitGrantCard) {
+      // Revisit budget exhausted → grant card (+1 revisit), not a plain retry.
+      await deps.postRevisitGrantCard(binding, revisitBudget, runId);
     } else if (!isLoop && deps.postBlockedCard) {
       await deps.postBlockedCard(binding, blockedInfoFor(events, outcome.blockedNodeId), runId);
     } else {
@@ -566,6 +608,9 @@ export interface V3GateRecovery {
   /** exhausted loop whose grant card the daemon should (re)post — the loop
    *  flavor of the same crash window. */
   repostLoopGrant?: V3LoopExhaustedInfo;
+  /** revisit-budget-exhausted node whose grant card the daemon should (re)post —
+   *  the revisit flavor of the same crash window. */
+  repostRevisitGrant?: V3RevisitBudgetBlockedInfo;
   /** true when a resolved-but-unjournaled gate was healed → daemon should driveV3Run. */
   resume: boolean;
 }
@@ -579,6 +624,8 @@ export interface V3GateRunnerDeps {
   postBlockedCard?: (binding: RunChatBinding, info: V3BlockedInfo, runId: string) => Promise<void>;
   /** Post (or re-post) an exhausted loop's grant card. */
   postLoopGrantCard?: (binding: RunChatBinding, info: V3LoopExhaustedInfo, runId: string) => Promise<void>;
+  /** Post (or re-post) a revisit-budget-exhausted node's grant card. */
+  postRevisitGrantCard?: (binding: RunChatBinding, info: V3RevisitBudgetBlockedInfo, runId: string) => Promise<void>;
   /** Notify a terminal run (optional, daemon-supplied). */
   notifyTerminal?: (binding: RunChatBinding | undefined, runId: string, outcome: V3TerminalOutcome) => Promise<void>;
   /** runtime deps passthrough (tests inject; daemon uses real pool). */
@@ -623,6 +670,7 @@ export function createV3GateRunner(deps: V3GateRunnerDeps) {
           postGateCard: (binding, gate, rid) => deps.postCard(binding, gate, rid),
           postBlockedCard: deps.postBlockedCard,
           postLoopGrantCard: deps.postLoopGrantCard,
+          postRevisitGrantCard: deps.postRevisitGrantCard,
           onTerminal: (rid, outcome, binding) =>
             deps.notifyTerminal ? deps.notifyTerminal(binding, rid, outcome) : Promise.resolve(),
         });
@@ -667,6 +715,13 @@ export function createV3GateRunner(deps: V3GateRunnerDeps) {
         if (rec.repostLoopGrant && deps.postLoopGrantCard) {
           try {
             await deps.postLoopGrantCard(rec.binding, rec.repostLoopGrant, rec.runId);
+          } catch (err) {
+            deps.onError?.(rec.runId, err);
+          }
+        }
+        if (rec.repostRevisitGrant && deps.postRevisitGrantCard) {
+          try {
+            await deps.postRevisitGrantCard(rec.binding, rec.repostRevisitGrant, rec.runId);
           } catch (err) {
             deps.onError?.(rec.runId, err);
           }
@@ -726,12 +781,18 @@ export function reconcileV3PendingGates(baseDir: string = defaultBaseDir(), owne
           }
           out.push({ runId, runDir, binding, repost: [], repostLoopGrant: info, resume: false });
         } else {
-          out.push({
-            runId, runDir, binding,
-            repost: [],
-            repostBlocked: blockedInfoFor(events, snap.blockedNodeId),
-            resume: false,
-          });
+          // Revisit-budget block → grant card; otherwise the plain retry card.
+          const revisitBudget = revisitBudgetBlockedInfoFor(events, snap.blockedNodeId);
+          if (revisitBudget) {
+            out.push({ runId, runDir, binding, repost: [], repostRevisitGrant: revisitBudget, resume: false });
+          } else {
+            out.push({
+              runId, runDir, binding,
+              repost: [],
+              repostBlocked: blockedInfoFor(events, snap.blockedNodeId),
+              resume: false,
+            });
+          }
         }
         continue;
       }

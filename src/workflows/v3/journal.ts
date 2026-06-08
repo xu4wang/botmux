@@ -79,7 +79,12 @@ export type V3Event =
   // ASK_HUMAN_ERROR_CODE): the goal worker's question, read from the attempt's
   // ask.json.  The daemon renders an ask card instead of a plain retry card;
   // everything else is identical to a contract-failure block.
-  | { type: 'nodeBlocked'; nodeId: string; instanceId?: string; attemptId: string; errorClass: V3ErrorClass; errorCode?: string; message?: string; ask?: GoalAsk }
+  | { type: 'nodeBlocked'; nodeId: string; instanceId?: string; attemptId: string; errorClass: V3ErrorClass; errorCode?: string; message?: string; ask?: GoalAsk;
+      // Set only when errorCode === 'REVISIT_BUDGET_EXHAUSTED': the ancestor this
+      // node tried to revisit.  The grant card reads it to label the source→target
+      // pair + pick the grant scope (the revisit was budget-blocked before any
+      // nodeRevisitRequested was journaled, so the target isn't recorded elsewhere).
+      revisitTo?: string }
   // Retry intent for a blocked node.  Appended by the retry entrypoint (CLI /
   // daemon card click).  materialize() resets the node to pending and records
   // `nextAttemptId` as the attempt reservation; the orchestrator then re-
