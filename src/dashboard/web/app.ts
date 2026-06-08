@@ -116,10 +116,14 @@ let lastStripHtml = '';
 function paintAttentionStrip(): void {
   const el = document.getElementById('attention-strip');
   if (!el) return;
+  // "Waiting since" = when the agent raised its hand (agentAttention.at), NOT
+  // lastMessageAt — a silent raise never bumps lastMessageAt, so using it would
+  // show the time since the last *message*, not since the item started waiting.
+  const waitSince = (s: any): number => Number(s.agentAttention?.at ?? s.lastMessageAt ?? 0);
   const pending = [...store.sessions.values()]
     .map(s => ({ s, reason: attentionReason(s) }))
     .filter((x): x is { s: any; reason: string } => !!x.reason)
-    .sort((a, b) => Number(a.s.lastMessageAt ?? 0) - Number(b.s.lastMessageAt ?? 0));
+    .sort((a, b) => waitSince(a.s) - waitSince(b.s));
   if (pending.length === 0) {
     el.hidden = true;
     el.innerHTML = '';
@@ -131,7 +135,7 @@ function paintAttentionStrip(): void {
     <span class="attention-strip-ic" aria-hidden="true">!</span>
     <b>${escapeHtml(t('strip.pending', { count: pending.length }))}</b>
     <span class="attention-strip-longest">${escapeHtml(t('strip.longest', {
-      time: relTime(longest.s.lastMessageAt),
+      time: relTime(waitSince(longest.s)),
       bot: botDisplayName(longest.s),
       reason: longest.reason,
     }))}</span>

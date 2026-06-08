@@ -289,4 +289,20 @@ describe('runHook', () => {
       expect(region.toLowerCase()).toContain('refused');
     });
   });
+
+  describe('workflow 里 botmux attention 拒绝（源码 gate 守卫）', () => {
+    it('cmdAttention 含 BOTMUX_WORKFLOW gate + exit 2 拒绝', () => {
+      const src = readFileSync(
+        new URL('../src/cli.ts', import.meta.url),
+        'utf-8',
+      );
+      const cmdAttentionIdx = src.indexOf('async function cmdAttention(');
+      expect(cmdAttentionIdx).toBeGreaterThanOrEqual(0);
+      const region = src.slice(cmdAttentionIdx, cmdAttentionIdx + 1500);
+      expect(region).toContain("process.env.BOTMUX_WORKFLOW === '1'");
+      expect(region).toContain('process.exit(2)');
+      expect(region.toLowerCase()).toContain('refused');
+      expect(region).toContain('humanGate / decision');
+    });
+  });
 });

@@ -4116,6 +4116,83 @@ async function cmdAsk(sub: string, rest: string[]): Promise<void> {
   }
 }
 
+// ─── botmux attention (agent raise-hand) ─────────────────────────────────────
+//
+// A CLI agent inside a botmux session calls `botmux attention raise --kind
+// <authz|decision|blocked|help> "<reason>"` when it hits a blocker only a human
+// can clear, then ends its turn. Non-blocking (unlike `ask`): POSTs to the
+// daemon, which lights the dashboard needs-you column + pings the thread. The
+// signal auto-clears when the user replies; `botmux attention clear` removes it
+// early if the agent unblocks itself.
+async function cmdAttention(sub: string, rest: string[]): Promise<void> {
+  // Same workflow-subagent safety posture as `send` and `ask`: raising a chat
+  // needs-you signal from inside a workflow node would bypass the run's gate /
+  // decision event log. Workflow blockers should be modeled in the workflow.
+  if (process.env.BOTMUX_WORKFLOW === '1') {
+    const runId = process.env.BOTMUX_WORKFLOW_RUN_ID ?? '?';
+    const nodeId = process.env.BOTMUX_WORKFLOW_NODE_ID ?? '?';
+    console.error(
+      `botmux attention refused inside workflow subagent (run=${runId} node=${nodeId}).\n` +
+        `Workflow subagents must surface blockers via humanGate / decision nodes\n` +
+        `so the resolution is recorded in the run's event log; attention would bypass it.`,
+    );
+    process.exit(2);
+  }
+
+  if (sub && sub !== 'raise' && sub !== 'clear') {
+    console.error(`botmux attention: 未知 subcommand "${sub}"（支持 raise | clear）`);
+    process.exit(2);
+  }
+  const action = sub === 'clear' ? 'clear' : 'raise';
+
+  const sessionId = process.env.BOTMUX_SESSION_ID;
+  const larkAppId = process.env.BOTMUX_LARK_APP_ID;
+  if (!sessionId || !larkAppId) {
+    console.error('botmux attention: 缺少 BOTMUX_SESSION_ID / BOTMUX_LARK_APP_ID。请在 botmux daemon spawn 的 CLI 会话内运行。');
+    process.exit(2);
+  }
+
+  const body: Record<string, unknown> = { sessionId, larkAppId, action };
+  if (action === 'raise') {
+    const reason = (argValue(rest, '--reason') ?? positionals(rest).join(' ')).trim();
+    if (!reason) {
+      console.error('botmux attention: 缺少 reason。用法: botmux attention raise --kind authz "需要 prod 部署授权"');
+      process.exit(2);
+    }
+    body.reason = reason;
+    const kind = argValue(rest, '--kind');
+    if (kind) body.kind = kind;
+  }
+
+  const daemon = findDaemon(larkAppId);
+  if (!daemon) {
+    console.error(`botmux attention: 找不到 daemon (larkAppId=${larkAppId})。daemon 已停？`);
+    process.exit(3);
+  }
+
+  let res: Response;
+  try {
+    res = await fetch(`http://127.0.0.1:${daemon.ipcPort}/api/attention`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+  } catch (err) {
+    console.error(`botmux attention: 无法连接 daemon (port=${daemon.ipcPort}): ${err instanceof Error ? err.message : String(err)}`);
+    process.exit(3);
+  }
+  if (!res.ok) {
+    let errBody = '';
+    try { errBody = (await res.text()).slice(0, 200); } catch { /* */ }
+    console.error(`botmux attention: daemon HTTP ${res.status}: ${errBody}`);
+    process.exit(3);
+  }
+  process.stdout.write(action === 'raise'
+    ? '🙋 已在 dashboard 举手，等待人工介入（用户回复后自动撤下）。\n'
+    : '✅ 已撤下举手信号。\n');
+  process.exit(0);
+}
+
 // ─── botmux hook <cliId> ──────────────────────────────────────────────────────
 //
 // hook 模式：各 CLI hook 配置调用 `botmux hook <cliId>`，stdin 注入 hook payload，
@@ -4845,6 +4922,7 @@ switch (command) {
     await cmdHook(cliId);
     break;
   }
+  case 'attention': await cmdAttention(process.argv[3] ?? '', process.argv.slice(4)); break;
   case 'workflow': {
     const { cmdWorkflow } = await import('./cli/workflow.js');
     await cmdWorkflow(process.argv[3] ?? '', process.argv.slice(4));

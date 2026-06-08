@@ -133,7 +133,7 @@ function attentionCardHtml(s: any): string {
     ${botAvatarHtml({ name: botName, larkAppId: s.larkAppId, size: 'sm' })}
     <div class="qcard-tx">
       <b>${escapeHtml(botName)} · ${escapeHtml((stripMentionPrefix(s.title) || s.sessionId).slice(0, 56))}</b>
-      <span>${escapeHtml(attentionReason(s) ?? '')} · ${relTime(s.lastMessageAt)}</span>
+      <span>${escapeHtml(attentionReason(s) ?? '')} · ${relTime(s.agentAttention?.at ?? s.lastMessageAt)}</span>
     </div>
     <a class="qcard-go" href="#/sessions">${escapeHtml(t('strip.handle'))}</a>
   </article>`;

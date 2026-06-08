@@ -1067,6 +1067,52 @@ botmux dispatch --title "<子项目标题>" --bot "<coder_open_id>:名字:coder"
 - 失败别硬重试同一招 ≥3 次；上报用户。
 `;
 
+const NEEDS_HELP_SKILL = `---
+name: botmux-needs-help
+description: 在你**自主执行任务的过程中撞上只有人类才能解除的硬阻碍**、无法靠自己继续时，主动在 dashboard 看板举手（needs-you 列亮起 + 飞书话题提醒），让用户能一眼看到哪个任务卡了、为什么卡。该用的场景：需要授权/凭证才能往下走（生产部署、付费/计费操作、访问受限资源或系统）、需要人来拍一个有副作用且不可逆的决策（删库删数据、改线上配置、对外发布、覆盖他人成果）、需求本身有歧义且你无法合理假设、缺少必要的访问权限/文件/密钥。**不要用的场景**：常规进度汇报（用 botmux-send）、你自己查得到或能合理假设的事、只是想确认一下、需要用户在给定选项里选一个（那用 botmux ask）。一句话：这是"我真的卡住了、必须人来"的信号，不是闲聊也不是汇报。
+---
+
+# botmux-needs-help — 主动举手求人工介入
+
+你是被 botmux 托管、在飞书话题里自主干活的 agent。跑任务时如果撞上**只有人能解除**的硬阻碍，用本 skill 在 dashboard 上举手——用户在看板上会看到这个会话进入 \`needs-you\` 列，并附上你写的原因；同时话题里会收到一条提醒。
+
+## 什么时候举手
+
+- **要授权/凭证**：生产环境部署、花钱/计费的操作、访问需要权限的系统或数据
+- **要人拍不可逆决策**：删库/删数据、改线上配置、对外发布、覆盖别人的工作
+- **需求有歧义且无法合理假设**：继续做下去有较大返工/搞错方向的风险
+- **缺访问权限/文件/密钥**：自己拿不到、必须人来提供或开通
+
+## 什么时候**不要**举手
+
+- 常规进度汇报、阶段性结论 → 用 \`botmux send\`
+- 你自己能查到、能合理默认、能验证的事 → 自己做完
+- 只是想"确认一下"但其实能自己判断 → 别打扰
+- 需要用户在**明确选项**里选一个 → 用 \`botmux ask\`（它会发按钮、阻塞等结果）
+- workflow 子 agent（\`BOTMUX_WORKFLOW=1\`）里需要人工 gate/decision → 走 workflow 的 humanGate / decision 节点，不要用本命令
+
+## 用法
+
+\`\`\`bash
+# 举手（非阻塞——发完就返回，你应当随即结束本轮、等人处理）
+botmux attention raise --kind authz "需要 prod 部署授权才能继续发布 v2.3"
+botmux attention raise --kind decision "迁移会删除 old_users 表，需你确认是否执行"
+botmux attention raise --kind blocked "缺少 TOS 上传密钥，拿不到就无法继续"
+
+# 自己后来不需要人介入了（少见，一般不用手动清）
+botmux attention clear
+\`\`\`
+
+- \`--kind\`：\`authz\`（授权/凭证）| \`decision\`（拍板）| \`blocked\`（缺东西卡住）| \`help\`（其它）。省略默认 \`blocked\`。
+- 引号里的 reason 要**一句话说清你卡在哪、需要人做什么**——它会原样显示在看板和话题里，是用户判断要不要立刻处理的唯一依据。
+
+## 举手之后怎么做
+
+1. 举手是**非阻塞**的：命令立刻返回，**不会**帮你等用户。
+2. 举完手就**结束这一轮**、停下来等人。别空转、别反复举手。
+3. 用户**一旦回复这个会话**，举手信号会**自动撤下**（看板出 needs-you 列），你按用户的新指示继续即可。无需手动 \`clear\`。
+`;
+
 export const ASK_SKILL_NAME = 'botmux-ask';
 
 export const BUILTIN_SKILLS: SkillDef[] = [
@@ -1079,6 +1125,7 @@ export const BUILTIN_SKILLS: SkillDef[] = [
   { name: 'botmux-workflow-create', content: WORKFLOW_CREATE_SKILL },
   { name: 'botmux-worker-budget', content: WORKER_BUDGET_SKILL },
   { name: 'botmux-orchestrate', content: ORCHESTRATE_SKILL },
+  { name: 'botmux-needs-help', content: NEEDS_HELP_SKILL },
 ];
 
 /** Skills that earlier botmux versions installed but no longer ship. The

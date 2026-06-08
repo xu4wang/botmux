@@ -136,6 +136,22 @@ describe('built-in botmux-worker-budget skill', () => {
   });
 });
 
+describe('built-in botmux-needs-help skill', () => {
+  it('teaches the raise/clear commands and gates triggering to real blockers', () => {
+    const skill = BUILTIN_SKILLS.find(s => s.name === 'botmux-needs-help');
+    expect(skill).toBeDefined();
+    expect(skill!.content).toContain('botmux attention raise');
+    expect(skill!.content).toContain('botmux attention clear');
+    expect(skill!.content).toContain('--kind');
+    // Description must steer agents AWAY from misuse (progress reports / ask).
+    expect(skill!.content).toContain('botmux ask');
+    expect(skill!.content).toContain('botmux send');
+    // Non-blocking + auto-clear-on-reply is the core contract.
+    expect(skill!.content).toContain('非阻塞');
+    expect(skill!.content).toContain('自动撤下');
+  });
+});
+
 describe('botmux-ask skill 条件兜底（hook 优先 + 非 hook CLI 保留）', () => {
   it('不在 BUILTIN_SKILLS（不再无条件装到所有 CLI）', () => {
     expect(BUILTIN_SKILLS.find(s => s.name === 'botmux-ask')).toBeUndefined();
