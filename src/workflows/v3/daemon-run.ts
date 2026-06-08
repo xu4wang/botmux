@@ -371,7 +371,13 @@ export function requestV3Retry(
   }
   if (status !== 'blocked') return { kind: 'stale-run', reason: 'not-blocked' };
 
-  const previousAttemptId = latestAttemptIdFor(events, nodeId);
+  // Constraint 5: a retry stays in the SAME instance — key attempt numbering by
+  // the blocked node's effective instance (`A#001`), not the bare nodeId, so the
+  // new attempt is `A#001/attempts/002` (NOT a new instance).  Legacy runs with
+  // no instance fall back to nodeId.
+  const instanceId = snap.nodes.get(nodeId)?.effectiveInstanceId;
+  const attemptKey = instanceId ?? nodeId;
+  const previousAttemptId = latestAttemptIdFor(events, attemptKey);
   if (!previousAttemptId) return { kind: 'stale-run', reason: 'not-blocked' };
   const info = blockedInfoFor(events, nodeId);
   // Freshness gate (codex blocker): the click must target the CURRENTLY
@@ -379,7 +385,7 @@ export function requestV3Retry(
   if (input.expectedAttemptId && input.expectedAttemptId !== info.attemptId) {
     return { kind: 'stale-run', reason: 'stale-attempt' };
   }
-  const nextAttemptId = nextAttemptIdFor(events, nodeId);
+  const nextAttemptId = nextAttemptIdFor(events, attemptKey);
 
   // Runtime human-ask answer: persist the chosen option next to the asked
   // attempt (answer.json) and carry its path on the retry event — buildInputs
@@ -403,6 +409,7 @@ export function requestV3Retry(
   appendEvent(journalPath, {
     type: 'nodeRetryRequested',
     nodeId,
+    ...(instanceId ? { instanceId } : {}),
     previousAttemptId,
     nextAttemptId,
     reason: 'blockedRetry',

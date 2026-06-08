@@ -320,16 +320,21 @@ function attemptNumber(attemptId: string): number | undefined {
  * a first dispatch.  Dispatch events are the authority for "seen"; a
  * reservation is consumed by a later `nodeDispatched` with the same number.
  */
-export function nextAttemptIdFor(events: StoredEvent[], nodeId: string): string {
+export function nextAttemptIdFor(events: StoredEvent[], key: string): string {
+  // `key` is the dispatch namespace: a runtime instance (`A#001`), a loop body
+  // expansion (`loopId.i001.code`), or a legacy nodeId.  Match events by their
+  // instance when they carry one, else by nodeId — so `A#002`'s attempts are
+  // counted separately from `A#001`'s (constraint 3/5).
+  const matches = (e: { nodeId: string; instanceId?: string }): boolean => (e.instanceId ?? e.nodeId) === key;
   let maxSeen = 0;
   let reserved: number | undefined;
   for (const e of events) {
-    if (e.type === 'nodeDispatched' && e.nodeId === nodeId) {
+    if (e.type === 'nodeDispatched' && matches(e)) {
       const n = attemptNumber(e.attemptId);
       if (n === undefined) continue;
       maxSeen = Math.max(maxSeen, n);
       if (reserved === n) reserved = undefined; // reservation consumed
-    } else if (e.type === 'nodeRetryRequested' && e.nodeId === nodeId) {
+    } else if (e.type === 'nodeRetryRequested' && matches(e)) {
       const n = attemptNumber(e.nextAttemptId);
       if (n === undefined) continue;
       reserved = n;
@@ -337,15 +342,17 @@ export function nextAttemptIdFor(events: StoredEvent[], nodeId: string): string 
     }
   }
   const n = reserved ?? maxSeen + 1;
-  return `${nodeId}/attempts/${String(n).padStart(3, '0')}`;
+  return `${key}/attempts/${String(n).padStart(3, '0')}`;
 }
 
-/** Latest dispatched attemptId for a node (the `previousAttemptId` a retry
- *  entrypoint must reference).  Undefined when the node never dispatched. */
-export function latestAttemptIdFor(events: StoredEvent[], nodeId: string): string | undefined {
+/** Latest dispatched attemptId for a dispatch `key` (the `previousAttemptId` a
+ *  retry entrypoint must reference).  `key` is an instance (`A#001`), a loop
+ *  body expansion, or a legacy nodeId — matched by `(instanceId ?? nodeId)` so
+ *  a retry stays inside the same instance.  Undefined when never dispatched. */
+export function latestAttemptIdFor(events: StoredEvent[], key: string): string | undefined {
   let latest: string | undefined;
   for (const e of events) {
-    if (e.type === 'nodeDispatched' && e.nodeId === nodeId) latest = e.attemptId;
+    if (e.type === 'nodeDispatched' && (e.instanceId ?? e.nodeId) === key) latest = e.attemptId;
   }
   return latest;
 }
@@ -565,7 +572,7 @@ export async function runWorkflow(
           const botSnap = botSnapshots.get(botKey)!;
           if ((botInFlight.get(botKey) ?? 0) >= perBotCap) continue;
           if ((cliInFlight.get(botSnap.cliId) ?? 0) >= perCliCap) continue;
-          startWork(node, botSnap, botKey, events, a.loop, a.omitted);
+          startWork(node, botSnap, botKey, events, a.loop, a.omitted, a.instanceId);
           startedThisTick++;
         } else if (a.kind === 'dispatchGate') {
           startGate(nodesById.get(a.nodeId)!);
@@ -625,13 +632,19 @@ export async function runWorkflow(
     events: StoredEvent[],
     loopRef?: V3LoopRef,
     omitted?: GoalInputs['omitted'],
+    instanceId?: string,
   ): void {
+    // The dispatch key namespaces the attempt dir + journal events.  For a
+    // plain node it's the runtime instance (`A#001`); for a loop body it's the
+    // expanded node.id (`loopId.i001.code`); legacy/no-instance falls back to
+    // node.id.  attempt dir = `<runDir>/<key>/attempts/NNN`.
+    const dispatchKey = instanceId ?? node.id;
     // Attempt number derived from the journal: 001 on first dispatch, the
     // reserved nextAttemptId after a blocked retry (no hardcoded 001 — a retry
     // must not overwrite the previous attempt's logs/manifest/pty).
-    const attemptId = nextAttemptIdFor(events, node.id);
+    const attemptId = nextAttemptIdFor(events, dispatchKey);
     const attemptNNN = attemptId.slice(attemptId.lastIndexOf('/') + 1);
-    const attemptDir = join(runDir, node.id, 'attempts', attemptNNN);
+    const attemptDir = join(runDir, dispatchKey, 'attempts', attemptNNN);
     const outputDir = join(attemptDir, 'work');
     mkdirSync(outputDir, { recursive: true });
 
@@ -664,7 +677,7 @@ export async function runWorkflow(
       [GOAL_ENV.V3_MARKER]: '1',
     };
 
-    appendEvent(journalPath, { type: 'nodeDispatched', nodeId: node.id, attemptId, loop: loopRef });
+    appendEvent(journalPath, { type: 'nodeDispatched', nodeId: node.id, ...(instanceId ? { instanceId } : {}), attemptId, loop: loopRef });
     botInFlight.set(botKey, (botInFlight.get(botKey) ?? 0) + 1);
     cliInFlight.set(botSnap.cliId, (cliInFlight.get(botSnap.cliId) ?? 0) + 1);
 
@@ -672,7 +685,7 @@ export async function runWorkflow(
     // contract types `runNode` to V3GoalNode, so narrow explicitly.
     if (!isGoalNode(node)) {
       appendEvent(journalPath, {
-        type: 'nodeFailed', nodeId: node.id, attemptId,
+        type: 'nodeFailed', nodeId: node.id, ...(instanceId ? { instanceId } : {}), attemptId,
         errorClass: 'workerError', message: `node "${node.id}" is not a goal node`,
       });
       releaseSlots(botKey, botSnap.cliId);
@@ -707,6 +720,7 @@ export async function runWorkflow(
         appendEvent(journalPath, {
           type: 'nodeSessionReady',
           nodeId: node.id,
+          ...(instanceId ? { instanceId } : {}),
           attemptId,
           sessionInfo: { sessionId: info.sessionId, webPort: info.webPort },
           ptyLogPath: info.ptyLogPath,
@@ -734,7 +748,7 @@ export async function runWorkflow(
             const entry = verdict.manifest!.files.find((f) => f.path === 'result.json');
             if (!entry) {
               appendEvent(journalPath, {
-                type: 'nodeBlocked', nodeId: node.id, attemptId,
+                type: 'nodeBlocked', nodeId: node.id, ...(instanceId ? { instanceId } : {}), attemptId,
                 errorClass: 'resultInvalid',
                 message: 'node declares resultSchema but its manifest lists no "result.json" file',
               });
@@ -743,7 +757,7 @@ export async function runWorkflow(
             const res = validateResult(join(outputDir, entry.path), node.resultSchema);
             if (!res.ok) {
               appendEvent(journalPath, {
-                type: 'nodeBlocked', nodeId: node.id, attemptId,
+                type: 'nodeBlocked', nodeId: node.id, ...(instanceId ? { instanceId } : {}), attemptId,
                 errorClass: 'resultInvalid',
                 message: (res.problems ?? ['result.json failed schema validation']).join('; '),
               });
@@ -751,7 +765,7 @@ export async function runWorkflow(
             }
           }
           appendEvent(journalPath, {
-            type: 'nodeSucceeded', nodeId: node.id, attemptId, manifestPath: result.manifestPath,
+            type: 'nodeSucceeded', nodeId: node.id, ...(instanceId ? { instanceId } : {}), attemptId, manifestPath: result.manifestPath,
           });
           return;
         }
@@ -799,19 +813,19 @@ export async function runWorkflow(
               : undefined;
           appendEvent(journalPath, {
             type: 'nodeBlocked',
-            nodeId: node.id, attemptId, errorClass, errorCode, message,
+            nodeId: node.id, ...(instanceId ? { instanceId } : {}), attemptId, errorClass, errorCode, message,
             ...(ask ? { ask } : {}),
           });
         } else {
           appendEvent(journalPath, {
             type: 'nodeFailed',
-            nodeId: node.id, attemptId, errorClass, errorCode, message,
+            nodeId: node.id, ...(instanceId ? { instanceId } : {}), attemptId, errorClass, errorCode, message,
           });
         }
       })
       .catch((err: unknown) => {
         appendEvent(journalPath, {
-          type: 'nodeFailed', nodeId: node.id, attemptId,
+          type: 'nodeFailed', nodeId: node.id, ...(instanceId ? { instanceId } : {}), attemptId,
           errorClass: 'workerError', message: err instanceof Error ? err.message : String(err),
         });
       })

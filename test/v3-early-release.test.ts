@@ -81,6 +81,7 @@ describe('v3 early-release / loser cancellation', () => {
       {
         kind: 'dispatchWork',
         nodeId: 'merge',
+        instanceId: 'merge#001',
         omitted: [{ from: 'b', reason: 'earlyRelease' }, { from: 'c', reason: 'earlyRelease' }],
       },
       { kind: 'cancelNode', nodeId: 'b', byNodeId: 'merge', detail: 'early-release loser for "merge"' },
@@ -101,7 +102,7 @@ describe('v3 early-release / loser cancellation', () => {
     });
 
     const actions = decideNext(dag, st({ a: 'done', b: 'running', c: 'running' }));
-    expect(actions).toContainEqual({ kind: 'dispatchWork', nodeId: 'merge', omitted: [{ from: 'b', reason: 'earlyRelease' }] });
+    expect(actions).toContainEqual({ kind: 'dispatchWork', nodeId: 'merge', instanceId: 'merge#001', omitted: [{ from: 'b', reason: 'earlyRelease' }] });
     expect(actions.some((a) => a.kind === 'cancelNode' && a.nodeId === 'b')).toBe(false);
   });
 

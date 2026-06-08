@@ -278,15 +278,19 @@ export function decideNext(
       actions.push({ kind: 'dispatchGate', nodeId: id });
       continue;
     }
-    // A node with prior runtime instances (all superseded by a revisit) is a
-    // RE-DISPATCH: compute the next instance id (`A#002`) so the action — not
-    // the runtime — owns it (constraint 4).  A first dispatch (no instances)
-    // keeps the pre-instance-layer path (instanceId undefined).
-    const reInstanceId = nextInstanceId(id, instances);
+    // Every plain-node dispatch runs under a runtime instance (constraint 4 +
+    // 菲菲: 首派也要 #001).  decideNext — not the runtime — owns the id:
+    //   - blocked / human-ask RETRY stays in the SAME instance (constraint 5):
+    //     the node still carries `effectiveInstanceId`, so reuse it (the retry
+    //     is a new attempt INSIDE it, e.g. A#001/attempts/002).
+    //   - first dispatch (no effective) → #001; a revisit re-dispatch (supersede
+    //     cleared the effective) → next #NNN from state.instances.
+    // (loop body dispatches use loopInstanceId, handled above.)
+    const instanceId = s.effectiveInstanceId ?? nextInstanceId(id, instances);
     actions.push({
       kind: 'dispatchWork',
       nodeId: id,
-      ...(reInstanceId ? { instanceId: reInstanceId } : {}),
+      instanceId,
       ...(readiness.omitted ? { omitted: readiness.omitted } : {}),
     });
     for (const loser of readiness.earlyLosers ?? []) {
@@ -549,19 +553,17 @@ function st(state: V3RunState, id: string): V3NodeState {
 /** The next runtime instance id for a definition node, computed from every
  *  instance that has EVER appeared for it (`running/done/blocked/superseded`,
  *  per 菲菲's review — not just the effective/terminal ones, else a re-dispatch
- *  could collide with an existing `A#002`).  Returns `undefined` when the node
- *  has no instances yet (a first dispatch keeps the pre-instance path).
- *  Instance ids are `<nodeId>#NNN`, zero-padded to mirror attempt `001`. */
-function nextInstanceId(nodeId: string, instances: V3RunState): string | undefined {
+ *  could collide with an existing `A#002`).  First dispatch (no instances) →
+ *  `#001`; a revisit re-dispatch → `#002`, … — instance is the real runtime
+ *  node, so EVERY plain-node dispatch gets one (菲菲: 首派也要 #001).  Instance
+ *  ids are `<nodeId>#NNN`, zero-padded to mirror attempt `001`. */
+function nextInstanceId(nodeId: string, instances: V3RunState): string {
   const prefix = `${nodeId}#`;
   let max = 0;
-  let seen = false;
   for (const instanceId of instances.keys()) {
     if (!instanceId.startsWith(prefix)) continue;
     const n = Number.parseInt(instanceId.slice(prefix.length), 10);
-    if (!Number.isFinite(n)) continue;
-    seen = true;
-    if (n > max) max = n;
+    if (Number.isFinite(n) && n > max) max = n;
   }
-  return seen ? `${prefix}${String(max + 1).padStart(3, '0')}` : undefined;
+  return `${prefix}${String(max + 1).padStart(3, '0')}`;
 }

@@ -124,16 +124,16 @@ describe('runWorkflow — research→summarize 最小闭环', () => {
       expect(events.some((e) => e.type === 'runSucceeded')).toBe(true);
 
       const inputs = JSON.parse(
-        readFileSync(join(outcome.runDir, 'summarize', 'attempts', '001', 'inputs.json'), 'utf-8'),
+        readFileSync(join(outcome.runDir, 'summarize#001', 'attempts', '001', 'inputs.json'), 'utf-8'),
       ) as GoalInputs;
       expect(inputs.inputs).toHaveLength(1);
       expect(isAbsolute(inputs.inputs[0]!.path)).toBe(true);
-      expect(inputs.inputs[0]!.path).toContain(join('research', 'attempts', '001', 'work', 'out.md'));
+      expect(inputs.inputs[0]!.path).toContain(join('research#001', 'attempts', '001', 'work', 'out.md'));
 
       // goal.txt carries the user goal + the full execution/manifest contract
       // (it is NOT the bare goal string) so the short `/goal` command can just
       // point the agent here without tripping TUI paste-detection.
-      const goalFile = readFileSync(join(outcome.runDir, 'research', 'attempts', '001', 'goal.txt'), 'utf-8');
+      const goalFile = readFileSync(join(outcome.runDir, 'research#001', 'attempts', '001', 'goal.txt'), 'utf-8');
       expect(goalFile).toContain('调研 X');                         // the user goal
       expect(goalFile).toContain(GOAL_ENV.MANIFEST_PATH);           // contract references the manifest env
       expect(goalFile).toContain('"schemaVersion": 1');             // rendered manifest shape
@@ -271,15 +271,15 @@ describe('runWorkflow — edge activation', () => {
         from: e.from, to: e.to, active: e.active, sourceAttemptId: e.sourceAttemptId,
       })).sort((a, b) => a.to.localeCompare(b.to));
       expect(resolved).toEqual([
-        { from: 'judge', to: 'fail', active: false, sourceAttemptId: 'judge/attempts/001' },
-        { from: 'judge', to: 'pass', active: true, sourceAttemptId: 'judge/attempts/001' },
+        { from: 'judge', to: 'fail', active: false, sourceAttemptId: 'judge#001/attempts/001' },
+        { from: 'judge', to: 'pass', active: true, sourceAttemptId: 'judge#001/attempts/001' },
       ]);
       expect(events.some((e) => e.type === 'nodeSkipped' && e.nodeId === 'fail')).toBe(true);
       expect(events.some((e) => e.type === 'nodeDispatched' && e.nodeId === 'fail')).toBe(false);
       expect(events.some((e) => e.type === 'nodeSucceeded' && e.nodeId === 'merge')).toBe(true);
       expect(mergeInputs?.inputs.map((i) => i.from)).toEqual(['pass']);
       expect(mergeInputs?.omitted).toEqual([{ from: 'fail', reason: 'sourceSkipped' }]);
-      const mergeGoal = readFileSync(join(outcome.runDir, 'merge', 'attempts', '001', 'goal.txt'), 'utf-8');
+      const mergeGoal = readFileSync(join(outcome.runDir, 'merge#001', 'attempts', '001', 'goal.txt'), 'utf-8');
       expect(mergeGoal).toContain('omitted');
     } finally {
       rmSync(base, { recursive: true, force: true });

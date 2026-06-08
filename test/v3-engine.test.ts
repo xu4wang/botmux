@@ -118,14 +118,14 @@ describe('topologicalOrder', () => {
 describe('decideNext', () => {
   const dag: V3Dag = validateDag(TWO_NODE);
 
-  it('空状态：只派根节点，依赖未就绪的不派', () => {
+  it('空状态：只派根节点，依赖未就绪的不派（首派带 #001 实例）', () => {
     const actions = decideNext(dag, new Map());
-    expect(actions).toEqual([{ kind: 'dispatchWork', nodeId: 'research' }]);
+    expect(actions).toEqual([{ kind: 'dispatchWork', nodeId: 'research', instanceId: 'research#001' }]);
   });
 
   it('根节点 done 后派下游', () => {
     const state: V3RunState = new Map([['research', { status: 'done' }]]);
-    expect(decideNext(dag, state)).toEqual([{ kind: 'dispatchWork', nodeId: 'summarize' }]);
+    expect(decideNext(dag, state)).toEqual([{ kind: 'dispatchWork', nodeId: 'summarize', instanceId: 'summarize#001' }]);
   });
 
   it('运行中节点不重复派', () => {
@@ -155,9 +155,9 @@ describe('decideNext', () => {
     ]);
   });
 
-  it('首次派发(instances 为空)不带 instanceId（向后兼容首轮路径）', () => {
+  it('首次派发(instances 为空) → 带 #001（instance 是真正运行节点,首派也是实例）', () => {
     expect(decideNext(dag, new Map(), new Map(), new Map(), new Map())).toEqual([
-      { kind: 'dispatchWork', nodeId: 'research' },
+      { kind: 'dispatchWork', nodeId: 'research', instanceId: 'research#001' },
     ]);
   });
 
@@ -169,7 +169,7 @@ describe('decideNext', () => {
     expect(decideNext(gated, new Map())).toEqual([{ kind: 'dispatchGate', nodeId: 'a' }]);
     // gate 已批准（gateCleared）→ 派 work
     const cleared: V3RunState = new Map([['a', { status: 'pending', gateCleared: true }]]);
-    expect(decideNext(gated, cleared)).toEqual([{ kind: 'dispatchWork', nodeId: 'a' }]);
+    expect(decideNext(gated, cleared)).toEqual([{ kind: 'dispatchWork', nodeId: 'a', instanceId: 'a#001' }]);
   });
 
   it('findSinks 找到末端节点', () => {
@@ -246,7 +246,7 @@ describe('decideNext', () => {
     ]);
     expect(decideNext(branch, state, new Map(), edges)).toEqual([
       { kind: 'skipNode', nodeId: 'fail', detail: expect.stringContaining('edgeInactive') },
-      { kind: 'dispatchWork', nodeId: 'pass' },
+      { kind: 'dispatchWork', nodeId: 'pass', instanceId: 'pass#001' },
     ]);
 
     const afterSkip: V3RunState = new Map([
@@ -293,6 +293,7 @@ describe('decideNext', () => {
       {
         kind: 'dispatchWork',
         nodeId: 'any',
+        instanceId: 'any#001',
         omitted: [
           { from: 'b', reason: 'sourceSkipped' },
           { from: 'c', reason: 'sourceSkipped' },
