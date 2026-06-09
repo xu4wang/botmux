@@ -463,6 +463,8 @@ describe('DAEMON_COMMANDS set', () => {
   });
 
   it('should have the correct size', () => {
+    // 22 = 21 original + /land (added with the sandbox-landing feature; this
+    // assertion was left stale when it landed).
     expect(DAEMON_COMMANDS.size).toBe(22);
   });
 
