@@ -1,9 +1,22 @@
 // test/dashboard-ipc.test.ts
 import { describe, it, expect, afterEach, vi } from 'vitest';
-import { startIpcServer, setLarkAppId, type IpcServerHandle } from '../src/core/dashboard-ipc-server.js';
+import { createHmac, randomBytes } from 'node:crypto';
+import { startIpcServer, setLarkAppId, setIpcAuthSecret, type IpcServerHandle } from '../src/core/dashboard-ipc-server.js';
 import { dashboardEventBus } from '../src/core/dashboard-events.js';
 import * as groupsStore from '../src/services/groups-store.js';
 import * as oncallStore from '../src/services/oncall-store.js';
+import * as workerPool from '../src/core/worker-pool.js';
+
+// Loopback-HMAC the write-link routes require. Inject a known secret per test
+// (setIpcAuthSecret) and sign with it, so the suite doesn't depend on a real
+// ~/.botmux/.dashboard-secret existing on the box.
+const TEST_IPC_SECRET = 'test-ipc-secret-deadbeef';
+function tokenAuthHeaders(secret = TEST_IPC_SECRET): Record<string, string> {
+  const ts = Math.floor(Date.now() / 1000).toString();
+  const nonce = randomBytes(8).toString('hex');
+  const sig = createHmac('sha256', secret).update(`${ts}:${nonce}`).digest('base64url');
+  return { 'X-Botmux-Cli-Ts': ts, 'X-Botmux-Cli-Nonce': nonce, 'X-Botmux-Cli-Auth': sig };
+}
 
 let handle: IpcServerHandle | null = null;
 
@@ -13,6 +26,7 @@ afterEach(async () => {
   // Reset module-level larkAppId between tests so groups endpoints don't
   // leak state across describes.
   setLarkAppId('');
+  setIpcAuthSecret(null);
 });
 
 describe('dashboard IPC server', () => {
@@ -55,6 +69,57 @@ describe('POST /api/sessions/:sessionId/close', () => {
     expect(res.status).toBe(200);
     const body = await res.json();
     expect(body.ok).toBe(true);
+  });
+});
+
+describe('GET /api/sessions/:sessionId/write-link', () => {
+  it('returns 401 without a valid loopback-HMAC signature', async () => {
+    setIpcAuthSecret(TEST_IPC_SECRET);
+    handle = await startIpcServer({ port: 0, host: '127.0.0.1' });
+    const res = await fetch(`http://127.0.0.1:${handle.port}/api/sessions/s2/write-link`);
+    expect(res.status).toBe(401);
+    expect((await res.json()).error).toBe('unauthorized');
+  });
+
+  it('returns 404 session_not_active for an unknown/closed session', async () => {
+    setIpcAuthSecret(TEST_IPC_SECRET);
+    handle = await startIpcServer({ port: 0, host: '127.0.0.1' });
+    const res = await fetch(`http://127.0.0.1:${handle.port}/api/sessions/ghost/write-link`, { headers: tokenAuthHeaders() });
+    expect(res.status).toBe(404);
+    const body = await res.json();
+    expect(body.ok).toBe(false);
+    expect(body.error).toBe('session_not_active');
+  });
+
+  it('returns 409 terminal_unavailable when the live session has no web terminal yet', async () => {
+    setIpcAuthSecret(TEST_IPC_SECRET);
+    const spy = vi.spyOn(workerPool, 'findActiveBySessionId').mockReturnValue({
+      session: { sessionId: 's1', webPort: null },
+      workerPort: null,
+      workerToken: null,
+    } as any);
+    handle = await startIpcServer({ port: 0, host: '127.0.0.1' });
+    const res = await fetch(`http://127.0.0.1:${handle.port}/api/sessions/s1/write-link`, { headers: tokenAuthHeaders() });
+    expect(res.status).toBe(409);
+    expect((await res.json()).error).toBe('terminal_unavailable');
+    spy.mockRestore();
+  });
+
+  it('returns 200 with a token-bearing url for a live session', async () => {
+    setIpcAuthSecret(TEST_IPC_SECRET);
+    const spy = vi.spyOn(workerPool, 'findActiveBySessionId').mockReturnValue({
+      session: { sessionId: 's2', webPort: 4321 },
+      workerPort: 4321,
+      workerToken: 'secret-tok',
+    } as any);
+    handle = await startIpcServer({ port: 0, host: '127.0.0.1' });
+    const res = await fetch(`http://127.0.0.1:${handle.port}/api/sessions/s2/write-link`, { headers: tokenAuthHeaders() });
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(body.ok).toBe(true);
+    expect(typeof body.url).toBe('string');
+    expect(body.url).toContain('token=secret-tok');
+    spy.mockRestore();
   });
 });
 

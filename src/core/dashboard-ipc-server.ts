@@ -1,6 +1,10 @@
 // src/core/dashboard-ipc-server.ts
 import { createServer, type IncomingMessage, type ServerResponse, type Server } from 'node:http';
+import { readFileSync } from 'node:fs';
+import { homedir } from 'node:os';
+import { join } from 'node:path';
 import { logger } from '../utils/logger.js';
+import { verifyHmac } from '../dashboard/auth.js';
 import { listenWithProbe } from '../utils/listen-with-probe.js';
 import * as sessionStore from '../services/session-store.js';
 import * as scheduleStore from '../services/schedule-store.js';
@@ -27,6 +31,7 @@ import { getChatMode, replyMessage, sendMessage, resolveUnionIdFromOpenId } from
 import { resumeSession } from './session-manager.js';
 import { getCliDisplayName } from '../im/lark/card-builder.js';
 import { locateLimiter } from './dashboard-locate.js';
+import { buildTerminalUrl } from './terminal-url.js';
 import { dashboardEventBus } from './dashboard-events.js';
 import { validateWorkingDir } from './working-dir.js';
 import { resolveRoleFile, writeRoleFile, deleteRoleFile } from './role-resolver.js';
@@ -93,6 +98,37 @@ export async function readJsonBody<T = unknown>(req: IncomingMessage): Promise<T
   return JSON.parse(Buffer.concat(chunks).toString('utf8'));
 }
 
+// ─── Token-route auth (loopback HMAC) ───────────────────────────────────────
+//
+// Most IPC routes are loopback-trusted: the codebase's threat model treats a
+// local botmux process as already root-equivalent on the box (see the
+// migrate-to-chat route below), so close/resume/sandbox-diff carry no per-route
+// auth. The write-link route is different — it HANDS OUT a reusable
+// terminal-control credential (the worker write token), so it additionally
+// requires the caller to prove it can read ~/.botmux/.dashboard-secret. That
+// keeps a sandboxed worker, or a random local process that merely discovered the
+// ipcPort, from minting write tokens for sessions it doesn't own. The only legit
+// caller — the dashboard proxy — signs with the same secret + scheme as
+// `botmux dashboard` → /__cli/rotate. (A same-user process that can read the
+// secret is out of scope: it's already trusted.)
+let injectedIpcSecret: string | null = null;
+/** Test seam: override the secret used to verify token-route HMAC. */
+export function setIpcAuthSecret(secret: string | null): void { injectedIpcSecret = secret; }
+function ipcAuthSecret(): string | null {
+  if (injectedIpcSecret) return injectedIpcSecret;
+  try { return readFileSync(join(homedir(), '.botmux', '.dashboard-secret'), 'utf8').trim() || null; }
+  catch { return null; }
+}
+function tokenRouteAuthorized(req: IncomingMessage): boolean {
+  const secret = ipcAuthSecret();
+  if (!secret) return false; // fail-closed: no secret on disk → nobody can sign
+  const ts = req.headers['x-botmux-cli-ts'];
+  const nonce = req.headers['x-botmux-cli-nonce'];
+  const sig = req.headers['x-botmux-cli-auth'];
+  if (typeof ts !== 'string' || typeof nonce !== 'string' || typeof sig !== 'string') return false;
+  return verifyHmac(secret, { ts, nonce, sig }, req.socket.remoteAddress ?? '').ok;
+}
+
 ipcRoute('GET', '/__health', (_req, res) => {
   jsonRes(res, 200, { ok: true });
 });
@@ -137,6 +173,29 @@ ipcRoute('GET', '/api/sessions/:sessionId', (_req, res, params) => {
 ipcRoute('POST', '/api/sessions/:sessionId/close', async (_req, res, params) => {
   const r = await closeSession(params.sessionId);
   jsonRes(res, 200, r);
+});
+
+/**
+ * Mint the WRITABLE web-terminal link for a live session — the dashboard
+ * counterpart to the Lark card's "🔑 获取操作链接" button. Returns the URL with
+ * the worker's write `?token=` appended, built daemon-side via buildTerminalUrl
+ * so it picks up this process's live terminal-proxy state (the dashboard
+ * aggregator can't see it). The token is returned ONLY here, on demand —
+ * deliberately never embedded in /api/sessions rows or the SSE stream.
+ *
+ * Two gates protect it: at the dashboard's HTTP boundary this path is absent
+ * from the public allow-list, so an anonymous browser 401s; and here on the
+ * daemon IPC, tokenRouteAuthorized requires a loopback-HMAC signed with
+ * .dashboard-secret, so a local process that merely knows the ipcPort still
+ * can't pull a write token.
+ */
+ipcRoute('GET', '/api/sessions/:sessionId/write-link', (req, res, params) => {
+  if (!tokenRouteAuthorized(req)) return jsonRes(res, 401, { ok: false, error: 'unauthorized' });
+  const ds = findActiveBySessionId(params.sessionId);
+  if (!ds) return jsonRes(res, 404, { ok: false, error: 'session_not_active' });
+  const port = ds.workerPort ?? ds.session.webPort;
+  if (!port || !ds.workerToken) return jsonRes(res, 409, { ok: false, error: 'terminal_unavailable' });
+  jsonRes(res, 200, { ok: true, url: buildTerminalUrl(ds, { write: true }) });
 });
 
 // ─── Sandbox landing (owner reviews the clone's diff then applies it back) ───

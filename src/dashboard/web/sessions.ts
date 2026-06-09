@@ -17,6 +17,7 @@ import {
   relTime,
   stripMentionPrefix,
   t,
+  ui,
 } from './ui.js';
 
 function th(sort: string, label: string): string {
@@ -67,6 +68,46 @@ function terminalHref(s: any): string | null {
   const port = s.proxyPort ?? s.webPort;
   const suffix = s.proxyPort ? `/s/${encodeURIComponent(s.sessionId)}` : '';
   return `http://${location.hostname}:${port}${suffix}`;
+}
+
+// Terminal control for a live session. Read-only "open" segment is always shown;
+// authenticated dashboard users additionally get a "🔑" segment that mints the
+// writable (token-bearing) link on demand — fused into one pill (.term-split) so
+// the already-busy card action row gains no extra slot. `url` is the read-only
+// href (terminalHref); '' when the session has no live web terminal.
+function terminalControlsHtml(url: string | null): string {
+  if (!url) return '';
+  const open = `<a class="btn-link primary term-open" href="${escapeHtml(url)}" target="_blank" rel="noopener">${t('sessions.openTerminal')}</a>`;
+  if (!ui.authed) return open;
+  const write = `<button type="button" class="btn-link primary term-write" data-action="write-link" title="${escapeHtml(t('sessions.writeLinkHint'))}" aria-label="${escapeHtml(t('sessions.writeLink'))}">🔑</button>`;
+  return `<span class="term-split">${open}${write}</span>`;
+}
+
+// Mint + open the writable web terminal for `s`. The tab is opened synchronously
+// inside the click gesture (then navigated post-fetch) so the popup blocker —
+// which fires when window.open trails an await — stays quiet. The token lands in
+// the new tab's address bar, same as the Lark card's link, by design.
+async function openWriteLink(s: any, btn?: HTMLButtonElement): Promise<void> {
+  const tab = window.open('about:blank', '_blank');
+  if (tab) tab.opener = null;
+  if (btn) btn.disabled = true;
+  try {
+    const r = await fetch(`/api/sessions/${encodeURIComponent(s.sessionId)}/write-link`);
+    const body = await r.json().catch(() => ({}));
+    if (!r.ok || body?.ok === false || !body?.url) {
+      tab?.close();
+      // 401 already raises the global read-only toast — don't double-alert.
+      if (r.status !== 401) alert(`${t('sessions.writeLinkFail')}: ${body?.error ?? r.status}`);
+      return;
+    }
+    if (tab) tab.location.href = body.url;
+    else window.open(body.url, '_blank', 'noopener');
+  } catch (e) {
+    tab?.close();
+    alert(`${t('sessions.writeLinkFail')}: ${e}`);
+  } finally {
+    if (btn) btn.disabled = false;
+  }
 }
 
 function deriveSessionBoardColumn(s: any): BoardColumnId | null {
@@ -271,7 +312,7 @@ export function renderSessionsPage(root: HTMLElement) {
       <div class="session-card-actions">
         ${chatScopeLink(s) ?? `<button type="button" data-action="locate">${t('sessions.locate')}</button>`}
         <button type="button" data-action="details">${t('sessions.details')}</button>
-        ${terminal ? `<a class="btn-link primary" href="${escapeHtml(terminal)}" target="_blank" rel="noopener">${t('sessions.openTerminal')}</a>` : ''}
+        ${terminalControlsHtml(terminal)}
         <button type="button" class="contrast" data-action="close">${t('sessions.close')}</button>
       </div>
     </article>`;
@@ -508,7 +549,7 @@ export function renderSessionsPage(root: HTMLElement) {
       <p><b>${t('sessions.workingDir')}:</b> ${escapeHtml(s.workingDir ?? '-')}</p>
       <div class="actions">
         ${chatScopeLink(s) ?? `<button id="locate-btn" type="button">${t('sessions.locate')}</button>`}
-        ${terminal ? `<a class="btn-link primary" href="${escapeHtml(terminal)}" target="_blank" rel="noopener">${t('sessions.openTerminal')}</a>` : ''}
+        ${terminalControlsHtml(terminal)}
         ${closed ? `<button id="resume-btn" type="button" class="primary">${t('sessions.resume')}</button>` : ''}
         ${!closed ? `<button id="close-btn" type="button" class="contrast">${t('sessions.close')}</button>` : ''}
         <button id="land-btn" type="button">${t('sessions.land')}</button>
@@ -528,6 +569,13 @@ export function renderSessionsPage(root: HTMLElement) {
     const locateBtn = drawer.querySelector<HTMLButtonElement>('#locate-btn');
     if (locateBtn) {
       locateBtn.onclick = () => void locateSession(s, locateBtn);
+    }
+
+    // Writable-terminal segment (.term-write) lives inside the drawer, outside
+    // the board's click delegation — wire it directly.
+    const writeBtn = drawer.querySelector<HTMLButtonElement>('.term-write');
+    if (writeBtn) {
+      writeBtn.onclick = () => void openWriteLink(s, writeBtn);
     }
 
     const resumeBtn = drawer.querySelector<HTMLButtonElement>('#resume-btn');
@@ -638,6 +686,7 @@ export function renderSessionsPage(root: HTMLElement) {
     if (actionButton) {
       const action = actionButton.dataset.action;
       if (action === 'details') openDrawer(s);
+      else if (action === 'write-link') void openWriteLink(s, actionButton);
       else if (action === 'locate') void locateSession(s, actionButton);
       else if (action === 'close') void closeSession(s, actionButton).then(ok => {
         if (ok) {

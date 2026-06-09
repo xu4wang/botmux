@@ -155,6 +155,9 @@ async function loadAuthState(): Promise<void> {
     if (r.ok) {
       const j = await r.json();
       isAuthed = !!j.authed;
+      // Share the cookie-auth verdict with per-row renderers (the sessions
+      // board's writable-terminal segment reads ui.authed at render time).
+      ui.authed = isAuthed;
       publicReadOnly = !!(j.settings && j.settings.publicReadOnly);
       // The global UI locale (`botmux lang`) is the single source of truth: when
       // set, it wins over the browser-detected / locally-stored locale so the

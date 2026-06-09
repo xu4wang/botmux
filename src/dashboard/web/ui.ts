@@ -24,6 +24,12 @@ class DashboardUiState {
   themeMode: ThemeMode = 'system';
   resolvedTheme: ResolvedTheme = 'light';
   skin: SkinId = 'default';
+  // Dashboard cookie-auth state, mirrored from /api/settings by app.ts's
+  // loadAuthState(). Gates write-only affordances rendered per-row (e.g. the
+  // writable-terminal "🔑" segment in the sessions board) — read-only visitors
+  // must not see a control whose endpoint they'd 401 on. Defaults true so a
+  // transient probe failure never hides it from a real token holder.
+  authed = true;
   private listeners = new Set<UiListener>();
   private translate = createDashboardTranslator(this.locale);
   private mediaQuery: MediaQueryList | null = null;

@@ -5,7 +5,7 @@ import {
 } from 'node:fs';
 import { join, dirname, extname } from 'node:path';
 import { homedir } from 'node:os';
-import { randomBytes } from 'node:crypto';
+import { randomBytes, createHmac } from 'node:crypto';
 import { logger } from './utils/logger.js';
 import { config } from './config.js';
 import { listenWithProbe } from './utils/listen-with-probe.js';
@@ -63,6 +63,18 @@ let activeToken: string | null = loadPersistedToken(TOKEN_PATH);
 let boundDashboardPort = config.dashboard.port;
 
 const SECRET = loadOrCreateSecret();
+
+/** Sign a loopback request to a daemon's write-link route. The daemon verifies
+ *  with the same .dashboard-secret, so only a caller that can read the secret —
+ *  the dashboard — can mint write tokens; a bare local process that only knows
+ *  the ipcPort can't. Same scheme as the `botmux dashboard` → /__cli/rotate
+ *  HMAC. */
+function signDaemonTokenHeaders(): Record<string, string> {
+  const ts = Math.floor(Date.now() / 1000).toString();
+  const nonce = randomBytes(8).toString('hex');
+  const sig = createHmac('sha256', SECRET).update(`${ts}:${nonce}`).digest('base64url');
+  return { 'X-Botmux-Cli-Ts': ts, 'X-Botmux-Cli-Nonce': nonce, 'X-Botmux-Cli-Auth': sig };
+}
 mkdirSync(REGISTRY_DIR, { recursive: true });
 const registry = new DaemonRegistry(REGISTRY_DIR);
 const aggregator = new Aggregator();
@@ -578,6 +590,19 @@ const server = createServer(async (req, res) => {
       const owner = aggregator.ownerOf(sid);
       if (!owner) return jsonRes(res, 404, { ok: false, error: 'unknown_session' });
       const upstream = await proxyToDaemon(owner, `/api/sessions/${sid}/${op}`, { method: 'POST' });
+      res.writeHead(upstream.status, { 'content-type': 'application/json' });
+      res.end(await upstream.text());
+      return;
+    }
+
+    // Writable web-terminal link (token-bearing). Not in any public allow-list,
+    // so decideDashboardAuth has already 401'd unauthenticated callers before we
+    // get here — the token only reaches authenticated dashboard sessions.
+    if (req.method === 'GET' && (m = url.pathname.match(/^\/api\/sessions\/([^/]+)\/write-link$/))) {
+      const sid = decodeURIComponent(m[1]);
+      const owner = aggregator.ownerOf(sid);
+      if (!owner) return jsonRes(res, 404, { ok: false, error: 'unknown_session' });
+      const upstream = await proxyToDaemon(owner, `/api/sessions/${sid}/write-link`, { method: 'GET', headers: signDaemonTokenHeaders() });
       res.writeHead(upstream.status, { 'content-type': 'application/json' });
       res.end(await upstream.text());
       return;

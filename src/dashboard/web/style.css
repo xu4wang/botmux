@@ -1065,6 +1065,23 @@ button.primary {
   font-size: 12px;
 }
 
+/* 终端控件：只读「终端」段 + 可写「🔑」段融成一个药丸，占一个动作位而非两个。
+   段间留 1px 缝隙借底色当分隔线，避免和各皮肤的 primary 底色打架。 */
+.term-split {
+  display: inline-flex;
+  gap: 1px;
+}
+.term-split > .term-open {
+  border-top-right-radius: 0;
+  border-bottom-right-radius: 0;
+}
+.term-split > .term-write {
+  border-top-left-radius: 0;
+  border-bottom-left-radius: 0;
+  padding-left: 8px;
+  padding-right: 8px;
+}
+
 dialog {
   width: min(680px, calc(100vw - 32px));
   max-height: calc(100vh - 32px);
