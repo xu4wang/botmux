@@ -272,6 +272,7 @@ function snapshotFromConfig(
     cliId: string;
     name?: string;
     workingDir?: string;
+    cliPathOverride?: string;
   },
 ): BotSnapshot {
   return {
@@ -279,6 +280,7 @@ function snapshotFromConfig(
     cliId: cfg.cliId,
     displayName: cfg.name ?? requestedName,
     ...(cfg.workingDir ? { workingDir: cfg.workingDir } : {}),
+    ...(cfg.cliPathOverride ? { cliPathOverride: cfg.cliPathOverride } : {}),
   };
 }
 

@@ -252,6 +252,9 @@ async function runOneShotImpl(
     larkAppSecret: creds.larkAppSecret,
     botName: input.botName,
     locale: 'zh' as const,
+    ...(input.botSnapshot?.cliPathOverride
+      ? { cliPathOverride: input.botSnapshot.cliPathOverride }
+      : {}),
   };
   logOneShotMemory(input, 'after-init-object');
 
