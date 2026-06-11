@@ -30,7 +30,7 @@ import { isSuspendableBackendType, getSessionPersistentBackendType, persistentSe
 import { getBot, getAllBots, resolveBrandLabel } from '../bot-registry.js';
 import { normalizeBrand } from '../im/lark/lark-hosts.js';
 import { dashboardEventBus } from './dashboard-events.js';
-import { composeRowFromActive } from './dashboard-rows.js';
+import { composeRowFromActive, composeRowFromClosed } from './dashboard-rows.js';
 import { publishAttentionPatch } from './session-activity.js';
 import { knownBotOpenIdsFromCrossRef, type BotMentionEntry } from '../utils/bot-routing.js';
 import { emitSessionLifecycleHook, emitSessionStateTransitionHook } from '../services/session-lifecycle-hooks.js';
@@ -1104,6 +1104,7 @@ export async function closeSession(
         patch: {
           status: 'closed',
           closedAt: after?.closedAt ? Date.parse(after.closedAt) : Date.now(),
+          tokenUsage: after ? composeRowFromClosed(after).tokenUsage : null,
         },
       },
     });
@@ -1792,6 +1793,7 @@ function setupWorkerHandlers(ds: DaemonSession, worker: ChildProcess): void {
               patch: {
                 status: ds.lastScreenStatus,
                 lastMessageAt: ds.lastMessageAt,
+                tokenUsage: composeRowFromActive(ds).tokenUsage,
               },
             },
           });
