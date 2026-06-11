@@ -735,7 +735,10 @@ export async function handleCardCommand(
   const reply = (c: string) => deps.sessionReply(rootId, c, undefined, larkAppId);
 
   const ownerOpenId = getOwnerOpenId(larkAppId);
-  if (!ownerOpenId || !senderOpenId || senderOpenId !== ownerOpenId) {
+  // Open mode: when the bot has no configured owner/allowlist, botmux treats
+  // talk/operate as open to everyone. Keep /card consistent with that model:
+  // only enforce owner-only when an owner actually exists.
+  if (ownerOpenId && senderOpenId !== ownerOpenId) {
     await reply(t('cmd.card.owner_only', undefined, loc));
     return;
   }
