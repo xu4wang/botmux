@@ -3381,14 +3381,32 @@ function spawnCli(cfg: Extract<DaemonToWorker, { type: 'init' }>): void {
     log(`[sandbox] redirecting Claude bridge dataDir → overlay upper: ${redirected}`);
     claudeDataDir = redirected;
   }
+  // Resume-fresh fallback: if we'd `--resume` a Claude-family session but its
+  // conversation jsonl is GONE, the CLI exits 1 ("No conversation found") and the
+  // auto-restarter keeps re-resuming → a single transient crash amplifies into a
+  // crash-loop. This bites sandboxed sessions especially: their jsonl lives in the
+  // ephemeral overlay upper, which crash-cleanup reclaims. Detect the missing
+  // conversation and spawn FRESH instead — loses prior context but never loops.
+  let effectiveResume = cfg.resume ?? false;
+  if (effectiveResume && claudeDataDir && cfg.cliSessionId) {
+    const resumeJsonl = claudeJsonlPathForSession(cfg.cliSessionId, cfg.workingDir, claudeDataDir);
+    if (!existsSync(resumeJsonl)) {
+      log(`[resume] conversation gone (${resumeJsonl}) — spawning FRESH instead of --resume (avoids "No conversation found" crash-loop)`);
+      effectiveResume = false;
+    }
+  }
   if (claudeDataDir) {
+    // Watch where the spawned CLI will actually write: the resumed conversation
+    // when resuming, else the fresh session id (a stale cliSessionId would point
+    // the bridge at the gone jsonl).
+    const bridgeWatchId = effectiveResume ? (cfg.cliSessionId ?? adapterSessionId) : adapterSessionId;
     (backend as TmuxBackend | PtyBackend | ZellijBackend).claudeJsonlPath =
-      claudeJsonlPathForSession(cfg.cliSessionId ?? adapterSessionId, cfg.workingDir, claudeDataDir);
+      claudeJsonlPathForSession(bridgeWatchId, cfg.workingDir, claudeDataDir);
   }
 
   const args = cliAdapter.buildArgs({
     sessionId: adapterSessionId,
-    resume: cfg.resume ?? false,
+    resume: effectiveResume,
     workingDir: cfg.workingDir,
     resumeSessionId: cfg.cliSessionId,
     initialPrompt: cfg.prompt || undefined,
@@ -3673,12 +3691,15 @@ function spawnCli(cfg: Extract<DaemonToWorker, { type: 'init' }>): void {
   // and baseline-existing on resume so prior-run turns ARE absorbed (we
   // don't want to re-emit yesterday's conversation as fresh turns).
   if (claudeDataDir && adapterSessionId) {
-    const claudeBridgeSessionId = cfg.cliSessionId ?? adapterSessionId;
+    // Use effectiveResume (not cfg.resume): the resume-fresh fallback above may
+    // have demoted a resume to fresh because the conversation jsonl was gone, so
+    // the bridge must watch the FRESH session's jsonl in fresh-empty mode.
+    const claudeBridgeSessionId = effectiveResume ? (cfg.cliSessionId ?? adapterSessionId) : adapterSessionId;
     const claudeJsonl = claudeJsonlPathForSession(claudeBridgeSessionId, cfg.workingDir, claudeDataDir);
     startBridgeWatcher(claudeJsonl, {
       cliPid: cliPid ?? undefined,
       cliCwd: cfg.workingDir,
-      mode: cfg.resume ? 'baseline-existing' : 'fresh-empty',
+      mode: effectiveResume ? 'baseline-existing' : 'fresh-empty',
       dataDir: claudeDataDir,
     });
   }
