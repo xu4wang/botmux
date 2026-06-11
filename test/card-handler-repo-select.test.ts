@@ -104,6 +104,7 @@ vi.mock('@larksuiteoapi/node-sdk', () => ({
 
 import { handleCardAction, type CardHandlerDeps } from '../src/im/lark/card-handler.js';
 import { forkWorker, killWorker } from '../src/core/worker-pool.js';
+import { getAvailableBots } from '../src/core/session-manager.js';
 import { createSession, closeSession } from '../src/services/session-store.js';
 import { createRepoWorktree } from '../src/services/git-worktree.js';
 import { sessionKey } from '../src/core/types.js';
@@ -242,26 +243,29 @@ describe('repo select card — worktree open', () => {
     expect(sessionReply.mock.calls.map(c => c[1]).join()).toContain('worktree 已创建');
   });
 
-  it('does NOT commit the worktree when the session moved on mid-flight', async () => {
+  it('blocks a plain switch while git runs — and does NOT commit when the session moved on out-of-band', async () => {
     const ds = makeDs({ pendingRepo: true, pendingPrompt: 'hi', worker: null });
     const { deps, sessionReply } = makeDeps(ds);
     const d = deferred<{ path: string; branch: string; baseRef: string }>();
     vi.mocked(createRepoWorktree).mockReturnValue(d.promise as any);
 
     await handleCardAction(makeSelectEvent('repo_worktree', '/repos/alpha'), deps, APP_ID);
-    // While git runs, the user picks a plain repo — consumes pendingRepo and
-    // forks the CLI in /repos/beta.
-    await handleCardAction(makeSelectEvent('repo_switch', '/repos/beta'), deps, APP_ID);
-    expect(forkWorker).toHaveBeenCalledTimes(1);
-    expect(ds.workingDir).toBe('/repos/beta');
+    // While git runs, a plain repo pick bounces off the worktree lock…
+    const res = await handleCardAction(makeSelectEvent('repo_switch', '/repos/beta'), deps, APP_ID);
+    expect(res?.toast?.content).toContain('已有一个 worktree 正在创建');
+    expect(forkWorker).not.toHaveBeenCalled();
+    // …but a non-repo path (e.g. /close + respawn) can still replace the
+    // session — the generation guard must catch that.
+    ds.session = { ...ds.session, sessionId: 'replaced-out-of-band' };
+    ds.pendingRepo = false;
 
     d.resolve({ path: '/repos/alpha-wt-1', branch: 'wt/1', baseRef: 'origin/master' });
     await vi.waitFor(() => expect(ds.worktreeCreating).toBe(false));
 
-    // Generation guard: no second fork, no kill, workingDir untouched.
-    expect(forkWorker).toHaveBeenCalledTimes(1);
+    // Generation guard: no fork, no kill, workingDir untouched.
+    expect(forkWorker).not.toHaveBeenCalled();
     expect(killWorker).not.toHaveBeenCalled();
-    expect(ds.workingDir).toBe('/repos/beta');
+    expect(ds.workingDir).toBeUndefined();
     expect(sessionReply.mock.calls.map(c => c[1]).join()).toContain('未自动切换');
   });
 
@@ -285,6 +289,48 @@ describe('repo select card — worktree open', () => {
     expect(killWorker).not.toHaveBeenCalled();
     expect(ds.workingDir).toBeUndefined();
     expect(sessionReply.mock.calls.map(c => c[1]).join()).toContain('未自动切换');
+  });
+
+  it('blocks a plain switch while the worktree commit is preparing the prompt (post-guard window)', async () => {
+    const ds = makeDs({ pendingRepo: true, pendingPrompt: 'hi', worker: null });
+    const { deps } = makeDeps(ds);
+    vi.mocked(createRepoWorktree).mockResolvedValue({ path: '/repos/alpha-wt-1', branch: 'wt/1', baseRef: 'origin/master' });
+    // Park the worktree commit inside prompt prep — AFTER its final generation
+    // check. This is the window where an ungated plain switch used to
+    // double-fork (close the session, then the worktree fork resumes on top).
+    let releaseBots: (() => void) | undefined;
+    vi.mocked(getAvailableBots).mockImplementationOnce(() => new Promise(res => { releaseBots = () => res([]); }));
+
+    await handleCardAction(makeSelectEvent('repo_worktree', '/repos/alpha'), deps, APP_ID);
+    await vi.waitFor(() => expect(releaseBots).toBeTruthy());
+
+    // The plain switch must bounce off the lock instead of interleaving.
+    const res = await handleCardAction(makeSelectEvent('repo_switch', '/repos/beta'), deps, APP_ID);
+    expect(res?.toast?.content).toContain('已有一个 worktree 正在创建');
+    expect(killWorker).not.toHaveBeenCalled();
+
+    releaseBots!();
+    await vi.waitFor(() => expect(ds.worktreeCreating).toBe(false));
+
+    expect(forkWorker).toHaveBeenCalledTimes(1);
+    expect(ds.workingDir).toBe('/repos/alpha-wt-1');
+  });
+
+  it('aborts the pending fork when the session is replaced during prompt prep (last-line defence)', async () => {
+    const ds = makeDs({ pendingRepo: true, pendingPrompt: 'hi', worker: null });
+    const { deps } = makeDeps(ds);
+    vi.mocked(createRepoWorktree).mockResolvedValue({ path: '/repos/alpha-wt-1', branch: 'wt/1', baseRef: 'origin/master' });
+    // A non-repo interleaver (e.g. /close + respawn) swaps the session while
+    // prompt prep awaits — the repo lock can't see it, the final check must.
+    vi.mocked(getAvailableBots).mockImplementationOnce(async () => {
+      ds.session = { ...ds.session, sessionId: 'replaced-mid-prep' };
+      return [];
+    });
+
+    await handleCardAction(makeSelectEvent('repo_worktree', '/repos/alpha'), deps, APP_ID);
+    await vi.waitFor(() => expect(ds.worktreeCreating).toBe(false));
+
+    expect(forkWorker).not.toHaveBeenCalled();
   });
 
   it('reports a switch failure as such — the worktree DOES exist on disk', async () => {

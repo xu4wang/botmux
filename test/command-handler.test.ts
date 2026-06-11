@@ -1187,6 +1187,32 @@ describe('handleCommand', () => {
       expect(replies).toContain('未自动切换');
     });
 
+    it('blocks a plain numeric selection while a worktree is in flight', async () => {
+      const ds = makeDaemonSession({ pendingRepo: false, worktreeCreating: true });
+      const deps = makeDeps(ds);
+      deps.lastRepoScan.set(CHAT_ID, SCAN as any);
+
+      await handleCommand('/repo', ROOT_ID, makeLarkMessage('/repo 1'), deps, LARK_APP_ID);
+
+      expect(forkWorker).not.toHaveBeenCalled();
+      expect(killWorker).not.toHaveBeenCalled();
+      expect(ds.workingDir).toBeUndefined();
+      const replies = vi.mocked(deps.sessionReply).mock.calls.map(c => c[1]).join();
+      expect(replies).toContain('已有一个 worktree 正在创建');
+    });
+
+    it('blocks the bare-/repo pending launch while a worktree is in flight', async () => {
+      const ds = makeDaemonSession({ pendingRepo: true, worktreeCreating: true });
+      const deps = makeDeps(ds);
+
+      await handleCommand('/repo', ROOT_ID, makeLarkMessage('/repo'), deps, LARK_APP_ID);
+
+      expect(forkWorker).not.toHaveBeenCalled();
+      expect(ds.pendingRepo).toBe(true); // not consumed
+      const replies = vi.mocked(deps.sessionReply).mock.calls.map(c => c[1]).join();
+      expect(replies).toContain('已有一个 worktree 正在创建');
+    });
+
     it('reports a commit failure as a switch failure — the worktree exists by then', async () => {
       const ds = makeDaemonSession({ pendingRepo: false });
       const deps = makeDeps(ds);

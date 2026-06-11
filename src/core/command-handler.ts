@@ -1019,6 +1019,7 @@ export async function handleCommand(
         const forkPendingCli = async (replyText: string) => {
           const selfBot = getBot(ds!.larkAppId);
           const botCfg = selfBot.config;
+          const commitGenSessionId = ds!.session.sessionId;
           ds!.pendingRepo = false;
           publishAttentionPatch(ds!);
           const pendingPrompt = ds!.pendingPrompt ?? '';
@@ -1046,6 +1047,12 @@ export async function handleCommand(
               ds!.pendingSender,
               { larkAppId, chatId: ds!.chatId },
             );
+            // Last-line defence: prompt prep awaited above — if anything
+            // replaced the session in that window, forking now would clobber it.
+            if (ds!.session.sessionId !== commitGenSessionId) {
+              logger.warn(`[${logTag}] Session replaced while preparing the pending-CLI prompt (${commitGenSessionId} → ${ds!.session.sessionId}) — aborting this fork`);
+              return;
+            }
             rememberLastCliInput(ds!, pendingPrompt, prompt);
             forkWorker(ds!, prompt);
           } else {
@@ -1175,6 +1182,17 @@ export async function handleCommand(
           } finally {
             ds.worktreeCreating = false;
           }
+          break;
+        }
+
+        // Plain selections are blocked while a worktree creation/commit is in
+        // flight: the worktree commit awaits (Lark replies, prompt prep) after
+        // its generation checks, and a plain selection interleaving there
+        // would double-fork. One lock gates both kinds until the commit
+        // settles. (Bare `/repo` without pending only posts the picker card —
+        // harmless, so it stays open.)
+        if (ds?.worktreeCreating && (repoArg || ds.pendingRepo)) {
+          await sessionReply(rootId, t('cmd.repo.worktree_in_progress', undefined, loc));
           break;
         }
 

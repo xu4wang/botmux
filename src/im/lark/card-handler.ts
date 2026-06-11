@@ -1484,6 +1484,7 @@ export async function handleCardAction(data: CardActionData, deps: CardHandlerDe
   // session (mid-session switch). The worktree flow funnels back in here with
   // the freshly created worktree path.
   const commitSelection = async (dirPath: string, dirLabel: string) => {
+    const commitGenSessionId = targetDs.session.sessionId;
     targetDs.workingDir = dirPath;
     targetDs.session.workingDir = dirPath;
     sessionStore.updateSession(targetDs.session);
@@ -1510,6 +1511,12 @@ export async function handleCardAction(data: CardActionData, deps: CardHandlerDe
         targetDs.pendingSender,
         { larkAppId: targetDs.larkAppId, chatId: targetDs.chatId },
       );
+      // Last-line defence: prompt prep awaited above — if anything replaced
+      // the session in that window, forking now would clobber it.
+      if (targetDs.session.sessionId !== commitGenSessionId) {
+        logger.warn(`[${tag(targetDs)}] Session replaced while preparing the pending-CLI prompt (${commitGenSessionId} → ${targetDs.session.sessionId}) — aborting this fork`);
+        return;
+      }
       rememberLastCliInput(targetDs, pendingPrompt, prompt);
       targetDs.pendingPrompt = undefined;
       targetDs.pendingAttachments = undefined;
@@ -1624,5 +1631,12 @@ export async function handleCardAction(data: CardActionData, deps: CardHandlerDe
     return { toast: { type: 'info', content: t('card.repo.toast_worktree_creating', undefined, locTarget) } };
   }
 
+  // Plain switch — blocked while a worktree creation/commit is in flight. The
+  // worktree commit awaits (Lark replies, prompt prep) after its generation
+  // checks; a plain selection interleaving there would double-fork. One lock
+  // gates both kinds until the commit settles.
+  if (targetDs.worktreeCreating) {
+    return { toast: { type: 'info', content: t('cmd.repo.worktree_in_progress', undefined, locTarget) } };
+  }
   await commitSelection(selectedPath, displayName);
 }
