@@ -226,6 +226,35 @@ export interface CliAdapter {
    *  BOTMUX_INJECTED_ENV_KEYS). undefined → inherit the worker env unchanged. */
   readonly spawnEnv?: Readonly<Record<string, string>>;
 
+  /** Optional: pre-flight check for resume targets.
+   *
+   *  Called with `resume=true` before spawn so a missing conversation JSONL /
+   *  rollout / DB entry does not produce a CLI-level "No conversation found"
+   *  exit code 1 — which would otherwise be amplified into an auto-restart
+   *  crash loop by the daemon's claude_exit handler.
+   *
+   *  Return `true` = resume target looks present (spawn normally with --resume).
+   *  Return `false` = target is provably missing → worker will fall back to a
+   *  FRESH session (resume=false, drop cliSessionId, log + user_notify once).
+   *  Return `undefined` / omit = adapter cannot tell cheaply → rely on the
+   *  worker's SECONDARY guard (2nd restart forces fresh) so unknown-shape CLIs
+   *  still degrade without crash-looping.
+   *
+   *  Must be synchronous, cheap, and conservative. An adapter that can verify
+   *  the resume target without spawning a subprocess implements this; others
+   *  simply leave it undefined (the secondary guard is always active). */
+  checkResumeTargetExists?(opts: {
+    sessionId: string;
+    /** CLI-native session id from session.cliSessionId, when available. */
+    cliSessionId?: string;
+    /** Working directory the CLI will spawn in. Used by Claude-family to
+     *  locate <projects>/<cwdHash>/<id>.jsonl. */
+    workingDir?: string;
+    /** Claude-family data dir (~/.claude, ~/.claude-runtime, …) so the probe
+     *  targets the SAME root the adapter will actually write into. */
+    dataDir?: string;
+  }): boolean | undefined;
+
   /** Optional CLI version command override. Defaults to `[resolvedBin, '--version']`. */
   versionCommand?(): { bin: string; args: string[] };
 
