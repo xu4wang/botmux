@@ -4267,8 +4267,7 @@ botmux create-group — 用一组机器人新建飞书群
 /**
  * postAsk: 找到 daemon → POST /api/asks → 返回 AskResult。
  * 连接失败 / HTTP 错误时抛出带 exitCode 属性的 Error：
- *   - exitCode=3：daemon 不可达或 HTTP 非 400
- *   - exitCode=2：400 + no_approvers
+ *   - exitCode=3：daemon 不可达或 HTTP 错误
  */
 async function postAsk(body: Record<string, unknown>): Promise<import('./core/ask-types.js').AskResult> {
   type AskResult = import('./core/ask-types.js').AskResult;
@@ -4304,13 +4303,6 @@ async function postAsk(body: Record<string, unknown>): Promise<import('./core/as
   if (!res.ok) {
     let errBody = '';
     try { errBody = (await res.text()).slice(0, 200); } catch { /* */ }
-    if (res.status === 400 && /no_approvers/.test(errBody)) {
-      const err = new Error(
-        'botmux ask: 当前会话没有可批准者（session.owner 不在 bot.allowedUsers 里，且 --approver 未指定）',
-      ) as Error & { exitCode: number };
-      err.exitCode = 2;
-      throw err;
-    }
     const err = new Error(`botmux ask: daemon HTTP ${res.status}: ${errBody}`) as Error & { exitCode: number };
     err.exitCode = 3;
     throw err;
@@ -4369,7 +4361,6 @@ async function cmdAsk(sub: string, rest: string[]): Promise<void> {
   const optionsRaw = argValue(rest, '--options');
   const timeoutRaw = argValue(rest, '--timeout');
   const useJson = rest.includes('--json');
-  const approverArgs = argValues(rest, '--approver');
   const positionalArgs = positionals(rest, ['--json']);
 
   let options;
@@ -4402,7 +4393,6 @@ async function cmdAsk(sub: string, rest: string[]): Promise<void> {
     options,
     prompt,
     timeoutMs,
-    approvers: approverArgs,
   };
 
   let result;
@@ -4546,7 +4536,6 @@ export async function runHook(
     rootMessageId: routeRoot,
     questions: parsed.questions,
     timeoutMs,
-    approvers: [],
   };
 
   let result: import('./core/ask-types.js').AskResult;
