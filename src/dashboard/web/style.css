@@ -1325,6 +1325,23 @@ button.primary {
   white-space: nowrap;
 }
 
+/* 团队清单加载中的整板占位（替代裸文本） */
+.kanban-loading {
+  flex: 1;
+  min-height: 220px;
+  display: grid;
+  place-items: center;
+  color: var(--faint);
+  font-size: 13px;
+  border: 1px dashed var(--border);
+  border-radius: 12px;
+}
+
+.kanban-team-select:disabled {
+  opacity: 0.7;
+  cursor: default;
+}
+
 /* 机器人视角：bot 多时列不再无限压缩——固定列宽 + 容器横向滚动 */
 .sessions-kanban.kanban-mode-bot .kanban-column {
   flex: 0 0 264px;

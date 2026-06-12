@@ -396,6 +396,8 @@ export function renderSessionsPage(root: HTMLElement) {
     if (kanbanTeams.length && !kanbanTeams.some(tm => tm.key === kanbanTeamKey)) {
       kanbanTeamKey = kanbanTeams[0].key;
     }
+    delete teamSelect.dataset.loading;
+    teamSelect.disabled = kanbanTeams.length === 0;
     teamSelect.innerHTML = kanbanTeams.length
       ? kanbanTeams.map(tm => `<option value="${escapeHtml(tm.key)}"${tm.key === kanbanTeamKey ? ' selected' : ''}>${escapeHtml(tm.label)}</option>`).join('')
       : `<option value="">${escapeHtml(t('sessions.kanban.noTeam'))}</option>`;
@@ -693,8 +695,14 @@ export function renderSessionsPage(root: HTMLElement) {
       lastKanbanGroups = new Map(); // 机器人视角无拖拽，不需要落点数据
     } else if (kanbanGroupBy === 'team') {
       if (!kanbanTeamsLoaded) {
-        html = `<div class="kanban-col-empty">${t('sessions.kanban.teamLoading')}</div>`;
+        html = `<div class="kanban-loading">${t('sessions.kanban.teamLoading')}</div>`;
         lastKanbanGroups = new Map();
+        // 加载期间下拉显示占位项并禁用——空胶囊很难看，也防止误操作
+        if (!teamSelect.dataset.loading) {
+          teamSelect.dataset.loading = '1';
+          teamSelect.disabled = true;
+          teamSelect.innerHTML = `<option>${escapeHtml(t('sessions.kanban.teamLoading'))}</option>`;
+        }
         void loadKanbanTeams();
       } else {
         const team = kanbanTeams.find(tm => tm.key === kanbanTeamKey) ?? kanbanTeams[0];
