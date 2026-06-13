@@ -346,6 +346,12 @@ async function runHookCommand(
       });
     });
 
+    // Hooks that don't drain stdin and exit fast (touch/echo/notify-send,
+    // `botmux send`, …) close their read end before this write flushes →
+    // EPIPE on the stdin socket. Without a listener that 'error' is unhandled;
+    // in the long-lived daemon (no global uncaughtException handler) it would
+    // crash the whole process. The hook already spawned, so swallow it.
+    child.stdin?.on('error', () => { /* EPIPE: fast-exiting hook closed stdin */ });
     child.stdin?.end(JSON.stringify(payload), () => {
       if (options.fireAndForget) (child.stdin as any)?.unref?.();
     });
