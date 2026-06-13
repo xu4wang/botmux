@@ -75,6 +75,21 @@ describe('discoverClaudeFamilySessions', () => {
   it('returns [] when the projects dir is absent', async () => {
     expect(await discoverClaudeFamilySessions(join(dataDir, 'nope'), 10)).toEqual([]);
   });
+
+  // Regression (Codex blocker 2): a first user record larger than any fixed
+  // read-prefix must NOT be truncated mid-line and dropped — streaming reads
+  // the complete line so cwd is still recovered.
+  it('handles an oversized (>200KiB) first user record without dropping the session', async () => {
+    const huge = 'x'.repeat(220 * 1024);
+    writeSession('-root-big', 'dddd4444-0000-0000-0000-000000000004', [
+      { type: 'user', cwd: '/root/big', message: { role: 'user', content: huge } },
+      { type: 'assistant', message: { role: 'assistant', content: 'ok' } },
+    ]);
+    const out = await discoverClaudeFamilySessions(dataDir, 10);
+    expect(out).toHaveLength(1);
+    expect(out[0]).toMatchObject({ cliSessionId: 'dddd4444-0000-0000-0000-000000000004', cwd: '/root/big' });
+    expect(out[0]!.title.length).toBeLessThanOrEqual(80);
+  });
 });
 
 describe('discoverRolloutSessions (codex / traex)', () => {
@@ -149,5 +164,26 @@ describe('discoverAntigravitySessions', () => {
 
   it('returns [] when the history file is absent', async () => {
     expect(await discoverAntigravitySessions(join(dir, 'nope.jsonl'), 10)).toEqual([]);
+  });
+
+  // Regression (Codex blocker 1): history.jsonl is append-only, so the newest
+  // conversation lives at the TAIL. A bounded head-prefix read would hide it
+  // once the file grows large; streaming the whole log must surface it.
+  it('surfaces a newest conversation appended past a >4MiB tail boundary', () => {
+    const lines: string[] = [];
+    lines.push(JSON.stringify({ display: 'old one', timestamp: 1000, workspace: '/root/old', conversationId: 'conv-old' }));
+    // Pad with >4MiB of an unrelated conversation's submits.
+    const pad = 'p'.repeat(4096);
+    for (let i = 0; i < 1100; i++) {
+      lines.push(JSON.stringify({ display: pad, timestamp: 2000 + i, workspace: '/root/pad', conversationId: 'conv-pad' }));
+    }
+    lines.push(JSON.stringify({ display: 'brand new', timestamp: 9_000_000, workspace: '/root/new', conversationId: 'conv-new' }));
+    writeFileSync(historyPath, lines.join('\n') + '\n');
+    return discoverAntigravitySessions(historyPath, 10).then((out) => {
+      const ids = out.map((s) => s.cliSessionId);
+      expect(ids).toContain('conv-new');
+      // newest timestamp sorts first
+      expect(out[0]).toMatchObject({ cliSessionId: 'conv-new', cwd: '/root/new', title: 'brand new' });
+    });
   });
 });
