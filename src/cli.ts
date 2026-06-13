@@ -47,6 +47,8 @@ import {
   hasOwnerEntry,
   type BotConfigEditInput,
 } from './setup/bot-config-editor.js';
+import { resolveCliSelection, selectionKeyForBot } from './setup/cli-selection.js';
+import { pickCliSelection } from './setup/interactive-select.js';
 import { buildPreset, serializePreset, presetFilename } from './setup/agent-preset.js';
 import type { CliId } from './adapters/cli/types.js';
 import { logger } from './utils/logger.js';
@@ -600,11 +602,15 @@ async function promptBotConfig(rl: ReturnType<typeof createInterface>): Promise<
   }
   console.log('✅ 凭证有效（tenant_access_token 已成功获取）\n');
 
-  console.log('支持的 CLI: 1) claude-code  2) aiden  3) coco（别名 traecli）  4) codex  5) cursor  6) gemini  7) opencode  8) antigravity  9) mtr  10) hermes  11) codex-app  12) mira  13) seed  14) traex  15) pi  16) copilot  17) oh-my-pi');
-  const cliChoice = await ask(rl, 'CLI 适配器 [1]: ');
+  // CLI 适配器：可搜索的级联选择器（选 Aiden 可进 × Claude / × Codex，aiden 网关）。
+  // 非交互终端自动回退为序号 / ID 文本输入。
+  const selKey = await pickCliSelection(rl, { title: '选择 CLI 适配器' });
   let cliId: CliId;
+  let wrapperCli: string | undefined;
   try {
-    cliId = resolveCliId(cliChoice) ?? 'claude-code';
+    const sel = resolveCliSelection(selKey ?? 'claude-code');
+    cliId = sel.cliId;
+    wrapperCli = sel.wrapperCli;
   } catch (err: any) {
     console.log(`\n❌ ${err?.message ?? String(err)}`);
     console.log('   不写 bots.json。请重新运行 botmux setup。');
@@ -616,6 +622,8 @@ async function promptBotConfig(rl: ReturnType<typeof createInterface>): Promise<
     larkAppId: creds.appId,
     larkAppSecret: creds.appSecret,
     cliId,
+    // aiden × claude/codex 等启动前缀；普通 CLI 不写此字段。
+    ...(wrapperCli ? { wrapperCli } : {}),
     // 总是写 workingDir, 留空用 '~'. 用户手动编辑 bots.json 时一眼能看到字段
     // 在哪儿, 不用去 README 查字段名.
     workingDir: workingDir.trim() || '~',
@@ -699,17 +707,28 @@ async function promptEditBotConfig(
   ]);
   input.larkAppSecret = await ask(rl, `LARK_APP_SECRET [保留当前值]: `);
 
-  console.log('\n支持的 CLI: 1) claude-code  2) aiden  3) coco（别名 traecli）  4) codex  5) cursor  6) gemini  7) opencode  8) antigravity  9) mtr  10) hermes  11) codex-app  12) mira  13) seed  14) traex  15) pi  16) copilot  17) oh-my-pi');
+  // CLI 适配器：可搜索的级联选择器（选 Aiden 可进 × Claude / × Codex，aiden 网关）。
   printInputHelp('CLI 适配器', [
-    '选择 botmux 需要套用哪一种 CLI 参数协议和会话恢复方式。',
-    'coco 的别名 traecli 走同一适配器；二进制名是 traecli 也选 coco 即可。',
-    '留空保留当前值；可以输入序号，也可以直接输入适配器 ID。',
+    '可搜索的交互式选择：输入关键字过滤、↑/↓ 选择、⏎ 确认、Esc 保留当前值。',
+    '选 Aiden 进二级菜单：× Claude / × Codex（aiden 网关，无需 wrapper 脚本）。',
+    '非交互终端下回退为「输入序号 / 适配器 ID」。',
   ]);
-  input.cliChoice = await ask(rl, `CLI 适配器 [${bot.cliId ?? 'claude-code'}]: `);
+  const currentKey = selectionKeyForBot(bot.cliId ?? 'claude-code', bot.wrapperCli);
+  const selKey = await pickCliSelection(rl, { title: 'CLI 适配器', currentKey });
+  if (selKey) {
+    try {
+      const sel = resolveCliSelection(selKey);
+      input.cliChoice = sel.cliId;
+      input.wrapperCli = sel.wrapperCli ?? null; // 选普通 CLI 时清掉旧的 aiden×* 前缀
+    } catch (err: any) {
+      console.log(`\n❌ ${err?.message ?? String(err)}（保留当前 CLI）`);
+    }
+  }
+  // selKey 为 null（Esc / 空）→ input.cliChoice 不设 → 保留当前 CLI。
 
   printInputHelp('CLI 可执行文件路径覆盖', [
     '可选。CLI 入口的绝对路径，用于在原 CLI 外面套一层 wrapper / router。',
-    '典型场景：ccr (Claude Code Router) / claude-w / aiden-x-claude 等自定义入口。',
+    '典型场景：ccr / claude-w 等自定义入口（aiden × claude/codex 选上面那项即可，无需此项）。',
     '留空保留当前值；输入 - 清空覆盖，回到 PATH 查 cliId 对应的默认二进制。',
   ]);
   input.cliPathOverride = await ask(rl, `CLI 可执行文件路径覆盖 [${formatOptionalValue(bot.cliPathOverride)}]: `);

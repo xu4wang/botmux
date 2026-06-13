@@ -56,6 +56,7 @@ import {
   resolveRenderDimensions,
 } from './utils/render-dimensions.js';
 import { createCliAdapterSync, locateOnPath } from './adapters/cli/registry.js';
+import { buildWrappedLaunch } from './setup/cli-selection.js';
 import { claudeJsonlPathForSession, resolveJsonlFromPid, findOpenClaudeSessionIds, DEFAULT_CLAUDE_DATA_DIR } from './adapters/cli/claude-code.js';
 import { mtrSessionIdForBotmuxSession } from './adapters/cli/mtr.js';
 import type { CliAdapter, PtyHandle, SubmitRecheckResult } from './adapters/cli/types.js';
@@ -3698,6 +3699,23 @@ function spawnCli(cfg: Extract<DaemonToWorker, { type: 'init' }>): void {
     } catch (err: any) {
       log(`Sandbox prepare failed (${err.message}) — aborting (sandbox is a hard requirement when enabled)`);
       throw err;
+    }
+  }
+
+  // 通用启动前缀（wrapperCli）：把启动命令重写成 `<wrapperCli> <CLI 参数>`（首 token 当
+  // bin 走 PATH 解析），无需 wrapper 脚本、跨系统。aiden x claude 形态会剥掉 aiden 拒收的
+  // --settings（见 buildWrappedLaunch）。与文件沙盒互斥：沙盒已把命令重写成 bwrap，叠加
+  // 前缀会破坏隔离，故 sandboxOn 时跳过并告警（网关 + oncall 沙盒本就不是合理组合）。
+  if (cfg.wrapperCli && cfg.wrapperCli.trim()) {
+    if (sandboxOn) {
+      log(`wrapperCli="${cfg.wrapperCli}" ignored: file sandbox enabled and takes precedence (cannot combine launch prefix with bwrap)`);
+    } else {
+      const launch = buildWrappedLaunch(cfg.wrapperCli, spawnArgs, (b) => locateOnPath(b) ?? b);
+      if (launch.bin) {
+        spawnBin = launch.bin;
+        spawnArgs = launch.args;
+        log(`Launch prefix: spawning ${spawnBin} ${spawnArgs.slice(0, 2).join(' ')} … (cliId=${cfg.cliId})`);
+      }
     }
   }
 

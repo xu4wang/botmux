@@ -34,6 +34,7 @@ import {
   applyConfigField, setBotAllowedUsers, getConfigSnapshot, getConfigCardData, type ConfigEffect,
 } from '../services/bot-config-store.js';
 import { resolveCliId, findInvalidAllowedUserEntries } from '../setup/bot-config-editor.js';
+import { decorateResumeForWrapper } from '../setup/cli-selection.js';
 import { publishAttentionPatch, announcePendingRepoSession } from './session-activity.js';
 import { setCardMode } from '../services/card-mode-store.js';
 import { canOperate } from '../im/lark/event-dispatcher.js';
@@ -904,10 +905,11 @@ export async function handleCommand(
           const cliResumeCommand = (() => {
             try {
               const adapter = createCliAdapterSync(closedCliId, botCfg.cliPathOverride);
-              return adapter.buildResumeCommand?.({
+              const raw = adapter.buildResumeCommand?.({
                 sessionId: closedSessionId,
                 cliSessionId: ds.session.cliSessionId,
               }) ?? null;
+              return raw ? decorateResumeForWrapper(raw, botCfg.wrapperCli) : null;
             } catch { return null; }
           })();
           killWorker(ds);

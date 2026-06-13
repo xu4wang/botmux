@@ -27,7 +27,7 @@ import { handleFederationApi } from './dashboard/federation-api.js';
 import { handleFederationSpokeApi, syncAllMemberships, type TeamSessionRowLike } from './dashboard/federation-spoke-api.js';
 import { getRunsDir } from './workflows/runs-dir.js';
 import { BotOnboardingManager } from './dashboard/bot-onboarding.js';
-import { CLI_OPTIONS, resolveCliId } from './setup/bot-config-editor.js';
+import { CLI_SELECT_OPTIONS, resolveCliSelection } from './setup/cli-selection.js';
 import { invalidWorkingDirs } from './utils/working-dir.js';
 import { mergeDashboardConfig, mergeMaintenanceConfig, parseMaintenancePatch, readGlobalConfig, setGlobalLocale, type DashboardGlobalConfig, type MaintenanceConfig } from './global-config.js';
 import { isLocale } from './i18n/types.js';
@@ -573,10 +573,11 @@ const server = createServer(async (req, res) => {
       return handleDashboardTriggerApi(req, res, { proxyToDaemon });
     }
 
-    // CLI 下拉选项 (id + 展示名), 单一事实源在 bot-config-editor.CLI_OPTIONS,
-    // 与 setup 交互菜单顺序一致——前端打开"添加机器人"表单时拉取填充下拉.
+    // CLI 下拉选项 (id=选择键 + 展示名), 单一事实源在 cli-selection.CLI_SELECT_OPTIONS,
+    // 含 aiden×claude / aiden×codex 网关项——前端打开"添加机器人"表单时拉取填充下拉.
+    // id 既可能是普通 cliId, 也可能是 'aiden-x-claude' 这类选择键, 由 resolveCliSelection 解析.
     if (req.method === 'GET' && url.pathname === '/api/cli-options') {
-      return jsonRes(res, 200, { options: CLI_OPTIONS });
+      return jsonRes(res, 200, { options: CLI_SELECT_OPTIONS.map((o) => ({ id: o.key, label: o.label })) });
     }
 
     if (req.method === 'POST' && url.pathname === '/api/bot-onboarding/start') {
@@ -589,10 +590,15 @@ const server = createServer(async (req, res) => {
       } catch {
         return jsonRes(res, 400, { ok: false, error: 'bad_json' });
       }
-      // CLI: 沿用 setup 的 resolveCliId——空 → 默认 claude-code; typo → 400.
+      // CLI: 把下拉传来的选择键 (普通 cliId 或 aiden-x-claude/codex) 解析成
+      // { cliId, wrapperCli }——空 → 默认 claude-code; 非法键 → 400.
       let cliId: CliId | undefined;
+      let wrapperCli: string | undefined;
       try {
-        cliId = resolveCliId(typeof parsed.cliId === 'string' ? parsed.cliId : undefined) ?? 'claude-code';
+        const key = typeof parsed.cliId === 'string' && parsed.cliId.trim() ? parsed.cliId.trim() : 'claude-code';
+        const sel = resolveCliSelection(key);
+        cliId = sel.cliId;
+        wrapperCli = sel.wrapperCli;
       } catch (err: any) {
         return jsonRes(res, 400, { ok: false, error: 'invalid_cli', message: err?.message ?? String(err) });
       }
@@ -606,7 +612,7 @@ const server = createServer(async (req, res) => {
         return jsonRes(res, 400, { ok: false, error: 'invalid_working_dir', message: `目录不存在或不是目录: ${bad.join(', ')}` });
       }
       const model = typeof parsed.model === 'string' && parsed.model.trim() ? parsed.model.trim() : undefined;
-      const job = botOnboarding.start({ cliId, workingDir, model });
+      const job = botOnboarding.start({ cliId, wrapperCli, workingDir, model });
       return jsonRes(res, 202, { job: botOnboarding.get(job.id) });
     }
     let mOnboard: RegExpMatchArray | null;

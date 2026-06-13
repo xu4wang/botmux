@@ -24,6 +24,7 @@ import {
 } from './workflow-card-handler.js';
 import { handleAskCardAction, isAskCardAction } from './ask-card.js';
 import { createCliAdapterSync } from '../../adapters/cli/registry.js';
+import { decorateResumeForWrapper } from '../../setup/cli-selection.js';
 import { logger } from '../../utils/logger.js';
 import * as sessionStore from '../../services/session-store.js';
 import { loadFrozenCards, saveFrozenCards } from '../../services/frozen-card-store.js';
@@ -787,10 +788,11 @@ export async function handleCardAction(data: CardActionData, deps: CardHandlerDe
       const cliResumeCommand = (() => {
         try {
           const adapter = createCliAdapterSync(closedCliId, botCfg.cliPathOverride);
-          return adapter.buildResumeCommand?.({
+          const raw = adapter.buildResumeCommand?.({
             sessionId: closedSessionId,
             cliSessionId: ds.session.cliSessionId,
           }) ?? null;
+          return raw ? decorateResumeForWrapper(raw, botCfg.wrapperCli) : null;
         } catch { return null; }
       })();
       killWorker(ds);

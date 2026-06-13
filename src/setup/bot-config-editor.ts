@@ -108,6 +108,15 @@ export interface BotConfigEditInput {
   cliChoice?: string;
   cliPathOverride?: string;
   /**
+   * 通用启动前缀（如 "aiden x claude"）。三态：
+   *   - undefined → 不动
+   *   - string    → 设置（空串 / "-" 视为清空）
+   *   - null      → 清空（选了普通 CLI 时清掉旧的 aiden×* 前缀）
+   * 调用方（setup picker / dashboard）用 resolveCliSelection 解析选择项后传入，
+   * 避免 bot-config-editor 反向依赖 cli-selection（会成循环 import）。
+   */
+  wrapperCli?: string | null;
+  /**
    * Model 字段三态语义（setup 不再交互式询问 model，此字段仅由切换 CLI 时的
    * 强制清空逻辑设 null；改 model 走 /config 卡片或手动编辑 bots.json）：
    *   - undefined → 这次编辑不动 model，保持原值
@@ -289,6 +298,15 @@ export function applyBotConfigEdits<T extends Record<string, any>>(
   if (cliId) out.cliId = cliId;
 
   applyOptionalString(out, 'cliPathOverride', input.cliPathOverride);
+
+  // wrapperCli 三态：null = 清空，string = 设置（空 / "-" 也清空），undefined = 不动。
+  if (input.wrapperCli === null) {
+    delete out.wrapperCli;
+  } else if (typeof input.wrapperCli === 'string') {
+    const v = input.wrapperCli.trim();
+    if (!v || v === '-') delete out.wrapperCli;
+    else out.wrapperCli = v;
+  }
 
   // Model 字段：null = 清空，string = 设置，undefined = 不动。
   if (input.model === null) {

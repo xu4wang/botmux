@@ -52,6 +52,16 @@ export interface BotConfig {
   cliId: CliId;
   cliPathOverride?: string;
   /**
+   * 通用启动前缀（按空格拆 token）：worker spawn 时把启动命令拼成
+   * `<wrapperCli> <CLI 参数>`（首 token 当 bin 走 PATH 解析），无需 wrapper 脚本、跨系统。
+   * 典型值 `"aiden x claude"` / `"aiden x codex"`（内网网关 aiden-aiproxy + SSO），也能
+   * 承载 ccr / claude-w 等任意启动器。`cliId` 仍是底层适配器（claude→claude-code、
+   * codex→codex），所有适配器机制（hook / bridge / resume）照常工作；设了 wrapperCli 后
+   * 它的首 token 取代 cliId 的默认 bin（cliPathOverride 不再生效）。检测到前缀是
+   * `aiden x claude` 时自动剥掉 aiden 拒收的 --settings。见 src/setup/cli-selection.ts。
+   */
+  wrapperCli?: string;
+  /**
    * Optional model name passed to the CLI at spawn time (e.g. `claude --model
    * opus`). Each adapter decides how to inject it — adapters whose CLI has no
    * `--model` flag silently ignore the field. When unset, the CLI uses its own
@@ -662,6 +672,9 @@ export function parseBotConfigsFromText(jsonText: string): BotConfig[] {
       name: typeof entry.name === 'string' && entry.name.trim() ? entry.name.trim() : undefined,
       cliId: entry.cliId ?? 'claude-code',
       cliPathOverride: entry.cliPathOverride,
+      wrapperCli: typeof entry.wrapperCli === 'string' && entry.wrapperCli.trim()
+        ? entry.wrapperCli.trim()
+        : undefined,
       model: typeof entry.model === 'string' && entry.model.trim()
         ? entry.model.trim()
         : undefined,
