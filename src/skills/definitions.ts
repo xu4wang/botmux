@@ -265,13 +265,13 @@ botmux send --attention=blocked --mention-back "缺 TOS 上传密钥，拿不到
 
 ### 纯文本（最常见）
 
-多行内容必须用 heredoc；不要写成 \`botmux send "第一行\\n第二行"\`，否则用户会在飞书里看到字面量 \`\\n\`。
+多行内容不要写成 \`botmux send "第一行\\n第二行"\`，否则用户会在飞书里看到字面量 \`\\n\`。在 Unix shell 里可用 heredoc；在 Windows/PowerShell 里发送包含中文或 emoji 的多行内容时，必须先写 UTF-8 文件，再用 \`--content-file\`，不要把中文直接通过 here-string、\`echo\` 或管道送进 stdin。
 
 \`\`\`bash
 # 直接传参
 botmux send "分析完成，核心问题是 X"
 
-# heredoc（多行内容推荐）
+# Unix shell: heredoc
 botmux send <<'EOF'
 ## 分析报告
 
@@ -285,9 +285,23 @@ EOF
 echo "构建成功 ✅" | botmux send
 \`\`\`
 
+\`\`\`powershell
+# Windows PowerShell: 中文/emoji 多行内容
+$msg = Join-Path $env:TEMP "botmux-message.md"
+@'
+## 分析报告
+
+1. 发现问题 A
+2. 建议方案 B
+
+需要你确认后我再动手。
+'@ | Set-Content -LiteralPath $msg -Encoding utf8
+botmux send --content-file $msg
+\`\`\`
+
 > ⚠️ **重要：single-quoted heredoc \`<<'EOF'\` 内反引号直接写真反引号，不要加反斜杠转义。**
 > 原因：单引号 heredoc 已经禁用所有特殊字符解释（\`$\`、反斜杠、反引号一律按字面量处理）。再加反斜杠反而会把"反斜杠+反引号"作为字面字符混进 markdown，让 markdown-it 按 CommonMark 的 backslash-escape 处理——结果卡片里三反引号变成可见字符、代码块整段废掉。
-> 自检：写完 bash 命令后扫一眼，如果 EOF 块内**任何反引号前面带反斜杠**，删掉那个反斜杠。
+> 自检：写完 bash 命令后扫一眼，如果 EOF 块内**任何反引号前面带反斜杠**，删掉那个反斜杠。Windows/PowerShell 需要中文或 emoji 时优先用上面的 \`--content-file\` 写法。
 
 ### 可用的 markdown 语法（自动走卡片）
 

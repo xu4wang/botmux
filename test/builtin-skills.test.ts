@@ -7,12 +7,14 @@ import { describe, it, expect } from 'vitest';
 import { BUILTIN_SKILLS, RETIRED_SKILL_NAMES } from '../src/skills/definitions.js';
 
 describe('built-in botmux-send skill', () => {
-  it('teaches heredoc usage for multiline sends', () => {
+  it('teaches safe multiline sends across Unix and Windows shells', () => {
     const skill = BUILTIN_SKILLS.find(s => s.name === 'botmux-send');
     expect(skill).toBeDefined();
     expect(skill!.content).toContain("botmux send <<'EOF'");
-    expect(skill!.content).toContain('botmux send "第一行\\n第二行"');
-    expect(skill!.content).toContain('字面量');
+    expect(skill!.content).toContain('Windows/PowerShell');
+    expect(skill!.content).toContain('--content-file');
+    expect(skill!.content).toContain('Set-Content -LiteralPath $msg -Encoding utf8');
+    expect(skill!.content).toContain('不要把中文直接通过 here-string');
   });
 
   it('warns that mention-back/no-mention are switches without values', () => {
