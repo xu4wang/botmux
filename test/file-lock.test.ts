@@ -14,7 +14,7 @@ import { mkdtempSync, writeFileSync, existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, it, expect, beforeEach } from 'vitest';
-import { withFileLock } from '../src/utils/file-lock.js';
+import { withFileLock, withFileLockSync } from '../src/utils/file-lock.js';
 
 describe('withFileLock', () => {
   let target: string;
@@ -28,6 +28,12 @@ describe('withFileLock', () => {
   it('runs fn and releases the lock', async () => {
     const result = await withFileLock(target, async () => 'ok');
     expect(result).toBe('ok');
+    expect(existsSync(target + '.lock')).toBe(false);
+  });
+
+  it('runs sync fn and releases the lock', () => {
+    const result = withFileLockSync(target, () => 'ok-sync');
+    expect(result).toBe('ok-sync');
     expect(existsSync(target + '.lock')).toBe(false);
   });
 

@@ -19,7 +19,16 @@
  * out. (We could allow reentrancy via PID-equal check, but our callers
  * don't need it and the equality check would re-open the stale-break race.)
  */
-import { promises as fsp } from 'node:fs';
+import {
+  closeSync,
+  openSync,
+  promises as fsp,
+  readFileSync,
+  renameSync,
+  statSync,
+  unlinkSync,
+  writeFileSync,
+} from 'node:fs';
 import { randomBytes } from 'node:crypto';
 import { logger } from './logger.js';
 
@@ -34,6 +43,16 @@ async function isPidAlive(pid: number): Promise<boolean> {
   if (!pid) return false;
   if (pid === process.pid) return true;
   try { process.kill(pid, 0); return true; } catch { return false; }
+}
+
+function isPidAliveSync(pid: number): boolean {
+  if (!pid) return false;
+  if (pid === process.pid) return true;
+  try { process.kill(pid, 0); return true; } catch { return false; }
+}
+
+function sleepSync(ms: number): void {
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
 }
 
 export interface FileLockOptions {
@@ -108,6 +127,70 @@ export async function withFileLock<T>(
         );
       }
       await new Promise(r => setTimeout(r, RETRY_BASE_MS + Math.random() * RETRY_BASE_MS));
+    }
+  }
+}
+
+export function withFileLockSync<T>(
+  targetPath: string,
+  fn: () => T,
+  opts: FileLockOptions = {},
+): T {
+  const maxWaitMs = opts.maxWaitMs ?? MAX_WAIT_MS;
+  const minStaleAgeMs = opts.minStaleAgeMs ?? MIN_STALE_AGE_MS;
+  const lockPath = targetPath + '.lock';
+  const start = Date.now();
+  while (true) {
+    let fd: number | null = null;
+    try {
+      fd = openSync(lockPath, 'wx');
+      writeFileSync(fd, String(process.pid));
+      closeSync(fd);
+      fd = null;
+      try {
+        return fn();
+      } finally {
+        try { unlinkSync(lockPath); } catch { /* already gone, tolerate */ }
+      }
+    } catch (e: any) {
+      if (fd !== null) {
+        try { closeSync(fd); } catch { /* tolerate */ }
+      }
+      if (e.code !== 'EEXIST') throw e;
+
+      let holder = 0;
+      let lockAgeMs = Infinity;
+      try {
+        holder = parseInt(readFileSync(lockPath, 'utf-8'), 10) || 0;
+        lockAgeMs = Date.now() - statSync(lockPath).mtimeMs;
+      } catch (re: any) {
+        if (re.code === 'ENOENT') continue;
+        throw re;
+      }
+
+      const breakable = holder
+        && lockAgeMs >= minStaleAgeMs
+        && !isPidAliveSync(holder);
+      if (breakable) {
+        const stalePath = `${lockPath}.stale.${process.pid}.${randomBytes(4).toString('hex')}`;
+        try {
+          renameSync(lockPath, stalePath);
+          logger.warn(`[file-lock] broke stale lock at ${lockPath} (dead pid ${holder}, age ${lockAgeMs}ms)`);
+          try { unlinkSync(stalePath); } catch { /* tolerate */ }
+          continue;
+        } catch (renameErr: any) {
+          if (renameErr.code === 'ENOENT') continue;
+          throw renameErr;
+        }
+      }
+
+      if (Date.now() - start > maxWaitMs) {
+        throw new Error(
+          `file-lock timeout waiting for ${lockPath} ` +
+          `(held by pid ${holder || '?'}, age ${Math.round(lockAgeMs)}ms)`,
+        );
+      }
+      sleepSync(RETRY_BASE_MS + Math.random() * RETRY_BASE_MS);
     }
   }
 }

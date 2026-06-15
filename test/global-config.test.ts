@@ -50,6 +50,20 @@ describe('global dashboard config', () => {
     expect(readGlobalConfig().repoPickerMode).toBeUndefined();
   });
 
+  it('reads global skill project trust policy and delivery default', () => {
+    writeFileSync(globalConfigPath(), JSON.stringify({
+      skills: {
+        trustProjectSkills: 'trusted',
+        delivery: 'prompt',
+      },
+    }));
+
+    expect(readGlobalConfig().skills).toEqual({
+      trustProjectSkills: 'trusted',
+      delivery: 'prompt',
+    });
+  });
+
   it('readGlobalConfig sees fresh values immediately after a merge (cache invalidation)', () => {
     writeFileSync(globalConfigPath(), JSON.stringify({ dashboard: { publicReadOnly: true } }));
     expect(readGlobalConfig().dashboard?.publicReadOnly).toBe(true); // primes the TTL cache

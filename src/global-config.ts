@@ -43,6 +43,14 @@ export interface GlobalConfig {
    *  so hosts behind a proxy must set this (or the env vars, which we read as a
    *  fallback). Form: `http://host:port` or `http://user:pass@host:port`. */
   httpProxy?: string;
+  /** Machine-wide user skill registry policy. Skill package storage itself lives under
+   *  ~/.botmux/skills and is managed by services/skill-registry-store.ts. */
+  skills?: GlobalSkillConfig;
+}
+
+export interface GlobalSkillConfig {
+  trustProjectSkills?: 'off' | 'trusted' | 'all';
+  delivery?: 'auto' | 'prompt' | 'native';
 }
 
 export interface MaintenanceConfig {
@@ -173,6 +181,19 @@ function readDashboard(raw: unknown): DashboardGlobalConfig | undefined {
   return Object.keys(out).length > 0 ? out : undefined;
 }
 
+function readGlobalSkills(raw: unknown): GlobalSkillConfig | undefined {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return undefined;
+  const r = raw as Record<string, unknown>;
+  const out: GlobalSkillConfig = {};
+  if (r.trustProjectSkills === 'off' || r.trustProjectSkills === 'trusted' || r.trustProjectSkills === 'all') {
+    out.trustProjectSkills = r.trustProjectSkills;
+  }
+  if (r.delivery === 'auto' || r.delivery === 'prompt' || r.delivery === 'native') {
+    out.delivery = r.delivery;
+  }
+  return Object.keys(out).length > 0 ? out : undefined;
+}
+
 export function globalConfigPath(): string {
   return join(homedir(), '.botmux', 'config.json');
 }
@@ -226,6 +247,8 @@ export function readGlobalConfig(): GlobalConfig {
   const maintenance = readMaintenance(raw.maintenance);
   if (maintenance) out.maintenance = maintenance;
   if (typeof raw.httpProxy === 'string' && raw.httpProxy.trim()) out.httpProxy = raw.httpProxy.trim();
+  const skills = readGlobalSkills(raw.skills);
+  if (skills) out.skills = skills;
   readCache = { path, value: out, at: Date.now() };
   return out;
 }
