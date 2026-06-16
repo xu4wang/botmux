@@ -547,23 +547,23 @@ function readTokenUsageFromAidenCheckpoint(path: string): SessionTokenUsage | nu
   };
 }
 
-/** Resolve a Claude-family fork's (seed / relay) data root the SAME way its
- *  adapter does — by realpath-resolving the binary to `<pkg>/.claude-runtime`
- *  (see deriveSeedDataDir / deriveRelayDataDir). The previous
- *  `process.env.CLAUDE_CONFIG_DIR || ~/.claude-runtime` was wrong on a default
- *  install: the adapter injects CLAUDE_CONFIG_DIR only into the *child*, so the
- *  daemon's own env has it unset, and the real root is the package-local
- *  `.claude-runtime`, not `~/.claude-runtime` — so usage reads missed the
- *  transcript entirely. Cached so the dashboard read path doesn't shell out
- *  (`which`) on every refresh. An explicit CLAUDE_CONFIG_DIR on the daemon still
- *  wins, matching the adapter's spawnEnv precedence.
+/** Resolve a Claude-family fork's (seed / relay) data root EXACTLY as the worker
+ *  does, so usage reads hit the same transcript the CLI wrote. The adapter
+ *  derives the root by realpath-resolving the binary to `<pkg>/.claude-runtime`
+ *  (see deriveSeedDataDir / deriveRelayDataDir) and the worker spawns the CLI
+ *  with `spawnEnv = { CLAUDE_CONFIG_DIR: <that root> }`, which *overrides* any
+ *  inherited env (worker.ts: process.env first, then adapter.spawnEnv). So a
+ *  botmux-spawned seed/relay ALWAYS writes to the adapter-derived root —
+ *  regardless of whether the daemon itself has CLAUDE_CONFIG_DIR set. We must
+ *  read from the same place; consulting the daemon's own env (the old
+ *  `process.env.CLAUDE_CONFIG_DIR || ~/.claude-runtime`) would diverge from
+ *  where the CLI actually wrote. `claudeDataDir` is the single source of truth.
+ *  Cached so the dashboard read path doesn't shell out (`which`) per refresh.
  *
  *  Uses the DEFAULT binary (no per-bot cliPathOverride); a custom path would
  *  resolve a different root, but that narrow case was already unsupported here. */
 const claudeForkDataDirCache = new Map<string, string>();
 function claudeForkDataDir(cliId: 'seed' | 'relay'): string {
-  const env = process.env.CLAUDE_CONFIG_DIR;
-  if (env) return env;
   const cached = claudeForkDataDirCache.get(cliId);
   if (cached) return cached;
   const dir = createCliAdapterSync(cliId).claudeDataDir ?? join(homedir(), '.claude-runtime');
