@@ -44,6 +44,7 @@ import type { DaemonToWorker, WorkerToDaemon, Session, DisplayMode } from '../ty
 import { sessionKey, sessionAnchorId, type DaemonSession } from './types.js';
 import { claimPendingResponseCard, COMPLETED_REACTION_EMOJI_TYPE, markPendingResponseCardPatchedIfCurrent, syncPendingResponseState } from './pending-response.js';
 import { buildTerminalUrl } from './terminal-url.js';
+import { prependBotmuxBin } from './botmux-wrapper.js';
 import { usageLimitStateKey, type CliUsageLimitState } from '../utils/cli-usage-limit.js';
 
 type WindowsForkOptions = ForkOptions & { windowsHide?: boolean };
@@ -1497,7 +1498,7 @@ export function forkWorker(ds: DaemonSession, prompt: string, resume = false): v
   // Prepend ~/.botmux/bin to PATH so CLIs can call `botmux send` etc.
   // The wrapper script there is written by the daemon at startup.
   const botmuxBinDir = join(homedir(), '.botmux', 'bin');
-  const pathWithBotmux = `${botmuxBinDir}:${process.env.PATH ?? ''}`;
+  const pathWithBotmux = prependBotmuxBin(botmuxBinDir, process.env.PATH);
 
   const worker = fork(workerPath, [], {
     windowsHide: true,

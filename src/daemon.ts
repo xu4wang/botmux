@@ -10,6 +10,7 @@ const __dirname = dirname(__filename);
 import { config, getDashboardExternalHost } from './config.js';
 import { repoPickerScanOptions } from './global-config.js';
 import { writeHeartbeat } from './core/daemon-heartbeat.js';
+import { botmuxWrapperFiles } from './core/botmux-wrapper.js';
 import { startMaintenance, stopMaintenance } from './core/maintenance.js';
 import { sendRestartReportIfPending } from './core/restart-report.js';
 import { statSync } from 'node:fs';
@@ -606,16 +607,19 @@ function writePidFile(): void {
   try {
     mkdirSync(BOTMUX_BIN_DIR, { recursive: true });
     const cliScript = join(__dirname, 'cli.js');  // dist/cli.js
-    const wrapper = join(BOTMUX_BIN_DIR, 'botmux');
-    const content = `#!/bin/sh\nexec node "${cliScript}" "$@"\n`;
-    // Only write if changed (avoid unnecessary disk writes on every restart)
-    let existing = '';
-    try { existing = readFileSync(wrapper, 'utf-8'); } catch { /* doesn't exist yet */ }
-    if (existing !== content) {
-      // 原子写：并发会话随时在 exec 这个 wrapper，半截脚本会让它们的
-      // `botmux send` 全体失败。
-      atomicWriteFileSync(wrapper, content, { mode: 0o755 });
-      logger.info(`Wrapper script written: ${wrapper} → ${cliScript}`);
+    // POSIX `sh` wrapper always; plus a `botmux.cmd` on Windows so native shells
+    // resolve `botmux` (otherwise `botmux send` from a Windows CLI session fails).
+    for (const file of botmuxWrapperFiles(cliScript, process.execPath)) {
+      const wrapper = join(BOTMUX_BIN_DIR, file.name);
+      // Only write if changed (avoid unnecessary disk writes on every restart)
+      let existing = '';
+      try { existing = readFileSync(wrapper, 'utf-8'); } catch { /* doesn't exist yet */ }
+      if (existing !== file.content) {
+        // 原子写：并发会话随时在 exec 这个 wrapper，半截脚本会让它们的
+        // `botmux send` 全体失败。
+        atomicWriteFileSync(wrapper, file.content, { mode: file.mode });
+        logger.info(`Wrapper script written: ${wrapper} → ${cliScript}`);
+      }
     }
   } catch (err: any) {
     logger.warn(`Failed to write botmux wrapper script: ${err.message}`);

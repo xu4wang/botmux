@@ -24,6 +24,7 @@ import {
   isValidPathSegment,
   isValidRunId,
 } from './ops-projection.js';
+import { prependBotmuxBin } from '../core/botmux-wrapper.js';
 
 export const ATTEMPT_RESUME_SCHEMA_VERSION = 1;
 export const ATTEMPT_RESUME_IDLE_MS = 30 * 60 * 1000;
@@ -237,7 +238,7 @@ export class AttemptResumeManager {
       cwd: workingDir,
       env: {
         ...process.env,
-        PATH: `${join(homedir(), '.botmux', 'bin')}:${process.env.PATH ?? ''}`,
+        PATH: prependBotmuxBin(join(homedir(), '.botmux', 'bin'), process.env.PATH),
         BOTMUX_WORKFLOW: '1',
         BOTMUX_WORKFLOW_RESUME: '1',
         BOTMUX_WORKFLOW_RUN_ID: input.runId,
