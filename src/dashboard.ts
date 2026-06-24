@@ -91,8 +91,7 @@ import { botDefaultsPayload, botSummaryPayload } from './dashboard/bot-payload.j
 import { isValidRoleProfileId } from './services/role-profile-store.js';
 import { mergeSafeInsightOverviews } from './services/insight/report.js';
 import type { SafeInsightOverview } from './services/insight/types.js';
-import { watch as fsWatch } from 'node:fs';
-import { readPlatformBinding, PLATFORM_BINDING_PATH } from './platform/binding.js';
+import { readPlatformBinding } from './platform/binding.js';
 import { startPlatformTunnelClient, type PlatformBotInfo } from './platform/tunnel-client.js';
 import { cleanupIdleSessions, parseIdleCleanupHours } from './dashboard/session-cleanup.js';
 
@@ -2458,13 +2457,14 @@ function startPlatformTunnelIfBound(): void {
  * （tunnel-client 自己写的），那种不重连，避免反复重启。
  */
 function watchPlatformBinding(): void {
-  let timer: NodeJS.Timeout | null = null;
-  const onChange = (): void => {
-    if (timer) clearTimeout(timer);
-    timer = setTimeout(() => {
+  // 每 3s 轮询绑定文件——`botmux bind` 写入后自动连接，无需重启 daemon。
+  // 用轮询而非 fs.watch：绑定走原子写（临时文件 + rename），fs.watch 对 rename 在不同
+  // 文件系统上不可靠（实测某些机器收不到事件），轮询在任何环境都稳。
+  setInterval(() => {
+    try {
       const b = readPlatformBinding();
       const key = b ? `${b.platformUrl}|${b.machineId}|${b.machineToken}` : null;
-      if (key === platformBindingKey) return; // 没变（或仅团队变化）→ 不重连
+      if (key === platformBindingKey) return; // 绑定身份没变（团队成员变化不在此 key 内）→ 不重连
       logger.info('[platform-tunnel] 检测到绑定变化，重连平台');
       try {
         platformTunnel?.stop();
@@ -2473,18 +2473,10 @@ function watchPlatformBinding(): void {
       }
       platformTunnel = null;
       startPlatformTunnelIfBound();
-    }, 800);
-  };
-  try {
-    // 监听所在目录而非文件本身——绑定走原子写（临时文件 + rename），直接 watch 文件会在 rename 后失效
-    const dir = dirname(PLATFORM_BINDING_PATH);
-    const base = PLATFORM_BINDING_PATH.slice(dir.length + 1);
-    fsWatch(dir, (_event, filename) => {
-      if (!filename || filename === base) onChange();
-    });
-  } catch (e) {
-    logger.warn(`[platform-tunnel] 绑定文件监听启动失败: ${(e as Error).message}`);
-  }
+    } catch {
+      /* ignore */
+    }
+  }, 3000).unref();
 }
 
 // Graceful shutdown
