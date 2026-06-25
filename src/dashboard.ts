@@ -26,7 +26,7 @@ import { handleConnectorApi } from './dashboard/connector-api.js';
 import { redactGroupsForPublic, redactSchedulesForPublic } from './dashboard/public-redact.js';
 import { handleWebhookRoute } from './dashboard/webhook-routes.js';
 import { handleFederationApi } from './dashboard/federation-api.js';
-import { handleFederationSpokeApi, syncAllMemberships, type TeamSessionRowLike } from './dashboard/federation-spoke-api.js';
+import { handleFederationSpokeApi, syncAllMemberships, autoBindOwnerIfUnambiguous, type TeamSessionRowLike } from './dashboard/federation-spoke-api.js';
 import { getRunsDir } from './workflows/runs-dir.js';
 import { BotOnboardingManager } from './dashboard/bot-onboarding.js';
 import {
@@ -2402,6 +2402,30 @@ const federationSync = setInterval(() => {
     .catch(() => { /* best-effort */ });
 }, 2 * 60 * 1000);
 federationSync.unref();
+
+// 单候选自动绑定：standalone（未入团队）部署不必手动点面板「绑定」——用各机器人自己的
+// 凭证从 allowedUsers 解析出唯一负责人就自动认领，左上角飞书头像 / 拉群把发起人拉进群 /
+// 机器人归属随即生效。多候选（部署里配了多个人）仍保留手动选择。幂等：绑定后即刻 no-op。
+// 启动时按 0/5/15/60s 退避重试几次以覆盖 boot 时网络/凭证尚未就绪，之后交给手动按钮，
+// 不挂进永久心跳（避免对真·多候选/无 allowedUsers 的部署每 2 分钟空打飞书）。
+async function tryAutoBindOwner(): Promise<'done' | 'retry'> {
+  try {
+    const r = await autoBindOwnerIfUnambiguous(config.session.dataDir, { fetcher: fetch, live: liveBots() });
+    if (r.status === 'bound') { logger.info(`[identity] 已自动绑定本部署负责人：${r.owner?.name || r.owner?.unionId}（头像/拉群/归属即时生效）`); return 'done'; }
+    if (r.status === 'already_bound') return 'done';
+    if (r.status === 'need_choice') { logger.info(`[identity] 检测到 ${r.candidates?.length ?? 0} 个候选负责人，请到面板「团队」手动选择绑定`); return 'done'; }
+    return 'retry'; // no_candidates：可能是网络/凭证未就绪的瞬时失败，退避后重试
+  } catch (e) {
+    logger.debug(`[identity] 自动绑定尝试失败（将退避重试）：${(e as Error).message}`);
+    return 'retry';
+  }
+}
+void (async () => {
+  for (const delayMs of [0, 5_000, 15_000, 60_000]) {
+    if (delayMs) await new Promise((r) => setTimeout(r, delayMs));
+    if ((await tryAutoBindOwner()) === 'done') return;
+  }
+})();
 
 // 中心化平台隧道（已绑定才启动；每台机器一个，跑在 dashboard 进程里）
 let platformTunnel: { stop(): void } | null = null;
