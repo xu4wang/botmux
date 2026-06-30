@@ -447,7 +447,7 @@ export async function renderSettingsPage(root: HTMLElement): Promise<void> {
     // Flat boolean settings.
     bodyEl.querySelectorAll<HTMLInputElement>('input[data-setting]').forEach(input => {
       input.addEventListener('change', () => {
-        const key = input.dataset.setting as 'publicReadOnly' | 'openTerminalInFeishu' | 'remoteAccess';
+        const key = input.dataset.setting as 'publicReadOnly' | 'openTerminalInFeishu' | 'chatBotDiscovery' | 'remoteAccess';
         const before = !input.checked;
         void putSettings({ [key]: input.checked }, () => { input.checked = before; }, input);
       });
