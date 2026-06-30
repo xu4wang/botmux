@@ -32,7 +32,16 @@ export interface TunnelClientOptions {
 const HEARTBEAT_MS = 30_000;
 const BACKOFF_MIN_MS = 1_000;
 const BACKOFF_MAX_MS = 30_000;
-const DATA_DIAL_TIMEOUT_MS = 10_000;
+// 数据流拨号：单次超时 + 有界重试。某些部署到平台 LB 某几个 VIP 的链路对 TLS/大包 ~50% 丢，
+// 单拨一次就 502/掉 asset；像浏览器/CLI 那样「重试 + 复用」即可大幅救回。重试是「有界 + 限速」的：
+//  - 单次拨号超时缩到 3.5s（原 10s 太长，留不出重试窗口；健康链路拨号 <1s，不受影响）
+//  - 总拨号次数封顶 DATA_DIAL_MAX_ATTEMPTS（含首拨），绝不无限重试
+//  - 两次拨号间至少隔 DATA_DIAL_RETRY_BACKOFF_MS，控制 QPS，不猛拨
+//  - 总时长不超过 DATA_DIAL_OVERALL_DEADLINE_MS（平台 pending 流 10s 后作废，超了再拨也是白拨）
+const DATA_DIAL_TIMEOUT_MS = 3_500;
+const DATA_DIAL_MAX_ATTEMPTS = 3;
+const DATA_DIAL_RETRY_BACKOFF_MS = 300;
+const DATA_DIAL_OVERALL_DEADLINE_MS = 9_000;
 
 export interface TunnelClientHandle {
   stop(): void;
@@ -164,34 +173,62 @@ export function startPlatformTunnelClient(opts: TunnelClientOptions): TunnelClie
 
   function openDataStream(streamId: string): void {
     const url = `${base}/tunnel/data?token=${tokenQ}&stream=${encodeURIComponent(streamId)}`;
-    // 同上：数据流必须关 permessage-deflate，否则大文件(CSS/JS)帧经网关压缩协商错位 → RSV1 报错断流。
-    const data = new WebSocket(url, { perMessageDeflate: false });
-    const dialTimer = setTimeout(() => {
-      try {
-        data.terminate();
-      } catch {
-        /* ignore */
-      }
-    }, DATA_DIAL_TIMEOUT_MS);
+    const startedAt = Date.now();
+    let attempt = 0;
 
-    data.on('open', () => {
-      clearTimeout(dialTimer);
-      const dup = createWebSocketStream(data);
-      const tcp = net.connect(opts.getDashboardPort(), '127.0.0.1');
-      const kill = () => {
-        try { dup.destroy(); } catch { /* ignore */ }
-        try { tcp.destroy(); } catch { /* ignore */ }
+    const dial = (): void => {
+      attempt++;
+      // 同上：数据流必须关 permessage-deflate，否则大文件(CSS/JS)帧经网关压缩协商错位 → RSV1 报错断流。
+      const data = new WebSocket(url, { perMessageDeflate: false });
+      let settled = false; // 本次拨号是否已定局（成功桥接 / 失败转交重试），防 timer 与 error 重复触发
+
+      // 拨号失败（超时或 error）：在预算内换一条新连接重试同一个 streamId（平台 pending 仍在）；
+      // 超出次数/时间预算就放弃。绝不无限重试，两次之间留 backoff 限速。
+      const retryOrGiveUp = (reason: string): void => {
+        const canRetry =
+          attempt < DATA_DIAL_MAX_ATTEMPTS &&
+          Date.now() - startedAt < DATA_DIAL_OVERALL_DEADLINE_MS;
+        if (canRetry) {
+          opts.log('数据连接拨号失败，重试', { attempt, reason });
+          setTimeout(dial, DATA_DIAL_RETRY_BACKOFF_MS);
+        } else {
+          opts.log('数据连接失败', { attempts: attempt, err: reason });
+        }
       };
-      dup.on('error', kill);
-      tcp.on('error', kill);
-      tcp.on('close', kill);
-      dup.pipe(tcp);
-      tcp.pipe(dup);
-    });
-    data.on('error', (e) => {
-      clearTimeout(dialTimer);
-      opts.log('数据连接失败', { err: String(e) });
-    });
+
+      const dialTimer = setTimeout(() => {
+        if (settled) return;
+        settled = true;
+        try { data.terminate(); } catch { /* ignore */ }
+        retryOrGiveUp(`dial timeout (${DATA_DIAL_TIMEOUT_MS}ms)`);
+      }, DATA_DIAL_TIMEOUT_MS);
+
+      data.on('open', () => {
+        if (settled) { try { data.terminate(); } catch { /* ignore */ } return; }
+        settled = true;
+        clearTimeout(dialTimer);
+        const dup = createWebSocketStream(data);
+        const tcp = net.connect(opts.getDashboardPort(), '127.0.0.1');
+        const kill = () => {
+          try { dup.destroy(); } catch { /* ignore */ }
+          try { tcp.destroy(); } catch { /* ignore */ }
+        };
+        dup.on('error', kill);
+        tcp.on('error', kill);
+        tcp.on('close', kill);
+        dup.pipe(tcp);
+        tcp.pipe(dup);
+      });
+      data.on('error', (e) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(dialTimer);
+        try { data.terminate(); } catch { /* ignore */ }
+        retryOrGiveUp(String(e));
+      });
+    };
+
+    dial();
   }
 
   connect();
