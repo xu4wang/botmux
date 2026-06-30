@@ -121,7 +121,7 @@ function renderSettingsBody(): string {
         </label>
       </section>
       <section class="bd-section">
-        <h3 class="bd-section-title">${t('settings.sectionCollab')}</h3>
+        <h3 class="bd-section-title">${t('settings.sectionExperimental')}</h3>
         <label class="toggle-row">
           <input type="checkbox" data-setting="chatBotDiscovery" ${settings.chatBotDiscovery ? 'checked' : ''} ${dis}>
           <span class="switch" aria-hidden="true"></span>
