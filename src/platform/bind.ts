@@ -66,7 +66,12 @@ export async function cmdBind(args: string[]): Promise<void> {
       body: JSON.stringify({ code, machineId }),
     });
   } catch (e) {
-    console.error(`连接平台失败（${platformUrl}）: ${String(e)}`);
+    // Node 的 fetch 把真正的网络原因塞在 e.cause 里，String(e) 只剩裸 "TypeError: fetch failed"，
+    // 对排查毫无帮助。把 cause（ENOTFOUND/ECONNREFUSED/超时/证书等）一并打出来。
+    const cause = (e as { cause?: unknown })?.cause;
+    const detail = cause ? `${String(e)} —— ${String(cause)}` : String(e);
+    console.error(`连接平台失败（${platformUrl}）: ${detail}`);
+    console.error('  多为临时网络抖动或平台正在发布；请确认本机能访问平台域名后重试 `botmux bind`（重绑安全、幂等，机器身份不变）。');
     process.exit(1);
     return;
   }
