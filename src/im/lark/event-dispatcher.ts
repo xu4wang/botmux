@@ -27,6 +27,7 @@ import { buildGrantCard } from './card-builder.js';
 import { openPending, isThrottled, clearPending } from './grant-pending.js';
 import { localeForBot, t } from '../../i18n/index.js';
 import { chatQuotaKey, globalQuotaKey } from '../../services/grant-store.js';
+import { claimMessageOnce, _resetCacheForTest as _resetSeenMessagesForTest } from '../../services/seen-message-store.js';
 import { ensureDefaultOncallBound } from '../../services/oncall-store.js';
 import { resolveRegularGroupMode, resolveGroupMentionMode } from '../../services/chat-reply-mode-store.js';
 import { buildSummaryCommandPrompt, type SummaryChatKind, type SummaryCommandMatch, type SummaryCommandRuntimeContext } from './summary-command.js';
@@ -368,12 +369,16 @@ function claimEventOnce(key: string): boolean {
   return true;
 }
 
-function scheduleAckSafeEvent(key: string, work: () => Promise<void>, label: string): void {
-  if (!claimEventOnce(key)) {
+// `claim` defaults to the in-memory event-id claim; the message path passes a
+// persistent message_id claim (claimMessageOnce) so a daemon restart or the 6h
+// re-push tier can't replay an already-handled message. The claim MUST be fully
+// synchronous (see INVARIANT below) — both claimEventOnce and claimMessageOnce are.
+function scheduleAckSafeEvent(key: string, work: () => Promise<void>, label: string, claim: () => boolean = () => claimEventOnce(key)): void {
+  if (!claim()) {
     logger.info(`[event-dedupe] duplicate ${label} ignored: ${key}`);
     return;
   }
-  // INVARIANT: claimEventOnce + this setImmediate scheduling must stay fully
+  // INVARIANT: the claim above + this setImmediate scheduling must stay fully
   // synchronous (no await before we get here). WS events arrive in order and
   // setImmediate is FIFO, so same-anchor messages reach serializeByAnchor in
   // arrival order ONLY while nothing awaits ahead of the schedule. An await here
@@ -531,6 +536,9 @@ async function handleCardActionAckSafe(data: any, larkAppId: string, handlers: E
 export function __resetEventClaimsForTest(): void {
   eventClaims.clear();
   cardActionInFlight.clear();
+  // The message path now dedupes via the persistent seen-message store; clear its
+  // in-memory cache too so cases reusing the same message_id don't suppress each other.
+  _resetSeenMessagesForTest();
 }
 
 export async function getGroupStats(larkAppId: string, chatId: string): Promise<{ userCount: number; botCount: number }> {
@@ -1554,8 +1562,15 @@ export function startLarkEventDispatcher(larkAppId: string, larkAppSecret: strin
     'im.message.reaction.created_v1': () => {},
     'im.message.reaction.deleted_v1': () => {},
     'im.message.receive_v1': (data: any) => {
+      // Dedupe by message_id (stable across re-pushes / event_id re-mints /
+      // daemon restarts), persisted so the 6h re-push tier or a restart can't
+      // replay an already-handled message. Fall back to the in-memory event-id
+      // claim only when message_id is absent (shouldn't happen for real messages).
       const messageIdForKey = data?.message?.message_id;
-      const eventKey = `im.message.receive_v1:${larkAppId}:${eventIdForKey(data) ?? messageIdForKey ?? unkeyableEventKey()}`;
+      const eventKey = `im.message.receive_v1:${larkAppId}:${messageIdForKey ?? eventIdForKey(data) ?? unkeyableEventKey()}`;
+      const claim = messageIdForKey
+        ? () => claimMessageOnce(larkAppId, messageIdForKey)
+        : () => claimEventOnce(eventKey);
       scheduleAckSafeEvent(eventKey, async () => {
       try {
         const message = data.message;
@@ -1987,7 +2002,7 @@ export function startLarkEventDispatcher(larkAppId: string, larkAppSecret: strin
       } catch (err) {
         logger.error(`Error handling message event: ${err}`);
       }
-      }, 'message event');
+      }, 'message event', claim);
     },
   });
 

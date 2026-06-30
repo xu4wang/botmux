@@ -487,6 +487,59 @@ describe('mentionsAnotherMember (ambient redirect carve-out)', () => {
   });
 });
 
+describe('im.message.receive_v1 — message_id dedupe (re-push protection)', () => {
+  let handlers: ReturnType<typeof makeHandlers>;
+
+  beforeEach(() => {
+    capturedHandlers = {};
+    __resetAnchorQueues();
+    __resetEventClaimsForTest();
+    _resetGrantPending();
+    mockReplyMessage.mockClear();
+    mockGetOwnerOpenId.mockReset().mockReturnValue(undefined);
+    mockGetCachedChatMode.mockReset().mockReturnValue(undefined);
+    setupBotState();
+    handlers = makeHandlers();
+    mockIsChatOncallBoundForAnyBot.mockReturnValue(false);
+    mockFindOncallChat.mockReturnValue(undefined);
+    startLarkEventDispatcher(MY_APP_ID, 'secret', handlers);
+  });
+
+  // A bot @mention in a thread routes to handleThreadReply exactly once per
+  // distinct message. We reuse that path to count how many times a (re-)delivered
+  // message is actually processed.
+  const mentionEvent = (messageId: string, eventId?: string) => {
+    const event: any = makeBotMessageEvent({
+      senderOpenId: OTHER_BOT_OPEN_ID,
+      content: JSON.stringify({ text: '@BotA check this' }),
+      rootId: 'root-thread-dedupe',
+      messageId,
+      mentions: [{ key: '@_bot_a', name: 'BotA', id: { open_id: MY_OPEN_ID } }],
+    });
+    if (eventId) event.event_id = eventId; // mirror SDK parse: header.event_id is spread onto data
+    return event;
+  };
+
+  it('suppresses a re-push with the SAME message_id but a NEW event_id (old event_id-keyed dedupe would not)', async () => {
+    await capturedHandlers['im.message.receive_v1'](mentionEvent('om_repush', 'ev_first'));
+    await flushEventWork();
+    // Feishu re-delivers the same message; event_id may differ on the new delivery.
+    await capturedHandlers['im.message.receive_v1'](mentionEvent('om_repush', 'ev_second'));
+    await flushEventWork();
+
+    expect(handlers.handleThreadReply).toHaveBeenCalledTimes(1);
+  });
+
+  it('does NOT over-suppress: two distinct messages (distinct message_id) both process', async () => {
+    await capturedHandlers['im.message.receive_v1'](mentionEvent('om_a', 'ev_a'));
+    await flushEventWork();
+    await capturedHandlers['im.message.receive_v1'](mentionEvent('om_b', 'ev_b'));
+    await flushEventWork();
+
+    expect(handlers.handleThreadReply).toHaveBeenCalledTimes(2);
+  });
+});
+
 describe('im.message.receive_v1 — bot-to-bot @mention routing', () => {
   let handlers: ReturnType<typeof makeHandlers>;
 
