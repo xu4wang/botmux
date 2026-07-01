@@ -32,16 +32,18 @@ export interface TunnelClientOptions {
 const HEARTBEAT_MS = 30_000;
 const BACKOFF_MIN_MS = 1_000;
 const BACKOFF_MAX_MS = 30_000;
-// 数据流拨号：单次超时 + 有界重试。某些部署到平台 LB 某几个 VIP 的链路对新流 ~50% 丢——坏的
-// ECMP 分支「静默黑洞」（不回包），好连接 ~90ms 就回。所以：
-//  - 单次超时压到 1s：好连接 90ms 就成、1s 绰绰有余；坏的 1s 内没回就是黑洞、立刻放弃换下一条。
-//    （原来 3.5s 太长——检测一个黑洞白等 3.5s，冷启动建连赌两三次就 ~5-7s，页面卡这么久。）
-//  - 多试几次（≤5）把成功率拉高：~50% 单次成功率下 5 拨≈97%，且都在平台 10s pending 窗口内。
-//  - 间隔 DATA_DIAL_RETRY_BACKOFF_MS 限速、总时长 ≤DATA_DIAL_OVERALL_DEADLINE_MS。
-//  - 配合平台连接池：建好的好连接会被复用，拨号（赌）只在冷启动/扩容时发生，不是每请求。
+// 数据流拨号：并行拨号（happy-eyeballs）。某些部署到平台 LB 某几个 VIP 的链路对新流 ~50% 丢——
+// 坏的 ECMP 分支「静默黑洞」（不回包、抓包实锤 ClientHello 无响应），好连接 ~90ms 就回。串行「拨一条
+// →黑洞等满超时→再拨」冷启动要赌好几秒；改成每波**并行拨几条、谁先到用谁、其余丢弃**：
+//  - 每波并行 DATA_DIAL_PARALLEL 条：~50% 单条成功率下，3 条里有 1 条好的概率 ~87.5% → 通常 ~90ms 就建好。
+//  - 单条超时 1s（好连接 90ms 就成，1s 足够判黑洞）；一波全黑洞才进下一波，最多 DATA_DIAL_MAX_WAVES 波。
+//  - 用完即弃、不常驻空闲连接（区别于「预热连接池」，不随机器数堆连接，可扩展）。
+//  - 平台对同一个 streamId 只 attach 第一条到的、其余自动 4004 关，协议无需改。
+//  - 配合平台连接池：建好的好连接会被复用，拨号（赌）只在冷启动/扩容发生，不是每请求。
 const DATA_DIAL_TIMEOUT_MS = 1_000;
-const DATA_DIAL_MAX_ATTEMPTS = 5;
-const DATA_DIAL_RETRY_BACKOFF_MS = 150;
+const DATA_DIAL_PARALLEL = 3;
+const DATA_DIAL_MAX_WAVES = 2;
+const DATA_DIAL_WAVE_BACKOFF_MS = 150;
 const DATA_DIAL_OVERALL_DEADLINE_MS = 6_000;
 
 export interface TunnelClientHandle {
@@ -196,61 +198,77 @@ export function startPlatformTunnelClient(opts: TunnelClientOptions): TunnelClie
   function openDataStream(streamId: string): void {
     const url = `${base}/tunnel/data?token=${tokenQ}&stream=${encodeURIComponent(streamId)}`;
     const startedAt = Date.now();
-    let attempt = 0;
+    let won = false;               // 本 stream 是否已有连接胜出并桥接
+    let wave = 0;
+    const inflight = new Set<WebSocket>(); // 当前在拨/在等的连接（胜出后除胜者外全 terminate）
 
-    const dial = (): void => {
-      attempt++;
-      // 同上：数据流必须关 permessage-deflate，否则大文件(CSS/JS)帧经网关压缩协商错位 → RSV1 报错断流。
-      const data = new WebSocket(url, { perMessageDeflate: false });
-      let settled = false; // 本次拨号是否已定局（成功桥接 / 失败转交重试），防 timer 与 error 重复触发
-
-      // 拨号失败（超时或 error）：在预算内换一条新连接重试同一个 streamId（平台 pending 仍在）；
-      // 超出次数/时间预算就放弃。绝不无限重试，两次之间留 backoff 限速。
-      const retryOrGiveUp = (reason: string): void => {
-        const canRetry =
-          attempt < DATA_DIAL_MAX_ATTEMPTS &&
-          Date.now() - startedAt < DATA_DIAL_OVERALL_DEADLINE_MS;
-        if (canRetry) {
-          opts.log('数据连接拨号失败，重试', { attempt, reason });
-          setTimeout(dial, DATA_DIAL_RETRY_BACKOFF_MS);
-        } else {
-          opts.log('数据连接失败', { attempts: attempt, err: reason });
-        }
+    // 胜者：桥接到本地 dashboard，并把本 stream 其余在拨的连接全部关掉（用完即弃）。
+    const bridge = (winner: WebSocket): void => {
+      won = true;
+      for (const ws of inflight) {
+        if (ws === winner) continue;
+        try { ws.terminate(); } catch { /* ignore */ }
+      }
+      inflight.clear();
+      // 数据流必须关 permessage-deflate（连接创建时已设），否则大文件帧经网关压缩协商错位 → RSV1 断流。
+      const dup = createWebSocketStream(winner);
+      const tcp = net.connect(opts.getDashboardPort(), '127.0.0.1');
+      const kill = () => {
+        try { dup.destroy(); } catch { /* ignore */ }
+        try { tcp.destroy(); } catch { /* ignore */ }
       };
-
-      const dialTimer = setTimeout(() => {
-        if (settled) return;
-        settled = true;
-        try { data.terminate(); } catch { /* ignore */ }
-        retryOrGiveUp(`dial timeout (${DATA_DIAL_TIMEOUT_MS}ms)`);
-      }, DATA_DIAL_TIMEOUT_MS);
-
-      data.on('open', () => {
-        if (settled) { try { data.terminate(); } catch { /* ignore */ } return; }
-        settled = true;
-        clearTimeout(dialTimer);
-        const dup = createWebSocketStream(data);
-        const tcp = net.connect(opts.getDashboardPort(), '127.0.0.1');
-        const kill = () => {
-          try { dup.destroy(); } catch { /* ignore */ }
-          try { tcp.destroy(); } catch { /* ignore */ }
-        };
-        dup.on('error', kill);
-        tcp.on('error', kill);
-        tcp.on('close', kill);
-        dup.pipe(tcp);
-        tcp.pipe(dup);
-      });
-      data.on('error', (e) => {
-        if (settled) return;
-        settled = true;
-        clearTimeout(dialTimer);
-        try { data.terminate(); } catch { /* ignore */ }
-        retryOrGiveUp(String(e));
-      });
+      dup.on('error', kill);
+      tcp.on('error', kill);
+      tcp.on('close', kill);
+      dup.pipe(tcp);
+      tcp.pipe(dup);
     };
 
-    dial();
+    // 每波并行拨 DATA_DIAL_PARALLEL 条，谁先 open 谁胜出；一波全黑洞/失败才进下一波（有界）。
+    const dialWave = (): void => {
+      if (won) return;
+      wave++;
+      let pending = DATA_DIAL_PARALLEL;
+      const onFail = (): void => {
+        if (won) return;
+        if (--pending > 0) return; // 本波还有在拨的，等它们
+        // 本波全军覆没：预算内进下一波，否则放弃。
+        if (wave < DATA_DIAL_MAX_WAVES && Date.now() - startedAt < DATA_DIAL_OVERALL_DEADLINE_MS) {
+          setTimeout(dialWave, DATA_DIAL_WAVE_BACKOFF_MS);
+        } else {
+          opts.log('数据连接失败', { waves: wave, parallel: DATA_DIAL_PARALLEL });
+        }
+      };
+      for (let k = 0; k < DATA_DIAL_PARALLEL; k++) {
+        const data = new WebSocket(url, { perMessageDeflate: false });
+        inflight.add(data);
+        let done = false;
+        const timer = setTimeout(() => {
+          if (done) return;
+          done = true;
+          inflight.delete(data);
+          try { data.terminate(); } catch { /* ignore */ }
+          onFail();
+        }, DATA_DIAL_TIMEOUT_MS);
+        data.on('open', () => {
+          if (done) return;
+          done = true;
+          clearTimeout(timer);
+          inflight.delete(data);
+          if (won) { try { data.terminate(); } catch { /* ignore */ } return; } // 已有胜者 → 弃掉
+          bridge(data);
+        });
+        data.on('error', () => {
+          if (done) return;
+          done = true;
+          clearTimeout(timer);
+          inflight.delete(data);
+          onFail();
+        });
+      }
+    };
+
+    dialWave();
   }
 
   connect();
