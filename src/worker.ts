@@ -13,7 +13,7 @@
  *   7. On 'restart', kills CLI and re-spawns with --resume
  */
 import { randomBytes } from 'node:crypto';
-import { mkdirSync, writeFileSync, unlinkSync, existsSync, statSync, readdirSync, readlinkSync, readFileSync, realpathSync, watch as fsWatch, createWriteStream, type FSWatcher, type WriteStream } from 'node:fs';
+import { mkdirSync, writeFileSync, unlinkSync, existsSync, statSync, readdirSync, readlinkSync, readFileSync, realpathSync, copyFileSync, watch as fsWatch, createWriteStream, type FSWatcher, type WriteStream } from 'node:fs';
 import { atomicWriteFileSync } from './utils/atomic-write.js';
 import { isAbsolute, join, basename } from 'node:path';
 import { homedir } from 'node:os';
@@ -27,6 +27,9 @@ import {
   buildSeatbeltProfile,
   isolatedPaneReattachSafe,
   sendCredFilePath,
+  botHomePath,
+  buildV2DenyPaths,
+  buildV2AllowPaths,
   type ReadIsolationContext,
 } from './adapters/cli/read-isolation.js';
 import { killPersistentSession, type PersistentBackendType } from './core/persistent-backend.js';
@@ -110,6 +113,8 @@ import { config, resolveChatBotDiscoveryConfig } from './config.js';
 import * as sessionStore from './services/session-store.js';
 import * as pty from 'node-pty';
 import { createHash } from 'node:crypto';
+import { installHook, type HookInstallConfig } from './adapters/hook-installer.js';
+import { hookCommandFor } from './adapters/hook-command.js';
 
 // ─── State ───────────────────────────────────────────────────────────────────
 
@@ -132,6 +137,90 @@ let consecutiveInWorkerRestarts = 0;
  *  lifecycle so a 4× crash loop does not spam the Lark thread with 4 copies
  *  of the same warning. */
 let resumeFallbackNotified = false;
+
+/** v2 read isolation — provision a bot's PER-BOT config dir under its BOT_HOME so the
+ *  CLI (redirected there via CLAUDE_CONFIG_DIR/CODEX_HOME) starts fully set up despite
+ *  the global ~/.claude|~/.codex being Seatbelt-denied. Idempotent (guards on
+ *  existence), best-effort (only warns). The worker runs UNSANDBOXED, so it can read
+ *  the global config/keychain to seed the per-bot copy. */
+function provisionIsolatedBotHome(
+  botHome: string,
+  workingDir: string,
+  isClaude: boolean,
+  cliId: string,
+  hookInstall: HookInstallConfig | undefined,
+  log: (m: string) => void,
+): void {
+  try {
+    if (isClaude) {
+      const cdir = join(botHome, 'claude');
+      mkdirSync(cdir, { recursive: true });
+      // Auth: Claude keeps its OAuth token in the macOS Keychain (not in a file), and
+      // a fresh CLAUDE_CONFIG_DIR does NOT inherit it → write it as <cdir>/.credentials.json
+      // (verified: Claude logs in from that file). Same shared account for every bot.
+      const credPath = join(cdir, '.credentials.json');
+      if (!existsSync(credPath)) {
+        const r = spawnSync('security', ['find-generic-password', '-s', 'Claude Code-credentials', '-w'], { encoding: 'utf-8' });
+        const tok = (r.stdout ?? '').trim();
+        if (tok) writeFileSync(credPath, tok + '\n', { mode: 0o600 });
+        else log(`[read-isolation] WARN could not read Claude keychain token — bot may hit login screen`);
+      }
+      // State: seed <cdir>/.claude.json from the GLOBAL one MINUS `projects` (keeps the
+      // onboarding/promo "seen" flags + account so no dialogs appear, without leaking
+      // other projects' data), then trust this bot's cwd. Merge-safe on resume.
+      seedAndTrustClaudeState(join(cdir, '.claude.json'), workingDir, log);
+      // Hooks: install the SessionStart-ready + askUserQuestion hooks into the PER-BOT
+      // settings.json (global ~/.claude/settings.json is Seatbelt-denied), else the
+      // worker's ready gate falls back to a slow timeout and AskUserQuestion won't relay.
+      if (hookInstall) {
+        try { installHook(cliId, { ...hookInstall, configPath: join(cdir, 'settings.json') }, hookCommandFor(cliId)); }
+        catch (e) { log(`[read-isolation] WARN per-bot hook install failed: ${(e as Error).message}`); }
+      }
+    } else {
+      const cdir = join(botHome, 'codex');
+      mkdirSync(cdir, { recursive: true });
+      // Codex auth/config ARE files → copy the shared account's auth.json + config.toml
+      // into the per-bot CODEX_HOME (once). Sessions/memory/state start fresh there.
+      for (const f of ['auth.json', 'config.toml']) {
+        const dst = join(cdir, f);
+        const src = join(homedir(), '.codex', f);
+        if (!existsSync(dst) && existsSync(src)) copyFileSync(src, dst);
+      }
+    }
+  } catch (e) {
+    log(`[read-isolation] WARN provisioning bot home failed: ${(e as Error).message}`);
+  }
+}
+
+/** Seed a fresh per-bot `.claude.json` from the global top-level flags (minus projects)
+ *  so onboarding/promo dialogs are pre-dismissed and the account is recognized, then
+ *  mark this bot's realpath(cwd) trusted. Merge-safe: only seeds when absent; always
+ *  refreshes the cwd trust. */
+function seedAndTrustClaudeState(statePath: string, workingDir: string, log: (m: string) => void): void {
+  try {
+    let data: Record<string, any> = {};
+    if (existsSync(statePath)) {
+      try { data = JSON.parse(readFileSync(statePath, 'utf-8')); } catch { data = {}; }
+    } else {
+      try {
+        const g = JSON.parse(readFileSync(join(homedir(), '.claude.json'), 'utf-8')) as Record<string, any>;
+        const { projects: _drop, ...top } = g;
+        data = top;
+      } catch { data = {}; }
+    }
+    if (!data.projects || typeof data.projects !== 'object') data.projects = {};
+    let canonical = workingDir;
+    try { canonical = realpathSync(workingDir); } catch { /* cwd may not exist yet */ }
+    const entry = data.projects[canonical] && typeof data.projects[canonical] === 'object'
+      ? data.projects[canonical]
+      : (data.projects[canonical] = {});
+    entry.hasTrustDialogAccepted = true;
+    writeFileSync(statePath, JSON.stringify(data, null, 2), { mode: 0o600 });
+  } catch (e) {
+    log(`[read-isolation] WARN seed .claude.json failed: ${(e as Error).message}`);
+  }
+}
+
 const IDLE_PROBE_INTERVAL_MS = 3_500;
 const IDLE_PROBE_MAX_ATTEMPTS = 24;
 let busyPatternIdleProbeTimer: ReturnType<typeof setTimeout> | null = null;
@@ -4072,6 +4161,28 @@ function spawnCli(cfg: Extract<DaemonToWorker, { type: 'init' }>): void {
     log(`[sandbox] redirecting Claude bridge dataDir → overlay upper: ${redirected}`);
     claudeDataDir = redirected;
   }
+  // v2 read isolation: relocate the CLI's data root into the per-bot BOT_HOME
+  // (`<BOTMUX_HOME>/bots/<appId>/{claude,codex}`) so each bot's transcripts/memory
+  // land in its OWN (Seatbelt-allowed) dir, NOT the shared/global ~/.claude|~/.codex
+  // (which v2 denies wholesale). Computed EARLY — like willFileSandbox above — so
+  // every JSONL/bridge/resume path below already targets the per-bot dir. The
+  // matching CLAUDE_CONFIG_DIR/CODEX_HOME env, per-bot provisioning and Seatbelt
+  // wrapper are applied at spawn time further down.
+  const willReadIsolate =
+    cfg.readIsolation === true &&
+    cliAdapter.supportsReadIsolation === true &&
+    (cliAdapter.readIsolationMechanism ?? 'external-wrapper') === 'external-wrapper' &&
+    process.platform === 'darwin' &&
+    !!process.env.SESSION_DATA_DIR;
+  let isolationBotHome: string | undefined;
+  if (willReadIsolate) {
+    isolationBotHome = botHomePath(dirname(process.env.SESSION_DATA_DIR!), cfg.larkAppId);
+    const isClaudeFam = !!claudeDataDir;
+    if (isClaudeFam) claudeDataDir = join(isolationBotHome, 'claude');
+    // Provision the per-bot config dir (auth + onboarding/trust seed + hooks for claude;
+    // auth/config copy for codex) so the CLI starts fully set up under the Seatbelt wrapper.
+    provisionIsolatedBotHome(isolationBotHome, cfg.workingDir, isClaudeFam, cfg.cliId, cliAdapter.hookInstall, log);
+  }
   // Predict reattach vs fresh BEFORE the resume pre-flight. On a persistent
   // backend (tmux/herdr/zellij) a daemon restart finds the CLI process still
   // alive in its pane, so the backend will `attach` to the live process and
@@ -4428,6 +4539,16 @@ function spawnCli(cfg: Extract<DaemonToWorker, { type: 'init' }>): void {
   // them past the server's global env.
   if (cliAdapter.spawnEnv) Object.assign(childEnv, cliAdapter.spawnEnv);
 
+  // v2 read isolation: point the CLI at its PER-BOT config dir (set AFTER spawnEnv so
+  // it overrides any adapter default). claude → CLAUDE_CONFIG_DIR, codex → CODEX_HOME.
+  // Both are in BOTMUX_INJECTED_ENV_KEYS so the tmux backend forwards them into the
+  // pane; without this the CLI falls back to the global ~/.claude|~/.codex which the
+  // Seatbelt wrapper denies → it can't read its own data and won't start.
+  if (isolationBotHome) {
+    if (claudeDataDir) childEnv.CLAUDE_CONFIG_DIR = claudeDataDir; // = <BOT_HOME>/claude
+    else childEnv.CODEX_HOME = join(isolationBotHome, 'codex');
+  }
+
   // Per-bot env (bots.json `env`): extra vars for THIS bot's CLI only — e.g.
   // ANTHROPIC_BASE_URL/ANTHROPIC_AUTH_TOKEN to run a bot on GLM/a 3rd-party
   // provider, an HTTPS_PROXY, or a CLI feature flag. Passed as injectEnv (NOT
@@ -4466,18 +4587,28 @@ function spawnCli(cfg: Extract<DaemonToWorker, { type: 'init' }>): void {
     // silently fail-open (the /tmp→/private/tmp class of miss). realpath-if-exists:
     // a non-existent path has nothing to read, so its literal form is harmless.
     const canonical = (p: string) => { try { return realpathSync(p); } catch { return p; } };
-    const denyPaths = buildReadDenyPaths(readIsolationCtx).map(canonical);
-    // CLI-agnostic carve-outs re-allowed AFTER the denies (Seatbelt last-match wins):
-    // the adapter's own paths (Claude re-allows its project dir for resume+memory;
-    // Codex none) PLUS the bot's own preserved paths — its own lark-cli config dir +
-    // the running CLI's own auth/state. Carving these back as ALLOWs (rather than
-    // buildReadDenyPaths dropping a broader parent deny) means a deny on a parent dir
-    // still holds — only the specific preserved file/dir is re-opened, never its
-    // siblings (e.g. other bots' lark-cli dirs).
+    // v2 BOTMUX_HOME model (default-deny allowlist): deny the whole BOTMUX_HOME +
+    // global CLI dirs + system creds, re-allow ONLY this bot's own home + its own
+    // per-appId botmux files (keyed on the immutable appId — no cwd-controllable F1
+    // hole). Every bot's private CLI data lives under its BOT_HOME (redirected via
+    // CLAUDE_CONFIG_DIR/CODEX_HOME above), so "allow own home" covers it.
+    const v2ctx = {
+      homeDir: readIsolationCtx.homeDir,
+      botmuxHome: dirname(readIsolationCtx.sessionDataDir),
+      sessionDataDir: readIsolationCtx.sessionDataDir,
+      currentAppId: readIsolationCtx.currentAppId,
+      extraDenyPaths: readIsolationCtx.extraDenyPaths,
+    };
+    const denyPaths = buildV2DenyPaths(v2ctx).map(canonical);
+    // Own carve-outs + the SHARED read-only skill/plugin tooling (built-in botmux
+    // plugin + per-bot skill plugin/readonly roots): these live under BOTMUX_HOME but
+    // hold only skill files (no secrets, all bots read them), so re-allow them or the
+    // agent loses its `botmux send`/skill toolbelt. Delivered via `--plugin-dir`.
     const allowPaths = [
-      ...(claudeDataDir ? (cliAdapter.readIsolationAllowPaths?.(cfg.workingDir, claudeDataDir) ?? []) : []),
-      join(homedir(), '.lark-cli-bots', cfg.larkAppId),
-      ...(readIsolationCtx.ownAuthPaths ?? []),
+      ...buildV2AllowPaths(v2ctx),
+      join(homedir(), '.botmux', 'claude-plugin'),
+      ...(cfg.skillPluginDir ? [cfg.skillPluginDir] : []),
+      ...(cfg.skillReadonlyRoots ?? []),
     ].map(canonical);
     if (process.platform === 'darwin') {
       if (!locateOnPath('sandbox-exec')) {
