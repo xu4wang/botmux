@@ -3698,6 +3698,20 @@ async function cmdSend(rest: string[]): Promise<void> {
     process.exit(2);
   }
   process.env.SESSION_DATA_DIR ??= resolveDataDir();
+  // Read isolation: the sandboxed CLI is denied bots.json, so the usual
+  // `loadBotConfigs()` (which reads it) throws and registers nothing. When the
+  // worker injected this bot's OWN secret, register just this bot from env so
+  // the send path finds its Lark client without reading bots.json. Non-isolated
+  // sessions have no such env → behavior unchanged (falls through to bots.json).
+  if (process.env.BOTMUX_LARK_APP_SECRET && process.env.BOTMUX_LARK_APP_ID) {
+    const { registerBot } = await import('./bot-registry.js');
+    registerBot({
+      larkAppId: process.env.BOTMUX_LARK_APP_ID,
+      larkAppSecret: process.env.BOTMUX_LARK_APP_SECRET,
+      cliId: 'claude-code',
+      brand: process.env.BOTMUX_LARK_BRAND as 'feishu' | 'lark' | undefined,
+    } as import('./bot-registry.js').BotConfig);
+  }
   const sessionIdArg = argValue(rest, '--session-id');
   const images = argValues(rest, '--image', '--images');
   const files = argValues(rest, '--file', '--files');

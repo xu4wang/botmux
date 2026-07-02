@@ -6,6 +6,7 @@ import { sessionReadyHookCommand } from '../hook-command.js';
 import type { CliAdapter, CliId, PtyHandle } from './types.js';
 import { findJsonlContainingFingerprint, jsonlContainsFingerprint, normaliseForFingerprint } from '../../services/claude-transcript.js';
 import { GOAL_ENV } from '../../workflows/v3/contract.js';
+import { buildClaudeReadIsolationSettings } from './read-isolation.js';
 import { buildBotmuxSystemPromptText } from './shared-hints.js';
 import { delay, scaleMs } from '../../utils/timing.js';
 import { discoverClaudeFamilySessions } from '../../services/resumable-session-discovery.js';
@@ -439,6 +440,7 @@ export function createClaudeFamilyAdapter(variant: ClaudeFamilyVariant, rawBin: 
     id: variant.id,
     get resolvedBin(): string { return (cachedBin ??= resolveCommand(rawBin)); },
     supportsTypeAhead: true,
+    supportsReadIsolation: true,
     claudeDataDir: variant.dataDir,
     claudeStateJsonPath: variant.stateJsonPath,
     spawnEnv: variant.spawnEnv,
@@ -490,7 +492,7 @@ export function createClaudeFamilyAdapter(variant: ClaudeFamilyVariant, rawBin: 
       return discoverClaudeFamilySessions(variant.dataDir, limit, exclude);
     },
 
-    buildArgs({ sessionId, resume, resumeSessionId, botName, botOpenId, locale, model, disableCliBypass, skillPluginDir }) {
+    buildArgs({ sessionId, resume, resumeSessionId, botName, botOpenId, locale, model, disableCliBypass, skillPluginDir, readIsolation }) {
       const args: string[] = [];
       if (resume) {
         args.push('--resume', resumeSessionId ?? sessionId);
@@ -521,6 +523,16 @@ export function createClaudeFamilyAdapter(variant: ClaudeFamilyVariant, rawBin: 
       if (!disableCliBypass) {
         inlineSettings.skipDangerousModePermissionPrompt = true;
         inlineSettings.permissions = { defaultMode: 'bypassPermissions' };
+      }
+      // Per-bot local read isolation (macOS-first feature, gated by the worker):
+      // merge the sandbox block + permissions.deny into --settings. Merge into the
+      // SAME permissions object so `defaultMode: bypassPermissions` survives — deny
+      // rules are still enforced under bypass (verified), so the two coexist.
+      if (readIsolation) {
+        const iso = buildClaudeReadIsolationSettings(readIsolation);
+        inlineSettings.sandbox = iso.sandbox;
+        const existingPerms = (inlineSettings.permissions ?? {}) as Record<string, unknown>;
+        inlineSettings.permissions = { ...existingPerms, deny: iso.permissions.deny };
       }
       // 仅在有内容（bypass 键）时才传 --settings；disableCliBypass 下没东西可传就不传。
       if (Object.keys(inlineSettings).length > 0) {

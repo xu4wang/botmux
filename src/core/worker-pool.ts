@@ -1744,6 +1744,14 @@ export function forkWorker(ds: DaemonSession, prompt: string, resumeOrTurnId: bo
     // historical sessions never get retroactively sandboxed on restart.
     sandbox: ds.session.sandbox === true,
     sandboxHidePaths: ds.session.sandboxHidePaths ?? [],
+    // Per-bot local read isolation (adapter-translated; the worker gates it).
+    // Sibling app ids let the worker deny OTHER bots' lark-cli config dirs while
+    // leaving this bot's own dir readable for its skills.
+    readIsolation: botCfg.readIsolation === true,
+    readDenyExtraPaths: botCfg.readDenyExtraPaths ?? [],
+    readIsolationStrict: botCfg.readIsolationStrict === true,
+    readAllowPaths: botCfg.readAllowPaths ?? [],
+    otherBotAppIds: getAllBots().map(b => b.config.larkAppId).filter(id => id !== botCfg.larkAppId),
     backendType: botCfg.backendType ?? config.daemon.backendType,
     prompt,
     resume,

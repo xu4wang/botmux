@@ -16,6 +16,15 @@ import { randomBytes } from 'node:crypto';
 import { mkdirSync, writeFileSync, unlinkSync, existsSync, statSync, readdirSync, readlinkSync, readFileSync, watch as fsWatch, createWriteStream, type FSWatcher, type WriteStream } from 'node:fs';
 import { atomicWriteFileSync } from './utils/atomic-write.js';
 import { isAbsolute, join, basename } from 'node:path';
+import { homedir } from 'node:os';
+import { spawnSync } from 'node:child_process';
+import {
+  evaluateReadIsolationGate,
+  parseClaudeVersion,
+  versionAtLeast,
+  MIN_CLAUDE_SANDBOX_VERSION,
+  type ReadIsolationContext,
+} from './adapters/cli/read-isolation.js';
 import { drainTranscript, joinAssistantText, trailingAssistantText, findJsonlContainingFingerprint, findJsonlsContainingExactContent, findLatestJsonl, extractLastAssistantTurn, stringifyUserContent, extractTurnStartText, splitTranscriptEventsByCutoff, type TranscriptEvent } from './services/claude-transcript.js';
 import { BridgeTurnQueue, makeFingerprint, normaliseForFingerprint } from './services/bridge-turn-queue.js';
 import { shouldSuppressBridgeEmit, type BridgeSendMarker } from './services/bridge-fallback-gate.js';
@@ -3831,6 +3840,26 @@ function scheduleBusyPatternIdleProbe(source: string): void {
   busyPatternIdleProbeTimer.unref?.();
 }
 
+/** Memoized: does the resolved Claude binary support the built-in sandbox
+ *  (>= MIN_CLAUDE_SANDBOX_VERSION)? Spawned once per binary path. On any
+ *  failure returns false so the gate fail-closes rather than silently
+ *  running an old Claude that ignores the `sandbox` key. */
+const claudeSandboxVersionCache = new Map<string, boolean>();
+function claudeSupportsSandbox(bin: string): boolean {
+  const cached = claudeSandboxVersionCache.get(bin);
+  if (cached !== undefined) return cached;
+  let ok = false;
+  try {
+    const r = spawnSync(bin, ['--version'], { encoding: 'utf8', timeout: 5000 });
+    const v = parseClaudeVersion(`${r.stdout ?? ''}${r.stderr ?? ''}`);
+    ok = v ? versionAtLeast(v, MIN_CLAUDE_SANDBOX_VERSION) : false;
+  } catch {
+    ok = false;
+  }
+  claudeSandboxVersionCache.set(bin, ok);
+  return ok;
+}
+
 function spawnCli(cfg: Extract<DaemonToWorker, { type: 'init' }>): void {
   // (startupCommands one-shot is re-armed below, AFTER the reattach-vs-fresh
   // prediction — only a genuinely fresh CLI process replays them; see
@@ -4163,6 +4192,39 @@ function spawnCli(cfg: Extract<DaemonToWorker, { type: 'init' }>): void {
     adoptMode: cfg.adoptMode === true,
     passesInitialPromptViaArgs: cliAdapter.passesInitialPromptViaArgs === true,
   });
+  // Per-bot local read isolation: gate (fail-closed) + assemble the context the
+  // adapter translates into its CLI's native permission mechanism. The worker is
+  // on the host (NOT sandboxed), so it holds the sibling app ids / secret; only
+  // the spawned CLI child is confined.
+  let readIsolationCtx: ReadIsolationContext | undefined;
+  {
+    const configured = cfg.readIsolation === true;
+    const gate = evaluateReadIsolationGate({
+      configured,
+      adapterSupports: cliAdapter.supportsReadIsolation === true,
+      wrapperCliSet: !!cfg.wrapperCli,
+      versionOk: configured ? claudeSupportsSandbox(cliAdapter.resolvedBin) : true,
+    });
+    if (gate.failClosedReason) {
+      throw new Error(`[read-isolation] refusing to start session ${cfg.sessionId}: ${gate.failClosedReason}`);
+    }
+    if (gate.enabled) {
+      const sessionDataDir = process.env.SESSION_DATA_DIR;
+      if (!claudeDataDir || !sessionDataDir) {
+        throw new Error(`[read-isolation] refusing to start session ${cfg.sessionId}: missing claude data dir or SESSION_DATA_DIR`);
+      }
+      readIsolationCtx = {
+        currentAppId: cfg.larkAppId,
+        otherAppIds: cfg.otherBotAppIds ?? [],
+        sessionDataDir,
+        homeDir: homedir(),
+        claudeProjectsDir: join(claudeDataDir, 'projects'),
+        extraDenyPaths: cfg.readDenyExtraPaths,
+        strict: cfg.readIsolationStrict,
+        allowPaths: cfg.readAllowPaths,
+      };
+    }
+  }
   const args = cliAdapter.buildArgs({
     sessionId: effectiveAdapterSessionId,
     resume: effectiveResume,
@@ -4175,6 +4237,7 @@ function spawnCli(cfg: Extract<DaemonToWorker, { type: 'init' }>): void {
     model: ttadkGateway ? undefined : cfg.model,
     disableCliBypass: cfg.disableCliBypass === true,
     skillPluginDir: cfg.skillPluginDir,
+    readIsolation: readIsolationCtx,
   });
 
   // Extra args from env (CLI_DISABLE_DEFAULT_ARGS is removed — adapters own their defaults)
@@ -4256,6 +4319,14 @@ function spawnCli(cfg: Extract<DaemonToWorker, { type: 'init' }>): void {
   childEnv.BOTMUX_CHAT_ID = cfg.chatId;
   childEnv.BOTMUX_LARK_APP_ID = cfg.larkAppId;
   childEnv.BOTMUX_ROOT_MESSAGE_ID = cfg.rootMessageId;
+  // Read isolation denies the sandboxed CLI from reading bots.json, so give
+  // `botmux send` this bot's OWN secret via a namespaced env var (the bare
+  // LARK_APP_SECRET is redacted). Only when isolation is active — non-isolated
+  // bots keep reading bots.json unchanged (send fallback in cli.ts).
+  if (readIsolationCtx) {
+    childEnv.BOTMUX_LARK_APP_SECRET = cfg.larkAppSecret;
+    if (cfg.brand) childEnv.BOTMUX_LARK_BRAND = cfg.brand;
+  }
   // Inject an explicit false when disabled so child `botmux bots list` cannot
   // drift from the daemon because of stale rcfile/tmux environment.
   const chatBotDiscovery = resolveChatBotDiscoveryConfig();

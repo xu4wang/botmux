@@ -83,6 +83,11 @@ export interface CliAdapter {
     disableCliBypass?: boolean;
     /** Optional session-scoped skill plugin/root prepared by botmux. */
     skillPluginDir?: string;
+    /** Per-bot local read isolation intent + context. When present AND the
+     *  adapter reports {@link supportsReadIsolation}, the adapter translates it
+     *  into its CLI's native permission mechanism (Claude: sandbox + permissions
+     *  in `--settings`). Absent → no isolation injected. */
+    readIsolation?: import('./read-isolation.js').ReadIsolationContext;
   }): string[];
 
   /** When true, the adapter passes the initial prompt via CLI args (e.g. -i).
@@ -228,6 +233,13 @@ export interface CliAdapter {
    *  assistant_final). CodexBridgeQueue's HOL-block-drop keeps attribution
    *  correct for both shapes. */
   readonly supportsTypeAhead?: boolean;
+
+  /** True when this adapter can enforce per-bot local read isolation (translate
+   *  a {@link import('./read-isolation.js').ReadIsolationContext} into the CLI's
+   *  native permission mechanism). The worker gates on this: a bot with
+   *  `readIsolation` on but an adapter that does NOT support it is fail-closed
+   *  (refuse to start) rather than run silently unisolated. */
+  readonly supportsReadIsolation?: boolean;
 
   /** When true, the worker's soft first-prompt timeout keeps queued input held
    *  until this adapter's `readyPattern` appears. Use only for CLIs whose startup
