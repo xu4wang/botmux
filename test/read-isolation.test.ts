@@ -8,6 +8,7 @@ import {
   parseClaudeVersion,
   versionAtLeast,
   evaluateReadIsolationGate,
+  isolatedPaneReattachSafe,
   type ReadIsolationContext,
 } from '../src/adapters/cli/read-isolation.js';
 
@@ -92,6 +93,18 @@ describe('buildReadDenyPaths', () => {
   it('appends extraDenyPaths', () => {
     const paths = buildReadDenyPaths(ctx({ extraDenyPaths: ['/data/secret-token'] }));
     expect(paths).toContain('/data/secret-token');
+  });
+
+  it('isolatedPaneReattachSafe: only trusts a pane marked by THIS daemon lifetime', () => {
+    // Same boot id → pane was spawned isolated this lifetime → safe to reattach.
+    expect(isolatedPaneReattachSafe('boot-abc', 'boot-abc')).toBe(true);
+    // Different boot id → pane survived from a prior daemon (may be unisolated) → unsafe.
+    expect(isolatedPaneReattachSafe('boot-old', 'boot-new')).toBe(false);
+    // No marker → unknown provenance → unsafe (kill + cold-spawn).
+    expect(isolatedPaneReattachSafe(null, 'boot-new')).toBe(false);
+    // Empty/blank marker or boot id never counts as a match.
+    expect(isolatedPaneReattachSafe('', '')).toBe(false);
+    expect(isolatedPaneReattachSafe('  ', 'boot-new')).toBe(false);
   });
 
   it('never denies the running CLI own auth (ownAuthPaths) — else the wrapped CLI crashes', () => {

@@ -25,8 +25,10 @@ import {
   MIN_CLAUDE_SANDBOX_VERSION,
   buildReadDenyPaths,
   buildSeatbeltProfile,
+  isolatedPaneReattachSafe,
   type ReadIsolationContext,
 } from './adapters/cli/read-isolation.js';
+import { killPersistentSession, type PersistentBackendType } from './core/persistent-backend.js';
 import { drainTranscript, joinAssistantText, trailingAssistantText, findJsonlContainingFingerprint, findJsonlsContainingExactContent, findLatestJsonl, extractLastAssistantTurn, stringifyUserContent, extractTurnStartText, splitTranscriptEventsByCutoff, type TranscriptEvent } from './services/claude-transcript.js';
 import { BridgeTurnQueue, makeFingerprint, normaliseForFingerprint } from './services/bridge-turn-queue.js';
 import { shouldSuppressBridgeEmit, type BridgeSendMarker } from './services/bridge-fallback-gate.js';
@@ -3852,14 +3854,20 @@ function claudeSupportsSandbox(bin: string): boolean {
   const cached = claudeSandboxVersionCache.get(bin);
   if (cached !== undefined) return cached;
   let ok = false;
+  let parsed = false; // did `--version` actually return a parseable version?
   try {
-    const r = spawnSync(bin, ['--version'], { encoding: 'utf8', timeout: 5000 });
+    const r = spawnSync(bin, ['--version'], { encoding: 'utf8', timeout: 8000 });
     const v = parseClaudeVersion(`${r.stdout ?? ''}${r.stderr ?? ''}`);
-    ok = v ? versionAtLeast(v, MIN_CLAUDE_SANDBOX_VERSION) : false;
+    if (v) { parsed = true; ok = versionAtLeast(v, MIN_CLAUDE_SANDBOX_VERSION); }
   } catch {
-    ok = false;
+    parsed = false;
   }
-  claudeSandboxVersionCache.set(bin, ok);
+  // Only cache a DEFINITIVE answer (we got a version string). A transient
+  // `claude --version` timeout/spawn failure (e.g. machine under load) must NOT
+  // be memoized as "unsupported" — that would permanently fail-close an
+  // otherwise-capable claude for this daemon's lifetime. Leave uncached so the
+  // next spawn retries; this spawn still fail-closes (safe) on a null result.
+  if (parsed) claudeSandboxVersionCache.set(bin, ok);
   return ok;
 }
 
@@ -4080,6 +4088,41 @@ function spawnCli(cfg: Extract<DaemonToWorker, { type: 'init' }>): void {
       : effectiveBackendType === 'zellij'
         ? ZellijBackend.sessionName(cfg.sessionId)
       : undefined;
+  // [read-isolation] Before we decide to reattach a persistent pane: a pane can
+  // survive a daemon restart still running a CLI that may NOT be isolated (e.g.
+  // spawned before isolation was enabled, or by an old build). Isolation is only
+  // injectable at spawn time, so reattaching such a pane would silently run
+  // unisolated. We stamp a boot-id marker when we spawn an isolated pane; if this
+  // isolated bot's existing pane is NOT stamped by THIS daemon lifetime, kill it
+  // so the probe below sees no pane and we cold-spawn fresh isolated. A pane from
+  // this lifetime (suspend→resume) keeps its marker → reattaches normally (it is
+  // still the isolated process). This lets isolated bots use tmux/zellij/herdr.
+  if (cfg.readIsolation === true && persistentSessionName && effectiveBackendType !== 'pty') {
+    const paneLive = effectiveBackendType === 'tmux'
+      ? TmuxBackend.hasSession(persistentSessionName)
+      : effectiveBackendType === 'zellij'
+        ? ZellijBackend.hasSession(persistentSessionName)
+        : HerdrBackend.hasSession(persistentSessionName);
+    if (paneLive) {
+      let markerBootId: string | null = null;
+      try {
+        markerBootId = readFileSync(
+          join(process.env.SESSION_DATA_DIR ?? '', 'read-isolation', `${cfg.sessionId}.boot`),
+          'utf-8',
+        );
+      } catch { /* no marker → treat as stale */ }
+      if (isolatedPaneReattachSafe(markerBootId, cfg.daemonBootId)) {
+        log(`[read-isolation] reattaching persistent pane spawned isolated this daemon lifetime (${cfg.sessionId})`);
+      } else {
+        log(`[read-isolation] stale/foreign persistent pane for ${cfg.sessionId} (boot-id marker mismatch) — killing + cold-spawning isolated`);
+        try {
+          killPersistentSession(effectiveBackendType as PersistentBackendType, persistentSessionName);
+        } catch (e) {
+          throw new Error(`[read-isolation] refusing to start session ${cfg.sessionId}: could not kill stale persistent pane (${(e as Error).message})`);
+        }
+      }
+    }
+  }
   const willReattachPersistent = persistentSessionName
     ? effectiveBackendType === 'tmux'
       ? TmuxBackend.hasSession(persistentSessionName)
@@ -4216,12 +4259,10 @@ function spawnCli(cfg: Extract<DaemonToWorker, { type: 'init' }>): void {
       throw new Error(`[read-isolation] refusing to start session ${cfg.sessionId}: ${gate.failClosedReason}`);
     }
     if (gate.enabled) {
-      // Reattaching a live persistent pane (tmux/zellij/herdr) ignores our new
-      // --settings — the CLI is already running, possibly started before/without
-      // isolation. Refuse rather than silently run unisolated (Codex review #1).
-      if (willReattachPersistent) {
-        throw new Error(`[read-isolation] refusing to reattach persistent pane for session ${cfg.sessionId}: isolation cannot be applied to an already-running CLI (use the pty backend for isolated bots)`);
-      }
+      // A reattach that reaches here is safe: the stale-pane guard above already
+      // killed any persistent pane not stamped by this daemon lifetime, so
+      // `willReattachPersistent` can now only be true for a pane WE spawned
+      // isolated this lifetime (suspend→resume) — still the confined process.
       const sessionDataDir = process.env.SESSION_DATA_DIR;
       if (!sessionDataDir) {
         throw new Error(`[read-isolation] refusing to start session ${cfg.sessionId}: missing SESSION_DATA_DIR`);
@@ -4413,6 +4454,16 @@ function spawnCli(cfg: Extract<DaemonToWorker, { type: 'init' }>): void {
     } else {
       throw new Error(`[read-isolation] refusing to start session ${cfg.sessionId}: external-wrapper isolation unsupported on ${process.platform}`);
     }
+  }
+  // [read-isolation] Fresh isolated spawn on a persistent backend: stamp the pane
+  // with this daemon's boot id so a later suspend→resume reattach can be trusted
+  // (see the stale-pane guard above). pty needs no marker (never reattached).
+  if (readIsolationCtx && persistentSessionName && !willReattachPersistent) {
+    try {
+      const markerDir = join(process.env.SESSION_DATA_DIR!, 'read-isolation');
+      mkdirSync(markerDir, { recursive: true });
+      writeFileSync(join(markerDir, `${cfg.sessionId}.boot`), cfg.daemonBootId ?? '', { mode: 0o600 });
+    } catch { /* non-fatal: worst case a same-lifetime reattach cold-spawns instead */ }
   }
   // Sandbox wraps the spawned binary in bwrap. Works for pty (PtyBackend runs
   // bwrap directly) and tmux (the tmux pane's command becomes `bwrap … -- cli`);

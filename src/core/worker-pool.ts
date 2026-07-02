@@ -12,7 +12,7 @@ import { ensureSkills, ensureAskSkill, ensurePluginSkills, ensureWhiteboardSkill
 import { whiteboardEnabled } from '../services/whiteboard-store.js';
 import { installHook } from '../adapters/hook-installer.js';
 import { hookCommandFor } from '../adapters/hook-command.js';
-import { randomBytes } from 'node:crypto';
+import { randomBytes, randomUUID } from 'node:crypto';
 import { config } from '../config.js';
 import { readGlobalConfig } from '../global-config.js';
 import * as sessionStore from '../services/session-store.js';
@@ -33,6 +33,11 @@ import { TmuxBackend } from '../adapters/backend/tmux-backend.js';
 import { HerdrBackend } from '../adapters/backend/herdr-backend.js';
 import { isSuspendableBackendType, getSessionPersistentBackendType, persistentSessionName, killPersistentSession } from './persistent-backend.js';
 import { getBot, getAllBots, resolveBrandLabel, loadBotConfigs } from '../bot-registry.js';
+
+/** A random id minted once per daemon process (this lifetime). Stamped onto
+ *  isolated persistent panes so a suspend→resume reattach (same id) is
+ *  distinguishable from a pane surviving a daemon restart (different id). */
+const DAEMON_BOOT_ID = randomUUID();
 
 /** Every OTHER bot's larkAppId from the FULL bots.json — used by read isolation
  *  to deny sibling bots' per-app lark-cli dirs / session files. Reads the whole
@@ -1766,6 +1771,10 @@ export function forkWorker(ds: DaemonSession, prompt: string, resumeOrTurnId: bo
     // model only holds THIS daemon's single registered bot) so read isolation
     // denies EVERY sibling bot's lark-cli dir / session file. (Live-test bug.)
     otherBotAppIds: readSiblingAppIds(botCfg.larkAppId),
+    // Identifies THIS daemon lifetime. Stamped onto isolated panes so the worker
+    // can tell a suspend→resume reattach (same boot id, still isolated) from a
+    // stale pane surviving a daemon restart (different id → kill + cold-spawn).
+    daemonBootId: DAEMON_BOOT_ID,
     backendType: botCfg.backendType ?? config.daemon.backendType,
     prompt,
     resume,

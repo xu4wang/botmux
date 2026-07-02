@@ -249,6 +249,29 @@ export function buildLinuxReadIsolationWrap(_denyPaths: string[]): never {
   throw new Error('read-isolation: Linux bwrap wrapper not implemented yet');
 }
 
+/**
+ * Decide whether a persistent pane (tmux/zellij/herdr) may be reattached for an
+ * isolated bot. Isolation is injected only at CLI *spawn* time (Claude
+ * `--settings` / the Seatbelt wrapper), so reattaching a pane whose provenance we
+ * can't vouch for risks resuming an UNISOLATED CLI.
+ *
+ * We stamp a boot-id marker when we spawn an isolated CLI. A reattach is safe iff
+ * the marker matches the CURRENT daemon lifetime's boot id:
+ *  - suspend→resume within one daemon lifetime → same boot id → safe reattach
+ *    (the still-running pane was spawned isolated by us, keeps its sandbox).
+ *  - daemon restart → new boot id → stale marker (or none) → NOT safe; caller
+ *    kills the pane and cold-spawns fresh isolated instead.
+ * Blank marker/boot id never matches (defensive).
+ */
+export function isolatedPaneReattachSafe(
+  markerBootId: string | null | undefined,
+  currentBootId: string | null | undefined,
+): boolean {
+  const m = (markerBootId ?? '').trim();
+  const c = (currentBootId ?? '').trim();
+  return m.length > 0 && m === c;
+}
+
 /** Extract the semver from `claude --version` output (e.g. "2.1.197 (Claude Code)"). */
 export function parseClaudeVersion(stdout: string): string | null {
   const m = stdout.match(/(\d+)\.(\d+)\.(\d+)/);
