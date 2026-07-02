@@ -93,6 +93,15 @@ describe('buildReadDenyPaths', () => {
     const paths = buildReadDenyPaths(ctx({ extraDenyPaths: ['/data/secret-token'] }));
     expect(paths).toContain('/data/secret-token');
   });
+
+  it('never denies the running CLI own auth (ownAuthPaths) — else the wrapped CLI crashes', () => {
+    // Codex bot: ~/.codex/auth.json is its OWN auth; the default cred set includes
+    // it, but it must stay readable under the Seatbelt wrapper.
+    const paths = buildReadDenyPaths(ctx({ ownAuthPaths: ['/Users/bot/.codex/auth.json'] }));
+    expect(paths).not.toContain('/Users/bot/.codex/auth.json');
+    // other-CLI creds the bot doesn't own are still denied
+    expect(paths).toContain('/Users/bot/.claude/.credentials.json');
+  });
 });
 
 describe('buildClaudeReadIsolationSettings (blocklist / default mode)', () => {

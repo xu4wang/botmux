@@ -4237,6 +4237,11 @@ function spawnCli(cfg: Extract<DaemonToWorker, { type: 'init' }>): void {
         extraDenyPaths: cfg.readDenyExtraPaths,
         strict: cfg.readIsolationStrict,
         allowPaths: cfg.readAllowPaths,
+        // Keep the running CLI's own auth readable (external wrapper sandboxes
+        // its main process — e.g. codex must read ~/.codex/auth.json or it crashes).
+        ownAuthPaths: (cliAdapter.authPaths ?? []).map((p) =>
+          p.startsWith('~') ? join(homedir(), p.slice(1)) : p,
+        ),
       };
     }
   }

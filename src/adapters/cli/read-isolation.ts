@@ -38,6 +38,11 @@ export interface ReadIsolationContext {
   strict?: boolean;
   /** Strict-mode allow set (workspace + anything the bot legitimately needs). */
   allowPaths?: string[];
+  /** The running CLI's OWN auth/home paths that must stay readable (resolved
+   *  absolute). Critical for the external-wrapper path, which sandboxes the CLI's
+   *  MAIN process too: denying e.g. Codex's `~/.codex/auth.json` makes codex fail
+   *  to authenticate and crash-loop. Excluded from the deny set. */
+  ownAuthPaths?: string[];
 }
 
 /** Normalize a path for the deny/allow lists: require ABSOLUTE, strip trailing
@@ -105,12 +110,18 @@ export function buildReadDenyPaths(ctx: ReadIsolationContext): string[] {
     // Per-bot extras (normalized; relative/`..` dropped, not silently kept)
     ...(ctx.extraDenyPaths ?? []).map(normalizeIsolationPath),
   ];
-  // Never deny the bot's own lark-cli dir even if it sneaks in via extra paths.
+  // Never deny the bot's own lark-cli dir, nor the running CLI's own auth/home
+  // (the external wrapper sandboxes the CLI's main process — denying its own
+  // auth would crash it). Match by prefix so `~/.codex/auth.json` also protects
+  // anything the deny set nests under it.
   const ownNorm = normalizeIsolationPath(ownLarkCliDir);
+  const preserve = new Set([ownNorm, ...(ctx.ownAuthPaths ?? []).map(normalizeIsolationPath)].filter(Boolean));
+  const isPreserved = (p: string) =>
+    preserve.has(p) || [...preserve].some((k) => k && (p === k || p.startsWith(k + '/') || k.startsWith(p + '/')));
   return dedupe(
     paths
       .map((p) => (p ? normalizeIsolationPath(p) : null))
-      .filter((p): p is string => !!p && p !== ownNorm),
+      .filter((p): p is string => !!p && !isPreserved(p)),
   );
 }
 
