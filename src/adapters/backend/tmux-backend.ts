@@ -589,7 +589,13 @@ const BOTMUX_INJECTED_ENV_KEYS = [
   'CLAUDE_CODE_RESUME_TOKEN_THRESHOLD',
   // Seed CLI（Claude Code fork）的数据根目录。worker 为 seed 注入它指向 seed 自己的
   // `.claude-runtime`，bridge 才能盯对文件；不进白名单 tmux pane 就拿不到。
+  // v2 读隔离也用它把隔离 claude bot 的 config/transcript/memory 重定向进 per-bot
+  // BOT_HOME（`<BOTMUX_HOME>/bots/<appId>/claude`）——不进白名单 tmux pane 拿不到 →
+  // 隔离 bot 会掉回全局 ~/.claude（被 Seatbelt deny）而起不来。
   'CLAUDE_CONFIG_DIR',
+  // v2 读隔离把隔离 codex bot 的 sessions/memory/state 重定向进 per-bot BOT_HOME
+  // （`<BOTMUX_HOME>/bots/<appId>/codex`）。同理必须透传进 pane。
+  'CODEX_HOME',
   // cjadk wrapperCli（`cjadk <agent>`）启动时 worker 注入 `0`，让 cjadk 跑非交互模式
   // （跳过启动选择器、清掉吃首条/碎裂多行的输入怪癖），对齐 cjadk 官方 `cjadk feishu`
   // wrapper。只有 cjadk 启动会被设上此值，其它 bot 不带 → 不进白名单 tmux pane 拿不到，
