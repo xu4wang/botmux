@@ -2685,6 +2685,15 @@ export function forkAdoptWorker(ds: DaemonSession, opts?: { restoredFromMetadata
   const bot = getBot(ds.larkAppId);
   const botCfg = bot.config;
 
+  // Read isolation cannot be applied to an already-running CLI (adopt attaches
+  // to an existing pane; we can't inject --settings into it). Refuse to adopt an
+  // isolated bot rather than run it unisolated — it will cold-start (isolated)
+  // via forkWorker on the next message instead. (Codex review #2, fail-closed.)
+  if (botCfg.readIsolation === true) {
+    logger.warn(`[${t}] read-isolation bot: refusing to adopt existing CLI (would run unisolated); will cold-start isolated on next message`);
+    return;
+  }
+
   // Guard against double-fork
   if (ds.worker && !ds.worker.killed) {
     logger.warn(`[${t}] Worker already running, killing before adopt-fork`);

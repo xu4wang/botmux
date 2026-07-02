@@ -27,14 +27,29 @@ export interface ReadIsolationContext {
   sessionDataDir: string;
   /** The bot user's home directory. */
   homeDir: string;
-  /** The CLI's transcript projects root, e.g. `<home>/.claude/projects`. */
-  claudeProjectsDir: string;
+  /** The CLI's transcript root to deny, e.g. Claude's `<home>/.claude/projects`.
+   *  Optional: Codex sessions live in one shared `~/.codex/sessions` (not
+   *  per-bot-separable), so a single-Codex-bot setup omits it to avoid denying
+   *  the bot its own history. */
+  claudeProjectsDir?: string;
   /** Per-bot extra deny paths (BotConfig.readDenyExtraPaths). */
   extraDenyPaths?: string[];
   /** Strict allowlist mode: deny the whole home, allow only {@link allowPaths}. */
   strict?: boolean;
   /** Strict-mode allow set (workspace + anything the bot legitimately needs). */
   allowPaths?: string[];
+}
+
+/** Normalize a path for the deny/allow lists: require ABSOLUTE, strip trailing
+ *  slashes, reject `..` traversal. Returns null for anything unusable so the
+ *  caller drops it (a silently-ignored relative path is a fail-open trap).
+ *  NOTE: symlink resolution (realpath) is the caller's job — this is pure. */
+export function normalizeIsolationPath(p: string): string | null {
+  if (!p) return null;
+  const t = p.replace(/\/+$/, '');
+  if (!t.startsWith('/')) return null;
+  if (t.split('/').includes('..')) return null;
+  return t;
 }
 
 /** Common credential locations denied by default (opt-in feature, but once on
@@ -50,6 +65,10 @@ export function defaultCredentialDenyPaths(homeDir: string): string[] {
     `${h}/.docker/config.json`,
     `${h}/.kube`,
     `${h}/.git-credentials`,
+    // Other coding CLIs' auth (a Claude bot has no need to read these)
+    `${h}/.codex/auth.json`,
+    `${h}/.claude/.credentials.json`,
+    `${h}/.claude.json`,
   ];
 }
 
@@ -65,24 +84,34 @@ export function buildReadDenyPaths(ctx: ReadIsolationContext): string[] {
   const h = ctx.homeDir.replace(/\/+$/, '');
   const sd = ctx.sessionDataDir.replace(/\/+$/, '');
   const ownLarkCliDir = `${h}/.lark-cli-bots/${ctx.currentAppId}`;
-  const paths: string[] = [
+  const paths: (string | null)[] = [
     // Credentials
     `${h}/.botmux/bots.json`,
     `${h}/.lark-cli`,
     ...ctx.otherAppIds.map((id) => `${h}/.lark-cli-bots/${id}`),
     ...defaultCredentialDenyPaths(h),
-    // Conversation content (all bots')
-    ctx.claudeProjectsDir,
+    // Conversation content + other-bot local state (all bots')
+    ...(ctx.claudeProjectsDir ? [ctx.claudeProjectsDir] : []),
     `${sd}/frozen-cards`,
     `${sd}/turn-sends`,
     `${sd}/crash-diagnostics`,
+    `${sd}/attachments`,
+    `${sd}/whiteboards`,
+    // Legacy single-file session store (pre per-app split) can hold cross-bot
+    // metadata; own routing uses sessions-<self>.json so this stays safe to deny.
+    `${sd}/sessions.json`,
     // Other bots' session metadata (own sessions-<self>.json stays readable)
     ...ctx.otherAppIds.map((id) => `${sd}/sessions-${id}.json`),
-    // Per-bot extras
-    ...(ctx.extraDenyPaths ?? []),
+    // Per-bot extras (normalized; relative/`..` dropped, not silently kept)
+    ...(ctx.extraDenyPaths ?? []).map(normalizeIsolationPath),
   ];
   // Never deny the bot's own lark-cli dir even if it sneaks in via extra paths.
-  return dedupe(paths.filter((p) => p && p !== ownLarkCliDir));
+  const ownNorm = normalizeIsolationPath(ownLarkCliDir);
+  return dedupe(
+    paths
+      .map((p) => (p ? normalizeIsolationPath(p) : null))
+      .filter((p): p is string => !!p && p !== ownNorm),
+  );
 }
 
 /** Claude permission-rule path: absolute paths need a `//` double-slash prefix
@@ -124,7 +153,11 @@ export function buildClaudeReadIsolationSettings(ctx: ReadIsolationContext): Cla
   if (ctx.strict) {
     const h = ctx.homeDir.replace(/\/+$/, '');
     const ownLarkCliDir = `${h}/.lark-cli-bots/${ctx.currentAppId}`;
-    const allowRead = dedupe([...(ctx.allowPaths ?? []), ownLarkCliDir]);
+    const allowRead = dedupe(
+      [...(ctx.allowPaths ?? []).map(normalizeIsolationPath), ownLarkCliDir].filter(
+        (p): p is string => !!p,
+      ),
+    );
     return {
       permissions: { deny: permDeny },
       sandbox: {
@@ -168,6 +201,28 @@ export function evaluateReadIsolationGate(opts: {
   if (!opts.versionOk)
     return { enabled: false, failClosedReason: `Claude Code >= ${MIN_CLAUDE_SANDBOX_VERSION} required for read isolation` };
   return { enabled: true };
+}
+
+/** Codex profile name botmux owns for read isolation. */
+export const CODEX_READ_ISOLATION_PROFILE = 'botmux_read_isolation';
+
+/**
+ * Translate the intent into Codex 0.137 CLI `-c` config overrides. Verified: a
+ * `default_permissions` profile whose `[permissions.<name>.filesystem]` maps a
+ * path to "deny" makes Codex refuse to read it (bash + built-in tools) — even at
+ * approval=never. Each dir needs BOTH the exact key and the `/**` subtree glob.
+ * Returns the argv fragment to append (e.g. `-c default_permissions="..." -c ...`).
+ * The caller must NOT also pass `--dangerously-bypass-approvals-and-sandbox`,
+ * which disables the permission profile.
+ */
+export function buildCodexReadIsolationArgs(ctx: ReadIsolationContext): string[] {
+  const denyPaths = buildReadDenyPaths(ctx);
+  const entries: string[] = [];
+  for (const p of denyPaths) {
+    entries.push(`"${p}"="deny"`, `"${p}/**"="deny"`);
+  }
+  const fsTable = `permissions.${CODEX_READ_ISOLATION_PROFILE}.filesystem={${entries.join(',')}}`;
+  return ['-c', `default_permissions="${CODEX_READ_ISOLATION_PROFILE}"`, '-c', fsTable];
 }
 
 /** Extract the semver from `claude --version` output (e.g. "2.1.197 (Claude Code)"). */

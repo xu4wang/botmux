@@ -4,6 +4,8 @@ import {
   defaultCredentialDenyPaths,
   buildReadDenyPaths,
   buildClaudeReadIsolationSettings,
+  buildCodexReadIsolationArgs,
+  CODEX_READ_ISOLATION_PROFILE,
   parseClaudeVersion,
   versionAtLeast,
   evaluateReadIsolationGate,
@@ -34,6 +36,26 @@ describe('defaultCredentialDenyPaths', () => {
     expect(p).toContain('/Users/bot/.docker/config.json');
     expect(p).toContain('/Users/bot/.kube');
     expect(p).toContain('/Users/bot/.git-credentials');
+    expect(p).toContain('/Users/bot/.codex/auth.json');
+    expect(p).toContain('/Users/bot/.claude/.credentials.json');
+  });
+});
+
+describe('path hardening (Codex review #4/#7)', () => {
+  it('denies the legacy single-file sessions.json store', () => {
+    expect(buildReadDenyPaths(ctx())).toContain('/Users/bot/.botmux/data/sessions.json');
+  });
+
+  it('drops relative / traversal extra deny paths instead of silently keeping them', () => {
+    const paths = buildReadDenyPaths(ctx({ extraDenyPaths: ['relative/x', '/a/../b', '/ok/path'] }));
+    expect(paths).toContain('/ok/path');
+    expect(paths).not.toContain('relative/x');
+    expect(paths.some((p) => p.includes('..'))).toBe(false);
+  });
+
+  it('strips trailing slashes and still excludes the own lark-cli dir', () => {
+    const paths = buildReadDenyPaths(ctx({ extraDenyPaths: ['/Users/bot/.lark-cli-bots/cli_self/'] }));
+    expect(paths).not.toContain('/Users/bot/.lark-cli-bots/cli_self');
   });
 });
 
@@ -106,6 +128,23 @@ describe('buildClaudeReadIsolationSettings (strict / allowlist mode)', () => {
     expect(s.sandbox.filesystem.allowRead).toContain('/work/project');
     // own lark-cli dir must still be readable for skills
     expect(s.sandbox.filesystem.allowRead).toContain('/Users/bot/.lark-cli-bots/cli_self');
+  });
+});
+
+describe('buildCodexReadIsolationArgs (Codex 0.137, verified format)', () => {
+  it('emits default_permissions selector + filesystem deny table via -c', () => {
+    const args = buildCodexReadIsolationArgs(ctx());
+    expect(args[0]).toBe('-c');
+    expect(args[1]).toBe(`default_permissions="${CODEX_READ_ISOLATION_PROFILE}"`);
+    expect(args[2]).toBe('-c');
+    const table = args[3];
+    expect(table).toContain(`permissions.${CODEX_READ_ISOLATION_PROFILE}.filesystem={`);
+    // each denied path present as exact + /** glob, mapped to "deny"
+    expect(table).toContain('"/Users/bot/.botmux/bots.json"="deny"');
+    expect(table).toContain('"/Users/bot/.botmux/bots.json/**"="deny"');
+    expect(table).toContain('"/Users/bot/.lark-cli-bots/cli_other1"="deny"');
+    // own lark-cli dir must NOT be denied
+    expect(table).not.toContain('cli_self"="deny"');
   });
 });
 

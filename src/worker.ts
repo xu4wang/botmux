@@ -4199,26 +4199,38 @@ function spawnCli(cfg: Extract<DaemonToWorker, { type: 'init' }>): void {
   let readIsolationCtx: ReadIsolationContext | undefined;
   {
     const configured = cfg.readIsolation === true;
+    // The version gate is Claude-specific (MIN_CLAUDE_SANDBOX_VERSION). Only
+    // claude-family adapters carry claudeDataDir; other supporting adapters
+    // (Codex) have their own always-on mechanism, so skip the Claude probe.
+    const isClaudeFamily = !!claudeDataDir;
     const gate = evaluateReadIsolationGate({
       configured,
       adapterSupports: cliAdapter.supportsReadIsolation === true,
       wrapperCliSet: !!cfg.wrapperCli,
-      versionOk: configured ? claudeSupportsSandbox(cliAdapter.resolvedBin) : true,
+      versionOk: configured && isClaudeFamily ? claudeSupportsSandbox(cliAdapter.resolvedBin) : true,
     });
     if (gate.failClosedReason) {
       throw new Error(`[read-isolation] refusing to start session ${cfg.sessionId}: ${gate.failClosedReason}`);
     }
     if (gate.enabled) {
+      // Reattaching a live persistent pane (tmux/zellij/herdr) ignores our new
+      // --settings — the CLI is already running, possibly started before/without
+      // isolation. Refuse rather than silently run unisolated (Codex review #1).
+      if (willReattachPersistent) {
+        throw new Error(`[read-isolation] refusing to reattach persistent pane for session ${cfg.sessionId}: isolation cannot be applied to an already-running CLI (use the pty backend for isolated bots)`);
+      }
       const sessionDataDir = process.env.SESSION_DATA_DIR;
-      if (!claudeDataDir || !sessionDataDir) {
-        throw new Error(`[read-isolation] refusing to start session ${cfg.sessionId}: missing claude data dir or SESSION_DATA_DIR`);
+      if (!sessionDataDir) {
+        throw new Error(`[read-isolation] refusing to start session ${cfg.sessionId}: missing SESSION_DATA_DIR`);
       }
       readIsolationCtx = {
         currentAppId: cfg.larkAppId,
         otherAppIds: cfg.otherBotAppIds ?? [],
         sessionDataDir,
         homeDir: homedir(),
-        claudeProjectsDir: join(claudeDataDir, 'projects'),
+        // Claude family denies its per-project transcript root; Codex omits it
+        // (its sessions dir is shared/not per-bot-separable).
+        claudeProjectsDir: claudeDataDir ? join(claudeDataDir, 'projects') : undefined,
         extraDenyPaths: cfg.readDenyExtraPaths,
         strict: cfg.readIsolationStrict,
         allowPaths: cfg.readAllowPaths,
@@ -4324,6 +4336,9 @@ function spawnCli(cfg: Extract<DaemonToWorker, { type: 'init' }>): void {
   // LARK_APP_SECRET is redacted). Only when isolation is active — non-isolated
   // bots keep reading bots.json unchanged (send fallback in cli.ts).
   if (readIsolationCtx) {
+    // Explicit marker so `botmux send`'s env-secret fallback only triggers under
+    // real isolation, not merely because some env var happens to be set (review #6).
+    childEnv.BOTMUX_READ_ISOLATION = '1';
     childEnv.BOTMUX_LARK_APP_SECRET = cfg.larkAppSecret;
     if (cfg.brand) childEnv.BOTMUX_LARK_BRAND = cfg.brand;
   }

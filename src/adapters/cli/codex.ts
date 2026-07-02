@@ -6,6 +6,7 @@ import type { CliAdapter, PtyHandle } from './types.js';
 import { codexHistoryPath, codexHome, codexSessionsRoot } from '../../services/codex-paths.js';
 import { discoverRolloutSessions } from '../../services/resumable-session-discovery.js';
 import { delay, scaleMs } from '../../utils/timing.js';
+import { buildCodexReadIsolationArgs } from './read-isolation.js';
 
 /** Global submit log — Codex appends one JSON line here on every successful
  *  user submit across all sessions. Far better than the per-session rollout
@@ -125,12 +126,21 @@ export function createCodexAdapter(pathOverride?: string): CliAdapter {
   let cachedBin: string | undefined;
   return {
     id: 'codex',
+    supportsReadIsolation: true,
     authPaths: ['~/.codex/auth.json'],
     get resolvedBin(): string { return (cachedBin ??= resolveCommand(rawBin)); },
 
-    buildArgs({ sessionId, resume, resumeSessionId, workingDir, model, disableCliBypass }) {
+    buildArgs({ sessionId, resume, resumeSessionId, workingDir, model, disableCliBypass, readIsolation }) {
+      // Read isolation: DON'T bypass — bypass disables the permission profile.
+      // Enforce filesystem read-deny via a `default_permissions` profile while
+      // still letting the agent work (workspace-write + approval never). Verified
+      // on codex 0.137: a denied path yields "denied by the active permission
+      // profile" for bash + built-in reads.
+      const approvalSandboxArgs = readIsolation
+        ? ['--sandbox', 'workspace-write', '--ask-for-approval', 'never', ...buildCodexReadIsolationArgs(readIsolation)]
+        : (!disableCliBypass ? ['--dangerously-bypass-approvals-and-sandbox'] : []);
       const baseArgs = [
-        ...(!disableCliBypass ? ['--dangerously-bypass-approvals-and-sandbox'] : []),
+        ...approvalSandboxArgs,
         '--no-alt-screen',
         '-c',
         `shell_environment_policy.set.BOTMUX_SESSION_ID=${JSON.stringify(sessionId)}`,

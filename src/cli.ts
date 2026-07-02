@@ -3703,7 +3703,7 @@ async function cmdSend(rest: string[]): Promise<void> {
   // worker injected this bot's OWN secret, register just this bot from env so
   // the send path finds its Lark client without reading bots.json. Non-isolated
   // sessions have no such env → behavior unchanged (falls through to bots.json).
-  if (process.env.BOTMUX_LARK_APP_SECRET && process.env.BOTMUX_LARK_APP_ID) {
+  if (process.env.BOTMUX_READ_ISOLATION === '1' && process.env.BOTMUX_LARK_APP_SECRET && process.env.BOTMUX_LARK_APP_ID) {
     const { registerBot } = await import('./bot-registry.js');
     registerBot({
       larkAppId: process.env.BOTMUX_LARK_APP_ID,
