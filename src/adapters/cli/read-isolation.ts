@@ -203,32 +203,23 @@ export function evaluateReadIsolationGate(opts: {
   return { enabled: true };
 }
 
-/** Codex profile name botmux owns for read isolation. */
-export const CODEX_READ_ISOLATION_PROFILE = 'botmux_read_isolation';
-
 /**
- * Translate the intent into Codex 0.137 CLI `-c` config overrides. Verified: a
- * `default_permissions` profile whose `[permissions.<name>.filesystem]` maps a
- * path to "deny" makes Codex refuse to read it (bash + built-in tools) — even at
- * approval=never. Each dir needs BOTH the exact key and the `/**` subtree glob.
- * Returns the argv fragment to append (e.g. `-c default_permissions="..." -c ...`).
- * The caller must NOT also pass `--dangerously-bypass-approvals-and-sandbox`,
- * which disables the permission profile.
+ * macOS Seatbelt (sandbox-exec) profile for the EXTERNAL-wrapper isolation path
+ * (Codex and any CLI without a usable built-in read-deny). Blocklist: allow
+ * everything, then deny reads of the sensitive paths — `subpath` covers a file
+ * or a whole subtree. Verified: `sandbox-exec -f <profile> codex ... --dangerously-
+ * bypass-approvals-and-sandbox` blocks the denied paths while codex runs normally.
+ * The CLI must bypass its OWN sandbox (nested Seatbelt would hang) — the outer
+ * profile is the enforcement.
  */
-export function buildCodexReadIsolationArgs(ctx: ReadIsolationContext): string[] {
-  const denyPaths = buildReadDenyPaths(ctx);
-  // `:root`="read" is the "read the whole filesystem" BASE — without it a
-  // filesystem profile is an allowlist (only workspace readable), which would
-  // block the bot's own lark-cli config/session too. Deny entries override the
-  // base (verified via `codex debug prompt-input`: both land in the active
-  // profile, deny is an unupgradable restriction). Write stays workspace-only
-  // via `--sandbox workspace-write`.
-  const entries: string[] = ['":root"="read"'];
+export function buildSeatbeltProfile(denyPaths: string[]): string {
+  const lines = ['(version 1)', '(allow default)'];
   for (const p of denyPaths) {
-    entries.push(`"${p}"="deny"`, `"${p}/**"="deny"`);
+    // Seatbelt string literals: backslash-escape backslashes and double quotes.
+    const esc = p.replace(/\\/g, '\\\\').replace(/"/g, '\\"');
+    lines.push(`(deny file-read* (subpath "${esc}"))`);
   }
-  const fsTable = `permissions.${CODEX_READ_ISOLATION_PROFILE}.filesystem={${entries.join(',')}}`;
-  return ['-c', `default_permissions="${CODEX_READ_ISOLATION_PROFILE}"`, '-c', fsTable];
+  return lines.join('\n') + '\n';
 }
 
 /** Extract the semver from `claude --version` output (e.g. "2.1.197 (Claude Code)"). */

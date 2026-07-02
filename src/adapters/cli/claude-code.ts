@@ -441,6 +441,7 @@ export function createClaudeFamilyAdapter(variant: ClaudeFamilyVariant, rawBin: 
     get resolvedBin(): string { return (cachedBin ??= resolveCommand(rawBin)); },
     supportsTypeAhead: true,
     supportsReadIsolation: true,
+    readIsolationMechanism: 'settings',
     claudeDataDir: variant.dataDir,
     claudeStateJsonPath: variant.stateJsonPath,
     spawnEnv: variant.spawnEnv,

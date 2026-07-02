@@ -241,6 +241,15 @@ export interface CliAdapter {
    *  (refuse to start) rather than run silently unisolated. */
   readonly supportsReadIsolation?: boolean;
 
+  /** How this adapter enforces read isolation:
+   *   - 'settings' (default): the adapter injects native config via buildArgs
+   *     (Claude: `--settings` sandbox + permissions.deny).
+   *   - 'seatbelt-wrapper': the worker wraps the whole CLI process in a macOS
+   *     Seatbelt profile (`sandbox-exec`) — a CLI-agnostic external blocklist for
+   *     CLIs without a usable built-in read-deny (Codex). The CLI must bypass its
+   *     OWN sandbox so the outer profile is the sole enforcer. */
+  readonly readIsolationMechanism?: 'settings' | 'seatbelt-wrapper';
+
   /** When true, the worker's soft first-prompt timeout keeps queued input held
    *  until this adapter's `readyPattern` appears. Use only for CLIs whose startup
    *  screens can accept and swallow stdin before the real composer exists; the

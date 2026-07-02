@@ -4,8 +4,7 @@ import {
   defaultCredentialDenyPaths,
   buildReadDenyPaths,
   buildClaudeReadIsolationSettings,
-  buildCodexReadIsolationArgs,
-  CODEX_READ_ISOLATION_PROFILE,
+  buildSeatbeltProfile,
   parseClaudeVersion,
   versionAtLeast,
   evaluateReadIsolationGate,
@@ -131,22 +130,15 @@ describe('buildClaudeReadIsolationSettings (strict / allowlist mode)', () => {
   });
 });
 
-describe('buildCodexReadIsolationArgs (Codex 0.137, verified format)', () => {
-  it('emits default_permissions selector + filesystem deny table via -c', () => {
-    const args = buildCodexReadIsolationArgs(ctx());
-    expect(args[0]).toBe('-c');
-    expect(args[1]).toBe(`default_permissions="${CODEX_READ_ISOLATION_PROFILE}"`);
-    expect(args[2]).toBe('-c');
-    const table = args[3];
-    expect(table).toContain(`permissions.${CODEX_READ_ISOLATION_PROFILE}.filesystem={`);
-    // read-all base so it's a blocklist (deny list) not an allowlist
-    expect(table).toContain('":root"="read"');
-    // each denied path present as exact + /** glob, mapped to "deny"
-    expect(table).toContain('"/Users/bot/.botmux/bots.json"="deny"');
-    expect(table).toContain('"/Users/bot/.botmux/bots.json/**"="deny"');
-    expect(table).toContain('"/Users/bot/.lark-cli-bots/cli_other1"="deny"');
-    // own lark-cli dir must NOT be denied
-    expect(table).not.toContain('cli_self"="deny"');
+describe('buildSeatbeltProfile (external-wrapper / Codex, verified format)', () => {
+  it('emits allow-default + a file-read deny subpath per denied path', () => {
+    const prof = buildSeatbeltProfile(buildReadDenyPaths(ctx()));
+    expect(prof).toContain('(version 1)');
+    expect(prof).toContain('(allow default)');
+    expect(prof).toContain('(deny file-read* (subpath "/Users/bot/.botmux/bots.json"))');
+    expect(prof).toContain('(deny file-read* (subpath "/Users/bot/.lark-cli-bots/cli_other1"))');
+    // own dir must not be denied
+    expect(prof).not.toContain('cli_self"))');
   });
 });
 

@@ -23,6 +23,8 @@ import {
   parseClaudeVersion,
   versionAtLeast,
   MIN_CLAUDE_SANDBOX_VERSION,
+  buildReadDenyPaths,
+  buildSeatbeltProfile,
   type ReadIsolationContext,
 } from './adapters/cli/read-isolation.js';
 import { drainTranscript, joinAssistantText, trailingAssistantText, findJsonlContainingFingerprint, findJsonlsContainingExactContent, findLatestJsonl, extractLastAssistantTurn, stringifyUserContent, extractTurnStartText, splitTranscriptEventsByCutoff, type TranscriptEvent } from './services/claude-transcript.js';
@@ -111,6 +113,7 @@ import { createHash } from 'node:crypto';
 let cliAdapter: CliAdapter | null = null;
 let backend: SessionBackend | null = null;
 let cliPidMarker: string | null = null;  // path to .botmux-cli-pids/<pid>
+let seatbeltProfilePath: string | null = null;       // per-session Seatbelt .sb profile to rm at exit (external-wrapper read isolation)
 let sandboxStopWatcher: (() => void) | null = null;  // stop fn for the sandbox outbox watcher
 let sandboxCleanup: (() => void) | null = null;      // unmount overlays + rm the per-session sandbox tree
 let sandboxTeardownDone = false;                     // guards the exit-time best-effort teardown from double-running / running on suspend-for-resume
@@ -4374,6 +4377,28 @@ function spawnCli(cfg: Extract<DaemonToWorker, { type: 'init' }>): void {
   let spawnBin = cliAdapter.resolvedBin;
   let spawnArgs = args;
   let spawnCwd = cfg.workingDir;
+
+  // External-wrapper read isolation (Codex etc.): wrap the whole CLI process in a
+  // macOS Seatbelt profile that denies reads of the sensitive paths (blocklist).
+  // The CLI itself bypasses its own sandbox (see adapter) so the outer profile is
+  // the sole enforcer. macOS-only; fail-closed elsewhere.
+  if (readIsolationCtx && cliAdapter.readIsolationMechanism === 'seatbelt-wrapper') {
+    if (process.platform !== 'darwin') {
+      throw new Error(`[read-isolation] refusing to start session ${cfg.sessionId}: seatbelt-wrapper isolation is macOS-only`);
+    }
+    if (!locateOnPath('sandbox-exec')) {
+      throw new Error(`[read-isolation] refusing to start session ${cfg.sessionId}: sandbox-exec not found`);
+    }
+    const profile = buildSeatbeltProfile(buildReadDenyPaths(readIsolationCtx));
+    const profileDir = join(process.env.SESSION_DATA_DIR!, 'read-isolation');
+    mkdirSync(profileDir, { recursive: true });
+    const profilePath = join(profileDir, `${cfg.sessionId}.sb`);
+    writeFileSync(profilePath, profile, { mode: 0o600 });
+    seatbeltProfilePath = profilePath;
+    spawnArgs = ['-f', profilePath, spawnBin, ...spawnArgs];
+    spawnBin = 'sandbox-exec';
+    log(`[read-isolation] wrapping ${cliAdapter.id} in Seatbelt: sandbox-exec -f ${profilePath}`);
+  }
   // Sandbox wraps the spawned binary in bwrap. Works for pty (PtyBackend runs
   // bwrap directly) and tmux (the tmux pane's command becomes `bwrap … -- cli`);
   // env is carried via bwrap --setenv (see prepareSandbox), not the backend.
@@ -5897,6 +5922,7 @@ function teardownSandboxBestEffort(): void {
   sandboxStopWatcher = null;
   try { sandboxCleanup?.(); } catch { /* */ }
   sandboxCleanup = null;
+  if (seatbeltProfilePath) { try { unlinkSync(seatbeltProfilePath); } catch { /* */ } seatbeltProfilePath = null; }
 }
 // Under pm2 the worker's stdout/stderr are pipes; a broken pipe (e.g. log
 // streaming detaches) would otherwise reach the uncaughtException handler below
