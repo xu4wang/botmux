@@ -81,7 +81,7 @@ import {
 import { createCliAdapterSync, locateOnPath } from './adapters/cli/registry.js';
 import { buildWrappedLaunch, parseWrapperCli, isTtadkWrapper } from './setup/cli-selection.js';
 import { findLaunchedCliPid, scheduleWrapperRealCliPid, readComm, isBareShellComm, bareShellLaunchKind } from './core/session-discovery.js';
-import { claudeJsonlPathForSession, claudeProjectDir, resolveJsonlFromPid, findOpenClaudeSessionIds, DEFAULT_CLAUDE_DATA_DIR } from './adapters/cli/claude-code.js';
+import { claudeJsonlPathForSession, resolveJsonlFromPid, findOpenClaudeSessionIds, DEFAULT_CLAUDE_DATA_DIR } from './adapters/cli/claude-code.js';
 import { mtrSessionIdForBotmuxSession } from './adapters/cli/mtr.js';
 import type { CliAdapter, PtyHandle, SubmitRecheckResult, CliId } from './adapters/cli/types.js';
 import { PtyBackend } from './adapters/backend/pty-backend.js';
@@ -4466,11 +4466,11 @@ function spawnCli(cfg: Extract<DaemonToWorker, { type: 'init' }>): void {
   const readIsolationMechanism = cliAdapter.readIsolationMechanism ?? 'external-wrapper';
   if (readIsolationCtx && readIsolationMechanism === 'external-wrapper') {
     const denyPaths = buildReadDenyPaths(readIsolationCtx);
-    // Claude family: the whole projects tree is denied (in denyPaths), so re-allow
-    // this bot's OWN project dir — its main process needs to read its transcripts
-    // (resume) + memory, while every other bot's project dir stays denied. Codex has
-    // no such carve-out (its own ~/.codex/sessions is simply never denied).
-    const allowPaths = claudeDataDir ? [claudeProjectDir(cfg.workingDir, claudeDataDir)] : [];
+    // CLI-agnostic: the adapter decides which of its OWN paths to carve back in
+    // (Claude re-allows its own project dir for resume+memory; Codex has none).
+    const allowPaths = claudeDataDir
+      ? (cliAdapter.readIsolationAllowPaths?.(cfg.workingDir, claudeDataDir) ?? [])
+      : [];
     if (process.platform === 'darwin') {
       if (!locateOnPath('sandbox-exec')) {
         throw new Error(`[read-isolation] refusing to start session ${cfg.sessionId}: sandbox-exec not found`);

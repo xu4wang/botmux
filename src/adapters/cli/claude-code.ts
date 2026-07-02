@@ -459,6 +459,11 @@ export function createClaudeFamilyAdapter(variant: ClaudeFamilyVariant, rawBin: 
     // Seatbelt's allow-after-deny carves the bot's own project dir back in (resume +
     // memory). Resume is preserved by allowing ~/.claude/projects/<own-cwd-hash>.
     readIsolationMechanism: 'external-wrapper',
+    // Re-allow THIS bot's own project dir (transcripts for resume + memory) after the
+    // blanket ~/.claude/projects deny — other bots' project dirs stay denied.
+    readIsolationAllowPaths(cwd: string, dataDir: string): string[] {
+      return [claudeProjectDir(cwd, dataDir)];
+    },
     claudeDataDir: variant.dataDir,
     claudeStateJsonPath: variant.stateJsonPath,
     spawnEnv: variant.spawnEnv,

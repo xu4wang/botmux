@@ -261,6 +261,16 @@ export interface CliAdapter {
    *     The CLI must bypass its OWN sandbox (nested sandboxing hangs). */
   readonly readIsolationMechanism?: 'settings' | 'external-wrapper';
 
+  /** Paths to RE-ALLOW (carve out) inside the external-wrapper Seatbelt profile,
+   *  AFTER the blanket denies — i.e. CLI-specific "own data" the deny list scoops up
+   *  too broadly. Claude denies its whole `~/.claude/projects` tree, then re-allows
+   *  THIS session's own `projects/<cwd-hash>` here so its main process can read its
+   *  transcripts (resume) + memory while other bots' stay denied. Adapters with no
+   *  such carve-out (e.g. Codex, whose own sessions dir is simply never denied) omit
+   *  this. Keeps the worker CLI-agnostic — it just concatenates whatever the adapter
+   *  returns. `dataDir` is the EFFECTIVE (post-redirect) data root the worker resolved. */
+  readIsolationAllowPaths?(cwd: string, dataDir: string): string[];
+
   /** When true, the worker's soft first-prompt timeout keeps queued input held
    *  until this adapter's `readyPattern` appears. Use only for CLIs whose startup
    *  screens can accept and swallow stdin before the real composer exists; the
