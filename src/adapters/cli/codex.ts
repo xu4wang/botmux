@@ -153,14 +153,14 @@ export function createCodexAdapter(pathOverride?: string): CliAdapter {
         `shell_environment_policy.set.BOTMUX_SESSION_ID=${JSON.stringify(sessionId)}`,
       ];
       // Under read isolation the worker denies bots.json, so `botmux send` (a shell
-      // subprocess) relies on the worker-injected BOTMUX_LARK_APP_SECRET/APP_ID env
-      // to register this bot without reading bots.json. Codex does NOT forward its
-      // env to shell subprocesses by default (only shell_environment_policy.set/inherit
-      // do), so without this those vars never reach `botmux send` → "Bot not
-      // registered". Forward codex's full env (which the worker populated) to shell
-      // commands. The secret travels via ENV (not argv) so it is NOT exposed to other
-      // bots through `ps aux`; ignore_default_excludes is needed because codex's
-      // default excludes drop *SECRET*-named vars.
+      // subprocess) registers this bot from the worker-written cred FILE, keyed by
+      // SESSION_DATA_DIR + BOTMUX_LARK_APP_ID. Codex does NOT forward its env to shell
+      // subprocesses by default (only shell_environment_policy.set/inherit do), so
+      // without this those two vars never reach `botmux send` → "Bot not registered".
+      // Forward codex's full env to shell commands so the cred-file lookup works. No
+      // secret is forwarded — it lives only in the cred file (not env/argv), so it is
+      // NOT exposed to other bots via `ps aux`. (inherit rather than set: the two vars
+      // are already in codex's env from the worker.)
       if (readIsolation) {
         baseArgs.push(
           '-c', 'shell_environment_policy.inherit="all"',

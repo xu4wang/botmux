@@ -13,7 +13,7 @@
  *   7. On 'restart', kills CLI and re-spawns with --resume
  */
 import { randomBytes } from 'node:crypto';
-import { mkdirSync, writeFileSync, unlinkSync, existsSync, statSync, readdirSync, readlinkSync, readFileSync, watch as fsWatch, createWriteStream, type FSWatcher, type WriteStream } from 'node:fs';
+import { mkdirSync, writeFileSync, unlinkSync, existsSync, statSync, readdirSync, readlinkSync, readFileSync, realpathSync, watch as fsWatch, createWriteStream, type FSWatcher, type WriteStream } from 'node:fs';
 import { atomicWriteFileSync } from './utils/atomic-write.js';
 import { isAbsolute, join, basename } from 'node:path';
 import { homedir } from 'node:os';
@@ -4407,17 +4407,12 @@ function spawnCli(cfg: Extract<DaemonToWorker, { type: 'init' }>): void {
   childEnv.BOTMUX_CHAT_ID = cfg.chatId;
   childEnv.BOTMUX_LARK_APP_ID = cfg.larkAppId;
   childEnv.BOTMUX_ROOT_MESSAGE_ID = cfg.rootMessageId;
-  // Read isolation denies the sandboxed CLI from reading bots.json, so give
-  // `botmux send` this bot's OWN secret via a namespaced env var (the bare
-  // LARK_APP_SECRET is redacted). Only when isolation is active — non-isolated
-  // bots keep reading bots.json unchanged (send fallback in cli.ts).
-  if (readIsolationCtx) {
-    // Explicit marker so `botmux send`'s env-secret fallback only triggers under
-    // real isolation, not merely because some env var happens to be set (review #6).
-    childEnv.BOTMUX_READ_ISOLATION = '1';
-    childEnv.BOTMUX_LARK_APP_SECRET = cfg.larkAppSecret;
-    if (cfg.brand) childEnv.BOTMUX_LARK_BRAND = cfg.brand;
-  }
+  // NOTE: under read isolation `botmux send` gets this bot's secret from the worker-
+  // written cred FILE (.send-cred-<appId>, see sendCredFilePath) keyed by the
+  // BOTMUX_LARK_APP_ID above — NOT from the env. The secret is deliberately kept OUT
+  // of the child env so a sibling bot cannot recover it via `ps eww` / process-info
+  // (Seatbelt denies file reads, not process-metadata enumeration). Non-isolated bots
+  // read bots.json unchanged (send fallback in cli.ts).
   // Inject an explicit false when disabled so child `botmux bots list` cannot
   // drift from the daemon because of stale rcfile/tmux environment.
   const chatBotDiscovery = resolveChatBotDiscoveryConfig();
@@ -4458,12 +4453,32 @@ function spawnCli(cfg: Extract<DaemonToWorker, { type: 'init' }>): void {
   // dispatched: macOS Seatbelt today; Linux bwrap is a TODO placeholder.
   const readIsolationMechanism = cliAdapter.readIsolationMechanism ?? 'external-wrapper';
   if (readIsolationCtx && readIsolationMechanism === 'external-wrapper') {
-    const denyPaths = buildReadDenyPaths(readIsolationCtx);
-    // CLI-agnostic: the adapter decides which of its OWN paths to carve back in
-    // (Claude re-allows its own project dir for resume+memory; Codex has none).
-    const allowPaths = claudeDataDir
-      ? (cliAdapter.readIsolationAllowPaths?.(cfg.workingDir, claudeDataDir) ?? [])
-      : [];
+    // Strict allowlist mode (deny home, allow only readAllowPaths) is implemented ONLY
+    // for the legacy 'settings' path. The external wrapper would silently fall back to
+    // the BLOCKLIST here — a security downgrade for a bot that asked for allowlist — so
+    // fail-closed instead of running weaker isolation than configured.
+    if (readIsolationCtx.strict) {
+      throw new Error(`[read-isolation] refusing to start session ${cfg.sessionId}: strict allowlist mode (readIsolationStrict) is not supported by the external-wrapper isolation path; refusing to silently downgrade to blocklist`);
+    }
+    // Seatbelt matches CANONICAL paths (it resolves symlinks), so realpath every
+    // deny/allow before emitting the profile — otherwise a sensitive root reached
+    // through a symlinked prefix (e.g. a symlinked home / SESSION_DATA_DIR) would
+    // silently fail-open (the /tmp→/private/tmp class of miss). realpath-if-exists:
+    // a non-existent path has nothing to read, so its literal form is harmless.
+    const canonical = (p: string) => { try { return realpathSync(p); } catch { return p; } };
+    const denyPaths = buildReadDenyPaths(readIsolationCtx).map(canonical);
+    // CLI-agnostic carve-outs re-allowed AFTER the denies (Seatbelt last-match wins):
+    // the adapter's own paths (Claude re-allows its project dir for resume+memory;
+    // Codex none) PLUS the bot's own preserved paths — its own lark-cli config dir +
+    // the running CLI's own auth/state. Carving these back as ALLOWs (rather than
+    // buildReadDenyPaths dropping a broader parent deny) means a deny on a parent dir
+    // still holds — only the specific preserved file/dir is re-opened, never its
+    // siblings (e.g. other bots' lark-cli dirs).
+    const allowPaths = [
+      ...(claudeDataDir ? (cliAdapter.readIsolationAllowPaths?.(cfg.workingDir, claudeDataDir) ?? []) : []),
+      join(homedir(), '.lark-cli-bots', cfg.larkAppId),
+      ...(readIsolationCtx.ownAuthPaths ?? []),
+    ].map(canonical);
     if (process.platform === 'darwin') {
       if (!locateOnPath('sandbox-exec')) {
         throw new Error(`[read-isolation] refusing to start session ${cfg.sessionId}: sandbox-exec not found`);

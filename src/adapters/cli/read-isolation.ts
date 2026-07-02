@@ -133,14 +133,18 @@ export function buildReadDenyPaths(ctx: ReadIsolationContext): string[] {
     // Per-bot extras (normalized; relative/`..` dropped, not silently kept)
     ...(ctx.extraDenyPaths ?? []).map(normalizeIsolationPath),
   ];
-  // Never deny the bot's own lark-cli dir, nor the running CLI's own auth/home
-  // (the external wrapper sandboxes the CLI's main process — denying its own
-  // auth would crash it). Match by prefix so `~/.codex/auth.json` also protects
-  // anything the deny set nests under it.
+  // Drop from the DENY set anything that is a preserved path or lives UNDER one
+  // (the bot's own lark-cli dir + the running CLI's own auth/state — denying its own
+  // auth would crash the wrapped main process). Deliberately does NOT drop a deny that
+  // is a PARENT of a preserved path: dropping the parent would reopen the parent's
+  // OTHER children too (e.g. dropping `~/.lark-cli-bots` to preserve one bot's dir
+  // would expose every sibling bot's). Instead the caller re-allows each preserved
+  // path as a Seatbelt allow carve-out, so a parent deny stays and only the specific
+  // preserved file/dir is re-opened.
   const ownNorm = normalizeIsolationPath(ownLarkCliDir);
   const preserve = new Set([ownNorm, ...(ctx.ownAuthPaths ?? []).map(normalizeIsolationPath)].filter(Boolean));
   const isPreserved = (p: string) =>
-    preserve.has(p) || [...preserve].some((k) => k && (p === k || p.startsWith(k + '/') || k.startsWith(p + '/')));
+    preserve.has(p) || [...preserve].some((k) => k !== null && (p === k || p.startsWith(k + '/')));
   return dedupe(
     paths
       .map((p) => (p ? normalizeIsolationPath(p) : null))

@@ -124,6 +124,24 @@ describe('buildReadDenyPaths', () => {
     // other-CLI creds the bot doesn't own are still denied
     expect(paths).toContain('/Users/bot/.claude/.credentials.json');
   });
+
+  it('keeps a PARENT deny even when a preserved auth path lives under it (F5)', () => {
+    // Deny /Users/bot/.app, preserve /Users/bot/.app/auth.json. The parent deny MUST
+    // stay (dropping it would reopen the parent's OTHER children — e.g. a sibling
+    // secret). The auth file itself is re-opened by the caller as a Seatbelt allow,
+    // not by dropping the parent from the deny set.
+    const paths = buildReadDenyPaths(ctx({
+      extraDenyPaths: ['/Users/bot/.app'],
+      ownAuthPaths: ['/Users/bot/.app/auth.json'],
+    }));
+    expect(paths).toContain('/Users/bot/.app');
+    // a deny that IS the preserved path (or under it) is still dropped
+    const paths2 = buildReadDenyPaths(ctx({
+      extraDenyPaths: ['/Users/bot/.app/auth.json'],
+      ownAuthPaths: ['/Users/bot/.app/auth.json'],
+    }));
+    expect(paths2).not.toContain('/Users/bot/.app/auth.json');
+  });
 });
 
 describe('buildClaudeReadIsolationSettings (blocklist / default mode)', () => {
