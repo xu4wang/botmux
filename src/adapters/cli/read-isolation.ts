@@ -32,6 +32,12 @@ export interface ReadIsolationContext {
    *  per-bot-separable), so a single-Codex-bot setup omits it to avoid denying
    *  the bot its own history. */
   claudeProjectsDir?: string;
+  /** Transcript roots of OTHER CLI families this bot does NOT use — denied fully.
+   *  A Codex bot must not read Claude bots' `~/.claude/projects`, and a Claude bot
+   *  must not read Codex bots' `~/.codex/sessions`. (The bot's OWN transcript root
+   *  is handled by {@link claudeProjectsDir} for Claude; Codex's own shared
+   *  `~/.codex/sessions` stays readable so it can resume — a known limitation.) */
+  foreignTranscriptDirs?: string[];
   /** Per-bot extra deny paths (BotConfig.readDenyExtraPaths). */
   extraDenyPaths?: string[];
   /** Strict allowlist mode: deny the whole home, allow only {@link allowPaths}. */
@@ -97,6 +103,9 @@ export function buildReadDenyPaths(ctx: ReadIsolationContext): string[] {
     ...defaultCredentialDenyPaths(h),
     // Conversation content + other-bot local state (all bots')
     ...(ctx.claudeProjectsDir ? [ctx.claudeProjectsDir] : []),
+    // Cross-CLI transcript roots this bot doesn't own (Codex denies Claude's
+    // ~/.claude/projects; Claude denies Codex's ~/.codex/sessions).
+    ...(ctx.foreignTranscriptDirs ?? []),
     `${sd}/frozen-cards`,
     `${sd}/turn-sends`,
     `${sd}/crash-diagnostics`,

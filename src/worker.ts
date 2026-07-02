@@ -4278,6 +4278,12 @@ function spawnCli(cfg: Extract<DaemonToWorker, { type: 'init' }>): void {
         // Claude family denies its per-project transcript root; Codex omits it
         // (its sessions dir is shared/not per-bot-separable).
         claudeProjectsDir: claudeDataDir ? join(claudeDataDir, 'projects') : undefined,
+        // Deny the OTHER CLI family's transcript root — this bot doesn't use it,
+        // so reading it would just leak the other bots' chat history. Claude denies
+        // Codex's ~/.codex/sessions; Codex denies Claude's ~/.claude/projects.
+        foreignTranscriptDirs: isClaudeFamily
+          ? [join(homedir(), '.codex', 'sessions')]
+          : [join(homedir(), '.claude', 'projects')],
         extraDenyPaths: cfg.readDenyExtraPaths,
         strict: cfg.readIsolationStrict,
         allowPaths: cfg.readAllowPaths,
