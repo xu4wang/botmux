@@ -32,7 +32,18 @@ import { listDocSubscriptionsForSession, removeDocSubscription } from '../servic
 import { TmuxBackend } from '../adapters/backend/tmux-backend.js';
 import { HerdrBackend } from '../adapters/backend/herdr-backend.js';
 import { isSuspendableBackendType, getSessionPersistentBackendType, persistentSessionName, killPersistentSession } from './persistent-backend.js';
-import { getBot, getAllBots, resolveBrandLabel } from '../bot-registry.js';
+import { getBot, getAllBots, resolveBrandLabel, loadBotConfigs } from '../bot-registry.js';
+
+/** Every OTHER bot's larkAppId from the FULL bots.json — used by read isolation
+ *  to deny sibling bots' per-app lark-cli dirs / session files. Reads the whole
+ *  config (getAllBots() only holds this per-bot daemon's single bot). */
+function readSiblingAppIds(ownAppId: string): string[] {
+  try {
+    return loadBotConfigs().map(c => c.larkAppId).filter(id => id && id !== ownAppId);
+  } catch {
+    return [];
+  }
+}
 import { normalizeBrand } from '../im/lark/lark-hosts.js';
 import { dashboardEventBus } from './dashboard-events.js';
 import { composeRowFromActive, composeRowFromClosed } from './dashboard-rows.js';
@@ -1751,7 +1762,10 @@ export function forkWorker(ds: DaemonSession, prompt: string, resumeOrTurnId: bo
     readDenyExtraPaths: botCfg.readDenyExtraPaths ?? [],
     readIsolationStrict: botCfg.readIsolationStrict === true,
     readAllowPaths: botCfg.readAllowPaths ?? [],
-    otherBotAppIds: getAllBots().map(b => b.config.larkAppId).filter(id => id !== botCfg.larkAppId),
+    // Use the FULL bots.json (not getAllBots(), which in the per-bot-daemon
+    // model only holds THIS daemon's single registered bot) so read isolation
+    // denies EVERY sibling bot's lark-cli dir / session file. (Live-test bug.)
+    otherBotAppIds: readSiblingAppIds(botCfg.larkAppId),
     backendType: botCfg.backendType ?? config.daemon.backendType,
     prompt,
     resume,
