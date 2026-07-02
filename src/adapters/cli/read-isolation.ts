@@ -199,6 +199,7 @@ export function buildV2FinalDenyPaths(ctx: V2IsolationContext): string[] {
 export function buildV2AllowPaths(ctx: V2IsolationContext): string[] {
   const h = ctx.homeDir.replace(/\/+$/, '');
   const sd = ctx.sessionDataDir.replace(/\/+$/, '');
+  const bh = ctx.botmuxHome.replace(/\/+$/, '');
   const appId = assertSafeAppId(ctx.currentAppId);
   return dedupe(
     [
@@ -206,6 +207,13 @@ export function buildV2AllowPaths(ctx: V2IsolationContext): string[] {
       `${sd}/sessions-${appId}.json`,
       sendCredFilePath(sd, appId),
       `${h}/.lark-cli-bots/${appId}`,
+      // Non-secret botmux RUNTIME that the agent's `botmux send`/`botmux history`
+      // legitimately need to reach the daemon — global config + the daemon registry
+      // (ipcPort lookup). No per-bot secrets live here (secrets are in bots.json /
+      // the per-bot .send-cred, both still denied / carved per-appId).
+      `${bh}/config.json`,
+      `${sd}/dashboard-daemons`,
+      `${bh}/.data-dir`,
     ]
       .map(normalizeIsolationPath)
       .filter((p): p is string => !!p),
@@ -373,16 +381,39 @@ export function evaluateReadIsolationGate(opts: {
  * Verified: reads of denied paths fail EPERM; carved-out subpaths read normally; the
  * wrapped CLI (which bypasses its OWN sandbox — nested Seatbelt would hang) runs fine.
  */
-export function buildSeatbeltProfile(denyPaths: string[], allowPaths: string[] = [], finalDenyPaths: string[] = []): string {
+export function buildSeatbeltProfile(
+  denyPaths: string[],
+  allowPaths: string[] = [],
+  finalDenyPaths: string[] = [],
+  traverseDirs: string[] = [],
+): string {
   const esc = (p: string) => p.replace(/\\/g, '\\\\').replace(/"/g, '\\"');
   const lines = ['(version 1)', '(allow default)'];
   for (const p of denyPaths) lines.push(`(deny file-read* (subpath "${esc(p)}"))`);
+  // Traversal metadata-allows: a carve-out under a DENIED parent (e.g. BOT_HOME under
+  // ~/.botmux) is reachable for a plain open (Seatbelt matches the final path), but a
+  // realpath()/stat of an INTERMEDIATE dir is denied — which crashes CLIs that
+  // canonicalize their config dir (Codex: "failed to canonicalize CODEX_HOME"). Allow
+  // read-METADATA (stat/traverse) on those specific ancestor DIRS only (literal, not
+  // subpath) — dir LISTING (read-data) stays denied, so no enumeration leak.
+  for (const p of traverseDirs) lines.push(`(allow file-read-metadata (literal "${esc(p)}"))`);
   // Carve-outs override the broad denies above (Seatbelt applies the LAST match).
   for (const p of allowPaths) lines.push(`(allow file-read* (subpath "${esc(p)}"))`);
   // FINAL denies win over the carve-outs — admin `readDenyExtraPaths` must hold even
   // for a path that falls under the bot's own re-allowed BOT_HOME.
   for (const p of finalDenyPaths) lines.push(`(deny file-read* (subpath "${esc(p)}"))`);
   return lines.join('\n') + '\n';
+}
+
+/** Ancestor DIRS that must stay stat-traversable so a carve-out under a denied parent
+ *  can be realpath()'d (Codex canonicalizes CODEX_HOME on startup). Metadata-only —
+ *  listing stays denied. Covers the parents of BOT_HOME + the per-appId botmux files +
+ *  the own lark-cli dir. */
+export function buildV2TraverseDirs(ctx: V2IsolationContext): string[] {
+  const h = ctx.homeDir.replace(/\/+$/, '');
+  const bh = ctx.botmuxHome.replace(/\/+$/, '');
+  const sd = ctx.sessionDataDir.replace(/\/+$/, '');
+  return dedupe([bh, `${bh}/bots`, sd, `${h}/.lark-cli-bots`].map(normalizeIsolationPath).filter((p): p is string => !!p));
 }
 
 /**

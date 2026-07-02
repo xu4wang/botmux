@@ -31,6 +31,7 @@ import {
   buildV2DenyPaths,
   buildV2AllowPaths,
   buildV2FinalDenyPaths,
+  buildV2TraverseDirs,
   type ReadIsolationContext,
 } from './adapters/cli/read-isolation.js';
 import { killPersistentSession, type PersistentBackendType } from './core/persistent-backend.js';
@@ -4624,6 +4625,9 @@ function spawnCli(cfg: Extract<DaemonToWorker, { type: 'init' }>): void {
     // Admin readDenyExtraPaths as a FINAL deny (after allows) so it holds even under
     // the bot's own re-allowed BOT_HOME (review M3).
     const finalDenyPaths = buildV2FinalDenyPaths(v2ctx).map(canonical);
+    // Ancestor dirs kept stat-traversable so a CLI can realpath() its own config dir
+    // under the denied ~/.botmux (Codex canonicalizes CODEX_HOME on startup).
+    const traverseDirs = buildV2TraverseDirs(v2ctx).map(canonical);
     if (process.platform === 'darwin') {
       if (!locateOnPath('sandbox-exec')) {
         throw new Error(`[read-isolation] refusing to start session ${cfg.sessionId}: sandbox-exec not found`);
@@ -4631,7 +4635,7 @@ function spawnCli(cfg: Extract<DaemonToWorker, { type: 'init' }>): void {
       const profileDir = join(process.env.SESSION_DATA_DIR!, 'read-isolation');
       mkdirSync(profileDir, { recursive: true });
       const profilePath = join(profileDir, `${cfg.sessionId}.sb`);
-      writeFileSync(profilePath, buildSeatbeltProfile(denyPaths, allowPaths, finalDenyPaths), { mode: 0o600 });
+      writeFileSync(profilePath, buildSeatbeltProfile(denyPaths, allowPaths, finalDenyPaths, traverseDirs), { mode: 0o600 });
       seatbeltProfilePath = profilePath;
       spawnArgs = ['-f', profilePath, spawnBin, ...spawnArgs];
       spawnBin = 'sandbox-exec';

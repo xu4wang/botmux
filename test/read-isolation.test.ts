@@ -13,6 +13,7 @@ import {
   buildV2DenyPaths,
   buildV2AllowPaths,
   buildV2FinalDenyPaths,
+  buildV2TraverseDirs,
   assertSafeAppId,
   type ReadIsolationContext,
 } from '../src/adapters/cli/read-isolation.js';
@@ -324,6 +325,27 @@ describe('v2 BOTMUX_HOME model (buildV2DenyPaths / buildV2AllowPaths)', () => {
     const allowIdx = prof.indexOf('(allow file-read* (subpath "/Users/bot/.botmux/bots/cli_self"))');
     const finalIdx = prof.lastIndexOf(`(deny file-read* (subpath "${extra}"))`);
     expect(finalIdx).toBeGreaterThan(allowIdx);
+  });
+
+  it('ALLOW re-opens the non-secret botmux runtime botmux send needs (config.json + daemon registry)', () => {
+    const a = buildV2AllowPaths(v2());
+    expect(a).toContain('/Users/bot/.botmux/config.json');
+    expect(a).toContain('/Users/bot/.botmux/data/dashboard-daemons');
+  });
+
+  it('TraverseDirs keeps BOT_HOME/session/lark ANCESTORS stat-traversable (Codex realpath of CODEX_HOME)', () => {
+    const t = buildV2TraverseDirs(v2());
+    expect(t).toContain('/Users/bot/.botmux');
+    expect(t).toContain('/Users/bot/.botmux/bots');
+    expect(t).toContain('/Users/bot/.botmux/data');
+    expect(t).toContain('/Users/bot/.lark-cli-bots');
+  });
+
+  it('profile emits metadata-only allows for traverse dirs (stat yes, listing no)', () => {
+    const prof = buildSeatbeltProfile(buildV2DenyPaths(v2()), buildV2AllowPaths(v2()), [], buildV2TraverseDirs(v2()));
+    expect(prof).toContain('(allow file-read-metadata (literal "/Users/bot/.botmux"))');
+    // it is metadata-only — NOT a full read-data allow of the parent
+    expect(prof).not.toContain('(allow file-read* (subpath "/Users/bot/.botmux"))');
   });
 
   it('assertSafeAppId rejects path-traversal / separators, accepts real Feishu ids (review L2)', () => {
