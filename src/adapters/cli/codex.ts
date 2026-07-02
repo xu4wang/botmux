@@ -134,7 +134,7 @@ export function createCodexAdapter(pathOverride?: string): CliAdapter {
     authPaths: ['~/.codex/auth.json'],
     get resolvedBin(): string { return (cachedBin ??= resolveCommand(rawBin)); },
 
-    buildArgs({ sessionId, resume, resumeSessionId, workingDir, model, disableCliBypass }) {
+    buildArgs({ sessionId, resume, resumeSessionId, workingDir, model, disableCliBypass, readIsolation }) {
       // Read isolation for Codex is enforced by the worker's Seatbelt wrapper
       // (readIsolationMechanism='external-wrapper'), NOT by codex's own profile
       // (codex 0.137 can't express a read blocklist). So spawn args are unchanged
@@ -146,6 +146,21 @@ export function createCodexAdapter(pathOverride?: string): CliAdapter {
         '-c',
         `shell_environment_policy.set.BOTMUX_SESSION_ID=${JSON.stringify(sessionId)}`,
       ];
+      // Under read isolation the worker denies bots.json, so `botmux send` (a shell
+      // subprocess) relies on the worker-injected BOTMUX_LARK_APP_SECRET/APP_ID env
+      // to register this bot without reading bots.json. Codex does NOT forward its
+      // env to shell subprocesses by default (only shell_environment_policy.set/inherit
+      // do), so without this those vars never reach `botmux send` → "Bot not
+      // registered". Forward codex's full env (which the worker populated) to shell
+      // commands. The secret travels via ENV (not argv) so it is NOT exposed to other
+      // bots through `ps aux`; ignore_default_excludes is needed because codex's
+      // default excludes drop *SECRET*-named vars.
+      if (readIsolation) {
+        baseArgs.push(
+          '-c', 'shell_environment_policy.inherit="all"',
+          '-c', 'shell_environment_policy.ignore_default_excludes=true',
+        );
+      }
       if (model && model.trim()) {
         // Codex 接受 `--model <id>` / `-m <id>`，写全名最稳，错的会在 codex 自己启动时报。
         baseArgs.push('--model', model.trim());
