@@ -171,6 +171,25 @@ describe('buildSeatbeltProfile (external-wrapper / Codex, verified format)', () 
     // own dir must not be denied
     expect(prof).not.toContain('cli_self"))');
   });
+
+  it('emits carve-out allows AFTER the denies (last-match wins) so own project dir re-opens', () => {
+    const prof = buildSeatbeltProfile(
+      ['/Users/bot/.claude/projects', '/Users/bot/.botmux/bots.json'],
+      ['/Users/bot/.claude/projects/-Users-bot-salesop'],
+    );
+    const denyIdx = prof.indexOf('(deny file-read* (subpath "/Users/bot/.claude/projects"))');
+    const allowIdx = prof.indexOf('(allow file-read* (subpath "/Users/bot/.claude/projects/-Users-bot-salesop"))');
+    expect(denyIdx).toBeGreaterThan(-1);
+    expect(allowIdx).toBeGreaterThan(-1);
+    // The carve-out allow MUST come after the broad deny, or Seatbelt keeps it denied.
+    expect(allowIdx).toBeGreaterThan(denyIdx);
+  });
+
+  it('no allowPaths → deny-only profile (Codex path, unchanged)', () => {
+    const prof = buildSeatbeltProfile(['/Users/bot/.botmux/bots.json']);
+    expect(prof).toContain('(deny file-read* (subpath "/Users/bot/.botmux/bots.json"))');
+    expect(prof).not.toContain('(allow file-read* (subpath');
+  });
 });
 
 describe('parseClaudeVersion', () => {

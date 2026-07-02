@@ -239,20 +239,22 @@ export function evaluateReadIsolationGate(opts: {
 
 /**
  * macOS Seatbelt (sandbox-exec) profile for the EXTERNAL-wrapper isolation path
- * (Codex and any CLI without a usable built-in read-deny). Blocklist: allow
- * everything, then deny reads of the sensitive paths — `subpath` covers a file
- * or a whole subtree. Verified: `sandbox-exec -f <profile> codex ... --dangerously-
- * bypass-approvals-and-sandbox` blocks the denied paths while codex runs normally.
- * The CLI must bypass its OWN sandbox (nested Seatbelt would hang) — the outer
- * profile is the enforcement.
+ * (Codex + Claude + any CLI without a usable built-in read-deny). Blocklist: allow
+ * everything, deny reads of the sensitive paths, THEN re-allow the {@link allowPaths}
+ * carve-outs — `subpath` covers a file or a whole subtree. Rule ORDER matters:
+ * Seatbelt applies the LAST matching rule, so an allow listed AFTER a broader deny
+ * re-opens that subpath. Used e.g. to deny the whole `~/.claude/projects` tree but
+ * re-allow the bot's OWN `projects/<own-cwd-hash>` (so its main process can read its
+ * transcripts for resume + its memory, while every other bot's stays denied).
+ * Verified: reads of denied paths fail EPERM; carved-out subpaths read normally; the
+ * wrapped CLI (which bypasses its OWN sandbox — nested Seatbelt would hang) runs fine.
  */
-export function buildSeatbeltProfile(denyPaths: string[]): string {
+export function buildSeatbeltProfile(denyPaths: string[], allowPaths: string[] = []): string {
+  const esc = (p: string) => p.replace(/\\/g, '\\\\').replace(/"/g, '\\"');
   const lines = ['(version 1)', '(allow default)'];
-  for (const p of denyPaths) {
-    // Seatbelt string literals: backslash-escape backslashes and double quotes.
-    const esc = p.replace(/\\/g, '\\\\').replace(/"/g, '\\"');
-    lines.push(`(deny file-read* (subpath "${esc}"))`);
-  }
+  for (const p of denyPaths) lines.push(`(deny file-read* (subpath "${esc(p)}"))`);
+  // Carve-outs LAST so they override the broader denies above.
+  for (const p of allowPaths) lines.push(`(allow file-read* (subpath "${esc(p)}"))`);
   return lines.join('\n') + '\n';
 }
 

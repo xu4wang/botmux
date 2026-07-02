@@ -6,7 +6,6 @@ import { sessionReadyHookCommand } from '../hook-command.js';
 import type { CliAdapter, CliId, PtyHandle } from './types.js';
 import { findJsonlContainingFingerprint, jsonlContainsFingerprint, normaliseForFingerprint } from '../../services/claude-transcript.js';
 import { GOAL_ENV } from '../../workflows/v3/contract.js';
-import { buildClaudeReadIsolationSettings } from './read-isolation.js';
 import { buildBotmuxSystemPromptText } from './shared-hints.js';
 import { delay, scaleMs } from '../../utils/timing.js';
 import { discoverClaudeFamilySessions } from '../../services/resumable-session-discovery.js';
@@ -39,6 +38,16 @@ export const DEFAULT_CLAUDE_DATA_DIR = join(homedir(), '.claude');
 export function claudeJsonlPathForSession(sessionId: string, cwd: string, dataDir: string = DEFAULT_CLAUDE_DATA_DIR): string {
   const projectHash = realpathCwd(cwd).replace(/[^A-Za-z0-9-]/g, '-');
   return join(dataDir, 'projects', projectHash, `${sessionId}.jsonl`);
+}
+
+/** The `<dataDir>/projects/<cwd-hash>` dir holding this cwd's transcripts (and its
+ *  `memory/` subdir). Read isolation ALLOWs this back in under the whole-process
+ *  Seatbelt wrapper — the projects tree is denied, then the bot's OWN project dir
+ *  is re-allowed so its main process can read transcripts (resume) + memory, while
+ *  every OTHER bot's project dir stays denied. Always uses realpath(cwd). */
+export function claudeProjectDir(cwd: string, dataDir: string = DEFAULT_CLAUDE_DATA_DIR): string {
+  const projectHash = realpathCwd(cwd).replace(/[^A-Za-z0-9-]/g, '-');
+  return join(dataDir, 'projects', projectHash);
 }
 
 /** botmux ships its built-in skills as a Claude Code plugin here and injects it
@@ -441,11 +450,22 @@ export function createClaudeFamilyAdapter(variant: ClaudeFamilyVariant, rawBin: 
     get resolvedBin(): string { return (cachedBin ??= resolveCommand(rawBin)); },
     supportsTypeAhead: true,
     supportsReadIsolation: true,
-    readIsolationMechanism: 'settings',
+    // Whole-process Seatbelt wrapper (like Codex), NOT Claude's built-in --settings
+    // sandbox. The built-in only sandboxes Bash (main process unsandboxed → resume
+    // works, but network Bash commands can ESCAPE it) and needs a separate
+    // permissions.deny for the Read tool (with a deny>allow rule that blocks the
+    // memory carve-out). The external wrapper confines the WHOLE process at the
+    // kernel: no escape, one rule set covers Bash + Read tool + main process, and
+    // Seatbelt's allow-after-deny carves the bot's own project dir back in (resume +
+    // memory). Resume is preserved by allowing ~/.claude/projects/<own-cwd-hash>.
+    readIsolationMechanism: 'external-wrapper',
     claudeDataDir: variant.dataDir,
     claudeStateJsonPath: variant.stateJsonPath,
     spawnEnv: variant.spawnEnv,
-    authPaths: variant.authPaths,
+    // Under the external wrapper the MAIN process is sandboxed too, so Claude's own
+    // state file (~/.claude.json — account/login/folder-trust state) must stay
+    // readable or Claude drops to the login screen. Preserve it alongside auth.
+    authPaths: [...(variant.authPaths ?? []), ...(variant.stateJsonPath ? [variant.stateJsonPath] : [])],
     skillDelivery: { nativeKind: 'claude-plugin', supportsScopedSession: true, supportsExclusive: false },
 
     /** Prove the resume JSONL exists (or at least the project dir does, so the
@@ -525,16 +545,13 @@ export function createClaudeFamilyAdapter(variant: ClaudeFamilyVariant, rawBin: 
         inlineSettings.skipDangerousModePermissionPrompt = true;
         inlineSettings.permissions = { defaultMode: 'bypassPermissions' };
       }
-      // Per-bot local read isolation (macOS-first feature, gated by the worker):
-      // merge the sandbox block + permissions.deny into --settings. Merge into the
-      // SAME permissions object so `defaultMode: bypassPermissions` survives — deny
-      // rules are still enforced under bypass (verified), so the two coexist.
-      if (readIsolation) {
-        const iso = buildClaudeReadIsolationSettings(readIsolation);
-        inlineSettings.sandbox = iso.sandbox;
-        const existingPerms = (inlineSettings.permissions ?? {}) as Record<string, unknown>;
-        inlineSettings.permissions = { ...existingPerms, deny: iso.permissions.deny };
-      }
+      // Per-bot local read isolation is enforced by the worker's WHOLE-PROCESS
+      // Seatbelt wrapper (readIsolationMechanism: 'external-wrapper'), NOT here —
+      // Claude does NOT inject its built-in --settings sandbox / permissions.deny.
+      // Injecting them would (a) block the memory carve-out (permissions deny>allow)
+      // and (b) risk nested sandboxing. The `readIsolation` context is unused in
+      // buildArgs for that reason; the outer sandbox-exec is the sole enforcer.
+      void readIsolation;
       // 仅在有内容（bypass 键）时才传 --settings；disableCliBypass 下没东西可传就不传。
       if (Object.keys(inlineSettings).length > 0) {
         args.push('--settings', JSON.stringify(inlineSettings));

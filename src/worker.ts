@@ -81,7 +81,7 @@ import {
 import { createCliAdapterSync, locateOnPath } from './adapters/cli/registry.js';
 import { buildWrappedLaunch, parseWrapperCli, isTtadkWrapper } from './setup/cli-selection.js';
 import { findLaunchedCliPid, scheduleWrapperRealCliPid, readComm, isBareShellComm, bareShellLaunchKind } from './core/session-discovery.js';
-import { claudeJsonlPathForSession, resolveJsonlFromPid, findOpenClaudeSessionIds, DEFAULT_CLAUDE_DATA_DIR } from './adapters/cli/claude-code.js';
+import { claudeJsonlPathForSession, claudeProjectDir, resolveJsonlFromPid, findOpenClaudeSessionIds, DEFAULT_CLAUDE_DATA_DIR } from './adapters/cli/claude-code.js';
 import { mtrSessionIdForBotmuxSession } from './adapters/cli/mtr.js';
 import type { CliAdapter, PtyHandle, SubmitRecheckResult, CliId } from './adapters/cli/types.js';
 import { PtyBackend } from './adapters/backend/pty-backend.js';
@@ -4258,11 +4258,16 @@ function spawnCli(cfg: Extract<DaemonToWorker, { type: 'init' }>): void {
     // claude-family adapters carry claudeDataDir; other supporting adapters
     // (Codex) have their own always-on mechanism, so skip the Claude probe.
     const isClaudeFamily = !!claudeDataDir;
+    // The built-in-sandbox VERSION probe only matters for the 'settings' mechanism.
+    // Claude now uses the whole-process Seatbelt wrapper ('external-wrapper'), which
+    // needs no specific Claude version — so skip the probe (and its flaky --version
+    // call) for it, exactly as for Codex.
+    const isoMechanism = cliAdapter.readIsolationMechanism ?? 'external-wrapper';
     const gate = evaluateReadIsolationGate({
       configured,
       adapterSupports: cliAdapter.supportsReadIsolation === true,
       wrapperCliSet: !!cfg.wrapperCli,
-      versionOk: configured && isClaudeFamily ? claudeSupportsSandbox(cliAdapter.resolvedBin) : true,
+      versionOk: configured && isoMechanism === 'settings' ? claudeSupportsSandbox(cliAdapter.resolvedBin) : true,
     });
     if (gate.failClosedReason) {
       throw new Error(`[read-isolation] refusing to start session ${cfg.sessionId}: ${gate.failClosedReason}`);
@@ -4461,6 +4466,11 @@ function spawnCli(cfg: Extract<DaemonToWorker, { type: 'init' }>): void {
   const readIsolationMechanism = cliAdapter.readIsolationMechanism ?? 'external-wrapper';
   if (readIsolationCtx && readIsolationMechanism === 'external-wrapper') {
     const denyPaths = buildReadDenyPaths(readIsolationCtx);
+    // Claude family: the whole projects tree is denied (in denyPaths), so re-allow
+    // this bot's OWN project dir — its main process needs to read its transcripts
+    // (resume) + memory, while every other bot's project dir stays denied. Codex has
+    // no such carve-out (its own ~/.codex/sessions is simply never denied).
+    const allowPaths = claudeDataDir ? [claudeProjectDir(cfg.workingDir, claudeDataDir)] : [];
     if (process.platform === 'darwin') {
       if (!locateOnPath('sandbox-exec')) {
         throw new Error(`[read-isolation] refusing to start session ${cfg.sessionId}: sandbox-exec not found`);
@@ -4468,7 +4478,7 @@ function spawnCli(cfg: Extract<DaemonToWorker, { type: 'init' }>): void {
       const profileDir = join(process.env.SESSION_DATA_DIR!, 'read-isolation');
       mkdirSync(profileDir, { recursive: true });
       const profilePath = join(profileDir, `${cfg.sessionId}.sb`);
-      writeFileSync(profilePath, buildSeatbeltProfile(denyPaths), { mode: 0o600 });
+      writeFileSync(profilePath, buildSeatbeltProfile(denyPaths, allowPaths), { mode: 0o600 });
       seatbeltProfilePath = profilePath;
       spawnArgs = ['-f', profilePath, spawnBin, ...spawnArgs];
       spawnBin = 'sandbox-exec';
