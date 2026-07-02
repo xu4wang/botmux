@@ -1984,9 +1984,27 @@ export function startLarkEventDispatcher(larkAppId: string, larkAppSecret: strin
           // permitted senders. (The shared fold-back's replyRootId is already
           // handled by the first clause.)
           const mentionMode = resolveGroupMentionMode(larkAppId);
+          // 话题群 owned-topic 免@续话 — single-bot groups only. In a multi-bot
+          // topic every co-resident bot owns a session on the same thread anchor,
+          // so relaxing here would make ALL of them answer a message that
+          // @mentioned only one (or none) of them; botCount > 1 keeps the
+          // "@ required" contract. `stats` is the cached group stats (fetched
+          // above when ownsSession; its 999/999 API-failure fallback also lands
+          // on the safe "require @" side). A message that @mentions another
+          // specific member is a redirect to someone else → back off, mirroring
+          // the ambient carve-out.
+          const ownedTopicGroupFollowup = !explicitlyMentionedThisBot
+            && isAllowed
+            && ownsSession
+            && !!stats && stats.botCount <= 1
+            && !mentionsAnotherMember(larkAppId, message)
+            && routing.scope === 'thread'
+            && !!message.thread_id
+            && await getChatMode(larkAppId, chatId) === 'topic';
           const relax = (!!replyRootId && isAllowed)
             || (isAllowed && mentionMode === 'never')
             || (isAllowed && mentionMode === 'ambient' && !mentionsAnotherMember(larkAppId, message))
+            || ownedTopicGroupFollowup
             || (isAllowed && mentionMode === 'topic' && ownsSession && !!message.thread_id)
             || (ownsSession && isAllowed && !!stats && stats.userCount <= 1 && stats.botCount <= 1);
           if (!relax) {

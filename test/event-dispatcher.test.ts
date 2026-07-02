@@ -1922,6 +1922,86 @@ describe('im.message.receive_v1 — bot-to-bot @mention routing', () => {
     expect(handlers.handleNewTopic).not.toHaveBeenCalled();
   });
 
+  it('topic group default: a non-@ reply inside an owned topic continues the session', async () => {
+    setupBotState({ allowedUsers: [USER_OPEN_ID] }); // default always
+    mockGetChatMode.mockResolvedValue('topic');
+    mockGetChatInfo.mockResolvedValue({ userCount: 3, botCount: 1 });
+    handlers.resolveReplyThreadAlias.mockReturnValue(null);
+    handlers.isSessionOwner.mockImplementation((anchor: string) => anchor === 'owned-topic-root');
+    const event = makeUserMessageEvent({
+      senderOpenId: USER_OPEN_ID,
+      content: JSON.stringify({ text: 'continue without @ in a topic group' }),
+      rootId: 'owned-topic-root',
+      threadId: 'owned-topic-root',
+      messageId: 'msg-in-owned-topic-group',
+      chatId: 'chat-topic-group',
+      chatType: 'group',
+    });
+
+    await capturedHandlers['im.message.receive_v1'](event);
+    await flushEventWork();
+
+    expect(handlers.handleThreadReply).toHaveBeenCalledWith(event, expect.objectContaining({
+      scope: 'thread',
+      anchor: 'owned-topic-root',
+      larkAppId: MY_APP_ID,
+    }));
+    expect(handlers.handleNewTopic).not.toHaveBeenCalled();
+  });
+
+  it('topic group default, MULTI-bot: a non-@ reply inside an owned topic is ignored (@ required)', async () => {
+    // Regression for the #336 relax leaking into multi-bot topics: with 2+ bots
+    // in the group, every co-resident bot owns a session on the same thread
+    // anchor, so a non-@ (or @-someone-else) reply must NOT be answered.
+    setupBotState({ allowedUsers: [USER_OPEN_ID] }); // default always
+    mockGetChatMode.mockResolvedValue('topic');
+    mockGetChatInfo.mockResolvedValue({ userCount: 3, botCount: 2 });
+    handlers.resolveReplyThreadAlias.mockReturnValue(null);
+    handlers.isSessionOwner.mockImplementation((anchor: string) => anchor === 'owned-topic-root');
+    const event = makeUserMessageEvent({
+      senderOpenId: USER_OPEN_ID,
+      content: JSON.stringify({ text: 'no @ in a multi-bot topic group' }),
+      rootId: 'owned-topic-root',
+      threadId: 'owned-topic-root',
+      messageId: 'msg-in-owned-topic-multibot',
+      chatId: 'chat-topic-group-multibot',
+      chatType: 'group',
+    });
+
+    await capturedHandlers['im.message.receive_v1'](event);
+    await flushEventWork();
+
+    expect(handlers.handleThreadReply).not.toHaveBeenCalled();
+    expect(handlers.handleNewTopic).not.toHaveBeenCalled();
+  });
+
+  it('topic group default: a reply @mentioning ANOTHER member inside an owned topic backs off', async () => {
+    // Redirect carve-out (mirrors ambient): "@SomeoneElse do X" inside the
+    // topic addresses someone else — this bot must stay quiet even though it
+    // owns a session here and the group has no other bot.
+    setupBotState({ allowedUsers: [USER_OPEN_ID] }); // default always
+    mockGetChatMode.mockResolvedValue('topic');
+    mockGetChatInfo.mockResolvedValue({ userCount: 3, botCount: 1 });
+    handlers.resolveReplyThreadAlias.mockReturnValue(null);
+    handlers.isSessionOwner.mockImplementation((anchor: string) => anchor === 'owned-topic-root');
+    const event = makeUserMessageEvent({
+      senderOpenId: USER_OPEN_ID,
+      content: JSON.stringify({ text: '@Other please take this one' }),
+      mentions: [{ key: '@_other', name: 'Other', id: { open_id: 'ou_other_member' } }],
+      rootId: 'owned-topic-root',
+      threadId: 'owned-topic-root',
+      messageId: 'msg-in-owned-topic-redirect',
+      chatId: 'chat-topic-group-redirect',
+      chatType: 'group',
+    });
+
+    await capturedHandlers['im.message.receive_v1'](event);
+    await flushEventWork();
+
+    expect(handlers.handleThreadReply).not.toHaveBeenCalled();
+    expect(handlers.handleNewTopic).not.toHaveBeenCalled();
+  });
+
   it('shared + never: a non-@ top-level message OPENS a topic (seeds replyRootId), not a flat reply', async () => {
     // Regression: shared mode + never must auto-open a topic even without @,
     // instead of replying at the group top level.

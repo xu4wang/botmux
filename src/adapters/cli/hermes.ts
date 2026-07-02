@@ -56,6 +56,12 @@ export function createHermesAdapter(pathOverride?: string): CliAdapter {
     readyPattern: /❯/,
     completionPattern: undefined,
     systemHints: BOTMUX_SHELL_HINTS,
+    // Hermes can take minutes to finish cold-start initialization before its
+    // real composer appears. Keep the soft first-prompt timeout from flushing
+    // into startup screens; the first queued Lark message should wait until the
+    // real prompt is detected. Do not opt into type-ahead here: before the first
+    // prompt Hermes can silently drop input typed during TUI initialization.
+    deferFirstPromptTimeoutUntilReady: true,
     altScreen: false,
   };
 }
