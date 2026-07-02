@@ -9,6 +9,9 @@ import {
   versionAtLeast,
   evaluateReadIsolationGate,
   isolatedPaneReattachSafe,
+  botHomePath,
+  buildV2DenyPaths,
+  buildV2AllowPaths,
   type ReadIsolationContext,
 } from '../src/adapters/cli/read-isolation.js';
 
@@ -247,6 +250,56 @@ describe('evaluateReadIsolationGate (fail-closed)', () => {
     const r = evaluateReadIsolationGate({ ...ok, versionOk: false });
     expect(r.enabled).toBe(false);
     expect(r.failClosedReason).toContain(MIN_CLAUDE_SANDBOX_VERSION);
+  });
+});
+
+describe('v2 BOTMUX_HOME model (buildV2DenyPaths / buildV2AllowPaths)', () => {
+  const v2 = (o: Partial<Parameters<typeof buildV2DenyPaths>[0]> = {}) => ({
+    homeDir: '/Users/bot',
+    botmuxHome: '/Users/bot/.botmux',
+    sessionDataDir: '/Users/bot/.botmux/data',
+    currentAppId: 'cli_self',
+    ...o,
+  });
+
+  it('botHomePath is per-appId under BOTMUX_HOME/bots', () => {
+    expect(botHomePath('/Users/bot/.botmux', 'cli_self')).toBe('/Users/bot/.botmux/bots/cli_self');
+  });
+
+  it('DENY covers BOTMUX_HOME, the global CLI dirs, lark configs and system creds', () => {
+    const d = buildV2DenyPaths(v2());
+    expect(d).toContain('/Users/bot/.botmux');       // all bots + bots.json
+    expect(d).toContain('/Users/bot/.claude');       // global claude (admin + legacy)
+    expect(d).toContain('/Users/bot/.codex');        // global codex (admin + legacy)
+    expect(d).toContain('/Users/bot/.lark-cli-bots');
+    expect(d).toContain('/Users/bot/.ssh');
+    expect(d).toContain('/Users/bot/.aws');
+  });
+
+  it('ALLOW re-opens ONLY this bot own home + own per-appId files, keyed on appId', () => {
+    const a = buildV2AllowPaths(v2());
+    expect(a).toContain('/Users/bot/.botmux/bots/cli_self');                 // own home
+    expect(a).toContain('/Users/bot/.botmux/data/sessions-cli_self.json');   // own session store
+    expect(a).toContain('/Users/bot/.botmux/data/.send-cred-cli_self');      // own send cred
+    expect(a).toContain('/Users/bot/.lark-cli-bots/cli_self');               // own lark config
+    // never a sibling's
+    expect(a.join('|')).not.toContain('cli_other');
+    expect(a.join('|')).not.toContain('sessions-cli_other');
+  });
+
+  it('a sibling bot appId yields carve-outs pointing only at ITS own data (no cross-open)', () => {
+    const a = buildV2AllowPaths(v2({ currentAppId: 'cli_other' }));
+    // cli_other only re-opens cli_other paths; nothing of cli_self
+    expect(a).toContain('/Users/bot/.botmux/bots/cli_other');
+    expect(a.join('|')).not.toContain('cli_self');
+  });
+
+  it('profile = deny set then allow carve-outs (Seatbelt last-match re-opens own home)', () => {
+    const prof = buildSeatbeltProfile(buildV2DenyPaths(v2()), buildV2AllowPaths(v2()));
+    const denyIdx = prof.indexOf('(deny file-read* (subpath "/Users/bot/.botmux"))');
+    const allowIdx = prof.indexOf('(allow file-read* (subpath "/Users/bot/.botmux/bots/cli_self"))');
+    expect(denyIdx).toBeGreaterThan(-1);
+    expect(allowIdx).toBeGreaterThan(denyIdx);
   });
 });
 

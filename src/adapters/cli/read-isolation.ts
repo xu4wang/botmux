@@ -92,6 +92,89 @@ export function sendCredFilePath(sessionDataDir: string, appId: string): string 
   return `${sessionDataDir.replace(/\/+$/, '')}/.send-cred-${appId}`;
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// v2 read isolation: BOTMUX_HOME per-bot model (default-deny allowlist).
+//
+// Instead of enumerating every sensitive path to DENY (blocklist — fail-open if
+// one is missed), v2 relocates each bot's private CLI data into a per-bot home
+// under BOTMUX_HOME (via CLAUDE_CONFIG_DIR / CODEX_HOME), then denies the whole
+// BOTMUX_HOME + the GLOBAL CLI dirs + system creds, and re-allows ONLY this bot's
+// own home + its own per-appId botmux files. Code/repos outside BOTMUX_HOME stay
+// open (the bot can still roam & work). Carve-outs are keyed on the IMMUTABLE
+// appId (never the user-controllable cwd), so a semi-trusted user cannot /cd them
+// onto another bot's data (the v1 F1 class of bug).
+// ─────────────────────────────────────────────────────────────────────────────
+
+/** A bot's private home under BOTMUX_HOME: `<botmuxHome>/bots/<appId>`. Holds the
+ *  bot's redirected CLI config/transcripts/memory (CLAUDE_CONFIG_DIR=<here>/claude,
+ *  CODEX_HOME=<here>/codex). The ONLY thing under BOTMUX_HOME v2 re-allows. */
+export function botHomePath(botmuxHome: string, appId: string): string {
+  return `${botmuxHome.replace(/\/+$/, '')}/bots/${appId}`;
+}
+
+export interface V2IsolationContext {
+  /** The bot user's home directory. */
+  homeDir: string;
+  /** BOTMUX_HOME root (e.g. `~/.botmux`) — denied wholesale, own BOT_HOME re-allowed. */
+  botmuxHome: string;
+  /** botmux session data root (SESSION_DATA_DIR, e.g. `~/.botmux/data`). */
+  sessionDataDir: string;
+  /** This bot's Feishu app id (the immutable key for its own carve-outs). */
+  currentAppId: string;
+  /** Per-bot extra deny paths (BotConfig.readDenyExtraPaths). */
+  extraDenyPaths?: string[];
+}
+
+/** v2 DENY set (default-deny for sensitive data): the whole BOTMUX_HOME (bots.json,
+ *  every bot's data + other bots' homes), the GLOBAL CLI dirs (`~/.claude`,
+ *  `~/.codex` — the admin/unisolated bots + any pre-migration data), lark configs,
+ *  and system credentials. Everything ELSE (code/repos/system runtime) stays open.
+ *  The bot's OWN data is re-opened by {@link buildV2AllowPaths}. */
+export function buildV2DenyPaths(ctx: V2IsolationContext): string[] {
+  const h = ctx.homeDir.replace(/\/+$/, '');
+  return dedupe(
+    [
+      ctx.botmuxHome,
+      `${h}/.claude`,
+      `${h}/.codex`,
+      `${h}/.lark-cli`,
+      `${h}/.lark-cli-bots`,
+      // System credentials that live OUTSIDE BOTMUX_HOME (a fixed, known set).
+      `${h}/.ssh`,
+      `${h}/.aws`,
+      `${h}/.config/gh`,
+      `${h}/.config/glab-cli`,
+      `${h}/.git-credentials`,
+      `${h}/.npmrc`,
+      `${h}/.docker/config.json`,
+      `${h}/.kube`,
+      ...(ctx.extraDenyPaths ?? []),
+    ]
+      .map(normalizeIsolationPath)
+      .filter((p): p is string => !!p),
+  );
+}
+
+/** v2 ALLOW carve-outs, re-opened AFTER the denies (Seatbelt last-match wins): the
+ *  bot's OWN home (its redirected CLI data) + its OWN per-appId botmux files (session
+ *  store + send-cred) + its OWN lark-cli config dir. ALL keyed on the immutable appId,
+ *  so they always resolve to exactly this bot's data and cannot be redirected at a
+ *  sibling's by changing cwd. */
+export function buildV2AllowPaths(ctx: V2IsolationContext): string[] {
+  const h = ctx.homeDir.replace(/\/+$/, '');
+  const sd = ctx.sessionDataDir.replace(/\/+$/, '');
+  return dedupe(
+    [
+      botHomePath(ctx.botmuxHome, ctx.currentAppId),
+      `${sd}/sessions-${ctx.currentAppId}.json`,
+      sendCredFilePath(sd, ctx.currentAppId),
+      `${h}/.lark-cli-bots/${ctx.currentAppId}`,
+    ]
+      .map(normalizeIsolationPath)
+      .filter((p): p is string => !!p),
+  );
+}
+
 /** The de-duplicated list of absolute paths this bot must NOT be able to read.
  *
  *  Surgical, NOT a blanket deny of SESSION_DATA_DIR: `botmux send` (run by the
