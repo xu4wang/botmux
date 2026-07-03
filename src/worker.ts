@@ -4173,9 +4173,24 @@ function spawnCli(cfg: Extract<DaemonToWorker, { type: 'init' }>): void {
     (cliAdapter.readIsolationMechanism ?? 'external-wrapper') === 'external-wrapper' &&
     process.platform === 'darwin' &&
     !!process.env.SESSION_DATA_DIR;
+  // Every bot — isolated OR not — gets its own BOT_HOME dir as a ready-made private-
+  // storage slot. An isolated sibling denies this path regardless of whether the owner
+  // is isolated (deny uses the full bots.json), so a non-isolated bot can drop private
+  // data here without any manual mkdir. Isolated bots additionally provision their CLI
+  // config/creds into it below.
+  const ownBotHome = process.env.SESSION_DATA_DIR
+    ? botHomePath(dirname(process.env.SESSION_DATA_DIR), cfg.larkAppId)
+    : undefined;
+  if (ownBotHome) {
+    try {
+      mkdirSync(ownBotHome, { recursive: true });
+    } catch (e) {
+      log(`[read-isolation] WARN could not create BOT_HOME ${ownBotHome}: ${(e as Error).message}`);
+    }
+  }
   let isolationBotHome: string | undefined;
   if (willReadIsolate) {
-    isolationBotHome = botHomePath(dirname(process.env.SESSION_DATA_DIR!), cfg.larkAppId);
+    isolationBotHome = ownBotHome!;
     const isClaudeFam = !!claudeDataDir;
     if (isClaudeFam) claudeDataDir = join(isolationBotHome, 'claude');
     // Provision the per-bot config dir (auth + onboarding/trust seed + hooks for claude;
