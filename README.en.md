@@ -95,8 +95,8 @@ Run `botmux setup` — every choice is an interactive picker (↑/↓ to move, t
    - **Enter AppID/Secret manually** — see "Create the app manually" folded below.
 3. **Pick the CLI**: choose the CLI to bridge (searchable — type `cla` to filter Claude).
 4. **Working dir for new topics** — pick one of two modes:
-   - **Repo-select card (recommended)**: each new topic pops a card listing scanned git repos to choose from. The follow-up question asks for the **repo scan root(s)** — usually the **parent directory** of your git projects (e.g. `~/projects`, comma-separated for multiple); the card scans **downward** for git repos (up to 3 levels). Avoid `~` (too many folders to traverse).
-   - **Fixed default dir**: new topics start straight in the given directory with **no card** (persisted as `defaultWorkingDir`; change later via `/config` or `botmux setup edit`).
+   - **Fixed default dir (recommended)**: new topics start straight in the given directory with **no card** (persisted as `defaultWorkingDir`; change later via `/config` or `botmux setup edit`). Pick this if you want the bot to just work in one directory.
+   - **Repo-select card**: each new topic pops a card listing scanned git repos to choose from — good when you hop between repos. The follow-up question asks for the **repo scan root(s)** — usually the **parent directory** of your git projects (e.g. `~/projects`, comma-separated for multiple); the card scans **downward** for git repos (up to 3 levels). Avoid `~` (too many folders to traverse).
 
 Then comes the **2nd scan**: botmux's built-in Feishu Web login automatically imports permissions, configures the `http://127.0.0.1:9768/callback` redirect URL, and creates + submits a publish version. On failure it falls back and prints the manual steps (folded below) without affecting the config already written; importing only part of the permissions still counts as success — add the rest later on the Open Platform.
 

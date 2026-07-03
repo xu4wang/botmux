@@ -830,11 +830,13 @@ async function promptBotConfig(rl: ReturnType<typeof createInterface>): Promise<
   // 新话题工作目录：两种模式二选一。旧问法只问「默认工作目录」但写的是
   // workingDir——那只是仓库选择卡片的扫描根，新话题照样弹卡，误导性强；
   // 真正「直接进目录、不弹卡」的是 defaultWorkingDir，现在显式让用户选。
+  // 「固定默认目录」放首位当推荐默认：大量用户的真实诉求是"新话题直接进目录"，
+  // 弹卡模式作为多仓库场景的进阶选项。
   const dirMode = await pickChoice(rl, {
     title: '新话题工作目录',
     items: [
-      { label: '仓库选择卡片（推荐）', hint: '新话题先弹卡片，从扫描到的 git 仓库中选一个再启动' },
-      { label: '固定默认目录', hint: '新话题直接在指定目录启动、不弹卡片' },
+      { label: '固定默认目录（推荐）', hint: '新话题直接在指定目录启动、不弹卡片' },
+      { label: '仓库选择卡片', hint: '新话题先弹卡片，从扫描到的 git 仓库中选一个再启动' },
     ],
     defaultIndex: 0,
     footer: '之后可用 /config 或 botmux setup edit 修改',
@@ -842,22 +844,18 @@ async function promptBotConfig(rl: ReturnType<typeof createInterface>): Promise<
   let workingDir: string | undefined;
   let defaultWorkingDir: string | undefined;
   if (dirMode === 1) {
-    // 必填 + 存在性校验循环（与 promptRequiredOwner 同款姿势）——运行时 daemon
-    // 对无效 defaultWorkingDir 只会静默回退弹卡，setup 阶段必须挡住。
+    const raw = await ask(rl, '仓库扫描根目录（卡片会列出其下的 git 仓库，逗号分隔多个）[~]: ');
+    workingDir = raw.trim() || '~';
+  } else {
+    // 存在性校验循环——运行时 daemon 对无效 defaultWorkingDir 只会静默回退
+    // 弹卡，setup 阶段必须挡住。留空默认 ~（一定存在，回车即通过）。
     for (;;) {
-      const dir = (await ask(rl, '默认工作目录（新话题直接在此目录启动）: ')).trim();
-      if (!dir) {
-        console.log('   ❌ 固定默认目录模式必须填写目录。');
-        continue;
-      }
+      const dir = (await ask(rl, '默认工作目录（新话题直接在此目录启动）[~]: ')).trim() || '~';
       if (ensureBotDefaultWorkingDirExists({ defaultWorkingDir: dir })) {
         defaultWorkingDir = dir;
         break;
       }
     }
-  } else {
-    const raw = await ask(rl, '仓库扫描根目录（卡片会列出其下的 git 仓库，逗号分隔多个）[~]: ');
-    workingDir = raw.trim() || '~';
   }
 
   const bot: Record<string, any> = {
@@ -1040,12 +1038,18 @@ async function promptEditBotConfig(
     title: '新话题工作目录',
     items: [
       { label: '保留当前配置', hint: currentDirMode },
-      { label: '仓库选择卡片', hint: '新话题先弹卡片选 git 仓库；下一问填卡片的扫描根目录' },
       { label: '固定默认目录', hint: '新话题直接在指定目录启动、不弹卡片' },
+      { label: '仓库选择卡片', hint: '新话题先弹卡片选 git 仓库；下一问填卡片的扫描根目录' },
     ],
     defaultIndex: 0,
   });
   if (dirMode === 1) {
+    printInputHelp('固定默认目录', [
+      '新话题直接在此目录启动、不弹仓库选择卡片。',
+      '留空保留当前值；输入 - 清空并回到仓库选择卡片模式。',
+    ]);
+    input.defaultWorkingDir = await ask(rl, `固定默认目录 [${formatOptionalValue(bot.defaultWorkingDir)}]: `);
+  } else if (dirMode === 2) {
     printInputHelp('仓库扫描根目录', [
       '仓库选择卡片会列出这些目录下的 git 仓库，支持逗号分隔多个。',
       '留空保留当前值；输入 - 清空并回到默认 ~。',
@@ -1055,12 +1059,6 @@ async function promptEditBotConfig(
       console.log('   已切回仓库选择卡片模式，原固定默认目录将被清空。');
       input.defaultWorkingDir = '-';
     }
-  } else if (dirMode === 2) {
-    printInputHelp('固定默认目录', [
-      '新话题直接在此目录启动、不弹仓库选择卡片。',
-      '留空保留当前值；输入 - 清空并回到仓库选择卡片模式。',
-    ]);
-    input.defaultWorkingDir = await ask(rl, `固定默认目录 [${formatOptionalValue(bot.defaultWorkingDir)}]: `);
   }
 
   printInputHelp('允许的用户', [

@@ -1531,7 +1531,7 @@ const server = createServer(async (req, res) => {
     }
 
     if (req.method === 'POST' && url.pathname === '/api/bot-onboarding/start') {
-      let parsed: { cliId?: unknown; workingDir?: unknown; model?: unknown };
+      let parsed: { cliId?: unknown; workingDir?: unknown; dirMode?: unknown; model?: unknown };
       try {
         const chunks: Buffer[] = [];
         for await (const c of req) chunks.push(c as Buffer);
@@ -1561,8 +1561,15 @@ const server = createServer(async (req, res) => {
       if (bad.length > 0) {
         return jsonRes(res, 400, { ok: false, error: 'invalid_working_dir', message: `目录不存在或不是目录: ${bad.join(', ')}` });
       }
+      // 目录模式: 'fixed' → defaultWorkingDir（直接启动）；'card' → workingDir（弹卡）。
+      // 缺省不传按 'card' 处理，兼容不带该字段的旧客户端。
+      const dirModeRaw = typeof parsed.dirMode === 'string' ? parsed.dirMode.trim() : '';
+      if (dirModeRaw && dirModeRaw !== 'fixed' && dirModeRaw !== 'card') {
+        return jsonRes(res, 400, { ok: false, error: 'invalid_dir_mode', message: 'dirMode 必须是 fixed 或 card' });
+      }
+      const dirMode = dirModeRaw === 'fixed' ? 'fixed' as const : dirModeRaw === 'card' ? 'card' as const : undefined;
       const model = typeof parsed.model === 'string' && parsed.model.trim() ? parsed.model.trim() : undefined;
-      const job = botOnboarding.start({ cliId, wrapperCli, workingDir, model });
+      const job = botOnboarding.start({ cliId, wrapperCli, workingDir, dirMode, model });
       return jsonRes(res, 202, { job: botOnboarding.get(job.id) });
     }
     let mOwner: RegExpMatchArray | null;
