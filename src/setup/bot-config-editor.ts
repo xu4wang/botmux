@@ -139,6 +139,12 @@ export interface BotConfigEditInput {
   model?: string | null;
   backendType?: string;
   workingDir?: string;
+  /**
+   * 固定默认目录：新话题直接在此目录启动、不弹仓库选择卡片（与 /config 的
+   * defaultWorkingDir 同字段）。与 workingDir（仓库选择卡片的扫描根）互补：
+   * 留空不动；输入 - 清空、回到弹卡模式。目录存在性由调用方在写盘前校验。
+   */
+  defaultWorkingDir?: string;
   allowedUsers?: string;
   allowedChatGroups?: string;
   /**
@@ -391,6 +397,7 @@ export function applyBotConfigEdits<T extends Record<string, any>>(
   }
 
   applyOptionalString(out, 'workingDir', input.workingDir);
+  applyOptionalString(out, 'defaultWorkingDir', input.defaultWorkingDir);
 
   if (input.allowedUsers !== undefined) {
     const allowedUsers = input.allowedUsers.trim();
