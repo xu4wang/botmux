@@ -29,6 +29,7 @@ import {
   sendCredFilePath,
   botHomePath,
   buildV2DenyPaths,
+  buildV2CarveOuts,
   type ReadIsolationContext,
 } from './adapters/cli/read-isolation.js';
 import { killPersistentSession, type PersistentBackendType } from './core/persistent-backend.js';
@@ -4605,10 +4606,12 @@ function spawnCli(cfg: Extract<DaemonToWorker, { type: 'init' }>): void {
     const canonical = (p: string) => { try { return realpathSync(p); } catch { return p; } };
     // v2 HYBRID model: whole-deny ~/.claude|~/.codex (F1 fix — own CLI data is redirected
     // into BOT_HOME, readable) + surgical-deny only the cross-bot-SENSITIVE parts of the
-    // otherwise-readable ~/.botmux (so the agent's `botmux send`/`list` tooling still
-    // works) + system creds. No allow carve-outs / traversal shims needed: own BOT_HOME,
-    // own session/cred, config, registry and the shared skill plugin dir are all readable
-    // by default (never denied), which also lets Codex realpath() its CODEX_HOME cleanly.
+    // otherwise-readable ~/.botmux + system creds. The bots/ DIR is denied WHOLESALE (so a
+    // newly-added bot is covered without cold-restarting this one, and `ls bots/` can't
+    // enumerate siblings); the own BOT_HOME is re-opened via carve-outs — an allow subpath
+    // + a file-read-metadata traverse shim on bots/ so Codex can realpath() its CODEX_HOME
+    // through the denied parent. Admin readDenyExtraPaths become FINAL denies (win over the
+    // own-allow).
     const v2ctx = {
       homeDir: readIsolationCtx.homeDir,
       botmuxHome: dirname(readIsolationCtx.sessionDataDir),
@@ -4618,6 +4621,10 @@ function spawnCli(cfg: Extract<DaemonToWorker, { type: 'init' }>): void {
       extraDenyPaths: readIsolationCtx.extraDenyPaths,
     };
     const denyPaths = buildV2DenyPaths(v2ctx).map(canonical);
+    const carve = buildV2CarveOuts(v2ctx);
+    const allowPaths = carve.allowPaths.map(canonical);
+    const finalDenyPaths = carve.finalDenyPaths.map(canonical);
+    const traverseDirs = carve.traverseDirs.map(canonical);
     if (process.platform === 'darwin') {
       if (!locateOnPath('sandbox-exec')) {
         throw new Error(`[read-isolation] refusing to start session ${cfg.sessionId}: sandbox-exec not found`);
@@ -4625,7 +4632,7 @@ function spawnCli(cfg: Extract<DaemonToWorker, { type: 'init' }>): void {
       const profileDir = join(process.env.SESSION_DATA_DIR!, 'read-isolation');
       mkdirSync(profileDir, { recursive: true });
       const profilePath = join(profileDir, `${cfg.sessionId}.sb`);
-      writeFileSync(profilePath, buildSeatbeltProfile(denyPaths), { mode: 0o600 });
+      writeFileSync(profilePath, buildSeatbeltProfile(denyPaths, allowPaths, finalDenyPaths, traverseDirs), { mode: 0o600 });
       seatbeltProfilePath = profilePath;
       spawnArgs = ['-f', profilePath, spawnBin, ...spawnArgs];
       spawnBin = 'sandbox-exec';

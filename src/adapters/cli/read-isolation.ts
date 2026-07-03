@@ -121,7 +121,10 @@ export function sendCredFilePath(sessionDataDir: string, appId: string): string 
  *  traverse out of BOTMUX_HOME or mis-scope a carve-out. Real Feishu app ids match. */
 const SAFE_APP_ID = /^[A-Za-z0-9._-]+$/;
 export function assertSafeAppId(appId: string): string {
-  if (!SAFE_APP_ID.test(appId)) {
+  // Reject the char-class violators AND any all-dots id (`.`/`..`/`...`): the latter pass
+  // the class but are path-traversal segments — as a carve-out subpath `bots/..` resolves
+  // to the PARENT and re-opens sensitive roots.
+  if (!SAFE_APP_ID.test(appId) || /^\.+$/.test(appId)) {
     throw new Error(`[read-isolation] unsafe app id used as path segment: ${JSON.stringify(appId)}`);
   }
   return appId;
@@ -166,7 +169,11 @@ export function buildV2DenyPaths(ctx: V2IsolationContext): string[] {
   const h = ctx.homeDir.replace(/\/+$/, '');
   const bh = ctx.botmuxHome.replace(/\/+$/, '');
   const sd = ctx.sessionDataDir.replace(/\/+$/, '');
-  const others = ctx.otherAppIds ?? [];
+  // Validate every sibling appId up front: they're interpolated into sessions-<id>.json /
+  // .lark-cli-bots/<id> paths below, so a `/` or `..` (hand-edited bots.json) must be
+  // rejected — not silently mis-scoped. (The wholesale bots/ deny no longer routes them
+  // through botHomePath, which used to be the incidental guard.)
+  const others = (ctx.otherAppIds ?? []).map(assertSafeAppId);
   return dedupe(
     [
       // ── F1: whole-deny the CLI data dirs (own is redirected to BOT_HOME) ──
@@ -196,21 +203,56 @@ export function buildV2DenyPaths(ctx: V2IsolationContext): string[] {
       `${bh}/bots.json`,               // ALL bots' secrets
       `${bh}/logs`,                    // daemon logs (cross-bot content)
       `${h}/.lark-cli`,                // default lark config (may hold creds)
-      ...others.map((id) => `${h}/.lark-cli-bots/${id}`),   // other bots' lark configs
+      // WHOLESALE-deny the per-bot lark config dir (same rationale as bots/ below): a
+      // newly-added bot is covered without cold-restart, and `ls .lark-cli-bots/` can't
+      // enumerate siblings. Own is re-allowed via buildV2CarveOuts (+ traverse shim).
+      `${h}/.lark-cli-bots`,
       ...others.map((id) => `${sd}/sessions-${id}.json`),   // other bots' session stores
-      ...others.map((id) => botHomePath(bh, id)),           // other bots' BOT_HOMEs
-                                                            //   (also covers their send-cred.json inside)
+      // WHOLESALE-deny the bots/ dir (every sibling BOT_HOME + their send-cred). Own is
+      // re-allowed via buildV2CarveOuts (allow subpath own + file-read-metadata traverse
+      // shim so the CLI can realpath its redirected config). Denying the DIR (not each
+      // sibling appId) means a NEWLY-ADDED bot is covered WITHOUT cold-restarting this
+      // one, and `ls bots/` can't enumerate siblings.
+      `${bh}/bots`,
       `${sd}/sessions.json`,           // legacy shared store
       `${sd}/frozen-cards`,            // conversation content (all bots')
       `${sd}/turn-sends`,
       `${sd}/crash-diagnostics`,
       `${sd}/attachments`,
       `${sd}/whiteboards`,
-      ...(ctx.extraDenyPaths ?? []),
+      // NOTE: extraDenyPaths (readDenyExtraPaths) are NOT here — they go to
+      // buildV2CarveOuts().finalDenyPaths so they win over the own-BOT_HOME allow.
     ]
       .map(normalizeIsolationPath)
       .filter((p): p is string => !!p),
   );
+}
+
+/** The v2 Seatbelt carve-outs that accompany {@link buildV2DenyPaths}. Because the deny
+ *  list WHOLESALE-denies `<botmuxHome>/bots`, these re-open the bot's OWN slice:
+ *   - allowPaths: the own BOT_HOME subpath (redirected CLI data + creds + send-cred).
+ *   - traverseDirs: `bots/` itself, as file-read-metadata ONLY — lets the CLI realpath()
+ *     its config dir THROUGH the denied parent WITHOUT allowing `ls bots/` (enumeration).
+ *   - finalDenyPaths: admin `readDenyExtraPaths`, emitted AFTER the allows so an admin
+ *     deny UNDER the own BOT_HOME still wins (Seatbelt last-match). */
+export function buildV2CarveOuts(ctx: V2IsolationContext): {
+  allowPaths: string[];
+  traverseDirs: string[];
+  finalDenyPaths: string[];
+} {
+  const bh = ctx.botmuxHome.replace(/\/+$/, '');
+  const h = ctx.homeDir.replace(/\/+$/, '');
+  const self = assertSafeAppId(ctx.currentAppId);
+  return {
+    // Re-open the bot's OWN slice of each WHOLESALE-denied per-bot dir.
+    allowPaths: [botHomePath(bh, self), `${h}/.lark-cli-bots/${self}`],
+    // file-read-metadata on the wholesale-denied parents so the CLI/skill can realpath()
+    // through them WITHOUT `ls` (enumeration) leaking.
+    traverseDirs: [`${bh}/bots`, `${h}/.lark-cli-bots`],
+    finalDenyPaths: (ctx.extraDenyPaths ?? [])
+      .map(normalizeIsolationPath)
+      .filter((p): p is string => !!p),
+  };
 }
 
 /** The de-duplicated list of absolute paths this bot must NOT be able to read.

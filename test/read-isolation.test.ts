@@ -11,6 +11,7 @@ import {
   isolatedPaneReattachSafe,
   botHomePath,
   buildV2DenyPaths,
+  buildV2CarveOuts,
   sendCredFilePath,
   assertSafeAppId,
   type ReadIsolationContext,
@@ -287,18 +288,22 @@ describe('v2 HYBRID model (buildV2DenyPaths)', () => {
     // denied: secrets + other bots + content
     expect(d).toContain('/Users/bot/.botmux/bots.json');
     expect(d).toContain('/Users/bot/.botmux/logs');
-    expect(d).toContain('/Users/bot/.lark-cli-bots/cli_other1');
+    expect(d).toContain('/Users/bot/.lark-cli-bots');            // WHOLESALE (covers every sibling)
+    expect(d).not.toContain('/Users/bot/.lark-cli-bots/cli_other1'); // subsumed by wholesale
     expect(d).toContain('/Users/bot/.botmux/data/sessions-cli_other1.json');
-    expect(d).toContain('/Users/bot/.botmux/bots/cli_other1');   // other bot's BOT_HOME
-    // other bots' send-cred now lives INSIDE their BOT_HOME → covered by the BOT_HOME
-    // deny above, no separate per-file deny; the old data-dir location is gone.
+    // WHOLESALE deny of bots/ — covers EVERY sibling BOT_HOME, including bots added
+    // AFTER this bot spawned (no cold-restart to pick them up). No per-sibling entries.
+    expect(d).toContain('/Users/bot/.botmux/bots');
+    expect(d).not.toContain('/Users/bot/.botmux/bots/cli_other1'); // subsumed by wholesale
+    // other bots' send-cred now lives INSIDE their BOT_HOME → covered by the wholesale
+    // bots/ deny; the old data-dir location is gone.
     expect(d).not.toContain('/Users/bot/.botmux/data/.send-cred-cli_other2');
     expect(d).toContain('/Users/bot/.botmux/data/frozen-cards');
     expect(d).toContain('/Users/bot/.botmux/data/turn-sends');
     // NOT denied — the whole tree, own data, and the tooling botmux CLI needs
     expect(d).not.toContain('/Users/bot/.botmux');                     // never whole-denied
     expect(d).not.toContain('/Users/bot/.botmux/data');                // data dir listable
-    expect(d).not.toContain('/Users/bot/.botmux/bots/cli_self');       // OWN BOT_HOME readable
+    expect(d).not.toContain('/Users/bot/.botmux/bots/cli_self');       // own not a plain deny; re-allowed via carve-out
     expect(d).not.toContain('/Users/bot/.botmux/data/sessions-cli_self.json');
     expect(d).not.toContain('/Users/bot/.botmux/config.json');         // config readable
     expect(d).not.toContain('/Users/bot/.lark-cli-bots/cli_self');     // own lark readable
@@ -313,12 +318,12 @@ describe('v2 HYBRID model (buildV2DenyPaths)', () => {
     expect(sendCredFilePath('/Users/bot/.botmux/data', 'cli_self'))
       .toBe('/Users/bot/.botmux/bots/cli_self/send-cred.json');
     const d = buildV2DenyPaths(v2());
-    // an OTHER bot's send-cred sits under its denied BOT_HOME → no separate deny needed
+    // an OTHER bot's send-cred sits under its BOT_HOME → covered by the wholesale bots/ deny
     expect(sendCredFilePath('/Users/bot/.botmux/data', 'cli_other2'))
       .toBe('/Users/bot/.botmux/bots/cli_other2/send-cred.json');
-    expect(d).toContain('/Users/bot/.botmux/bots/cli_other2');
-    // own send-cred is under own BOT_HOME → readable (own BOT_HOME never denied)
-    expect(d).not.toContain('/Users/bot/.botmux/bots/cli_self');
+    expect(d).toContain('/Users/bot/.botmux/bots');
+    // own send-cred is under own BOT_HOME → readable via the carve-out
+    expect(buildV2CarveOuts(v2()).allowPaths).toContain('/Users/bot/.botmux/bots/cli_self');
   });
 
   it('send-cred path follows a customized SESSION_DATA_DIR (review: codex)', () => {
@@ -332,17 +337,35 @@ describe('v2 HYBRID model (buildV2DenyPaths)', () => {
     expect(d).not.toContain('/Users/bot/.botmux/bots/cli_other1/send-cred.json');
   });
 
-  it('folds extraDenyPaths into the deny set (no allow carve-out to override them)', () => {
+  it('buildV2CarveOuts: own BOT_HOME allow + bots/ traverse shim + extraDenyPaths as FINAL deny', () => {
+    const carve = buildV2CarveOuts(v2());
+    // own slice of EACH wholesale-denied per-bot dir (BOT_HOME + lark-cli-bots) re-allowed
+    expect(carve.allowPaths).toEqual([
+      '/Users/bot/.botmux/bots/cli_self',
+      '/Users/bot/.lark-cli-bots/cli_self',
+    ]);
+    // traverse shim on each wholesale-denied parent (stat/realpath, not listing)
+    expect(carve.traverseDirs).toEqual(['/Users/bot/.botmux/bots', '/Users/bot/.lark-cli-bots']);
+    expect(carve.finalDenyPaths).toEqual([]);
+    // an admin deny UNDER the own BOT_HOME must WIN over the carve-out → goes to finalDeny
     const extra = '/Users/bot/.botmux/bots/cli_self/claude/.credentials.json';
-    expect(buildV2DenyPaths(v2({ extraDenyPaths: [extra] }))).toContain(extra);
+    const c2 = buildV2CarveOuts(v2({ extraDenyPaths: [extra] }));
+    expect(c2.finalDenyPaths).toContain(extra);
+    expect(buildV2DenyPaths(v2({ extraDenyPaths: [extra] }))).not.toContain(extra); // not a plain deny
   });
 
-  it('profile is deny-only over allow-default (no carve-outs / traversal shims needed)', () => {
-    const prof = buildSeatbeltProfile(buildV2DenyPaths(v2()));
+  it('profile: wholesale bots/ deny + own carve-out (allow AFTER deny) + traverse metadata shim', () => {
+    const carve = buildV2CarveOuts(v2());
+    const prof = buildSeatbeltProfile(
+      buildV2DenyPaths(v2()), carve.allowPaths, carve.finalDenyPaths, carve.traverseDirs);
     expect(prof).toContain('(allow default)');
-    expect(prof).toContain('(deny file-read* (subpath "/Users/bot/.claude"))');
-    expect(prof).not.toContain('(allow file-read*');          // no subpath re-allows
-    expect(prof).not.toContain('file-read-metadata');         // no traversal shim
+    expect(prof).toContain('(deny file-read* (subpath "/Users/bot/.botmux/bots"))');
+    // traverse: realpath/stat through bots/ works, but LISTING (read-data) stays denied
+    expect(prof).toContain('(allow file-read-metadata (literal "/Users/bot/.botmux/bots"))');
+    expect(prof).toContain('(allow file-read* (subpath "/Users/bot/.botmux/bots/cli_self"))');
+    // Seatbelt last-match-wins: own-allow MUST appear after the bots/ deny
+    expect(prof.indexOf('(allow file-read* (subpath "/Users/bot/.botmux/bots/cli_self"))'))
+      .toBeGreaterThan(prof.indexOf('(deny file-read* (subpath "/Users/bot/.botmux/bots"))'));
   });
 
   it('assertSafeAppId rejects path-traversal / separators, accepts real Feishu ids (review L2)', () => {
@@ -350,6 +373,13 @@ describe('v2 HYBRID model (buildV2DenyPaths)', () => {
     expect(() => assertSafeAppId('../evil')).toThrow();
     expect(() => assertSafeAppId('a/b')).toThrow();
     expect(() => assertSafeAppId('')).toThrow();
+    // pure-dot ids are path-traversal segments: as a carve-out subpath, `bots/..`
+    // canonicalizes to the PARENT (~/.botmux) and — emitted after the deny — would
+    // re-open bots.json / bots/ / logs. Must be rejected (codex review).
+    expect(() => assertSafeAppId('.')).toThrow();
+    expect(() => assertSafeAppId('..')).toThrow();
+    expect(() => assertSafeAppId('...')).toThrow();
+    expect(() => buildV2CarveOuts(v2({ currentAppId: '..' }))).toThrow();
     // botHomePath must also reject an unsafe id (used for own + other BOT_HOMEs)
     expect(() => botHomePath('/Users/bot/.botmux', '../x')).toThrow();
     expect(() => buildV2DenyPaths(v2({ otherAppIds: ['a/../b'] }))).toThrow();
