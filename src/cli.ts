@@ -3693,6 +3693,8 @@ async function registerSelfFromCredFile(): Promise<void> {
   const { sendCredFilePath } = await import('./adapters/cli/read-isolation.js');
   let cred: { larkAppSecret?: string; brand?: string };
   try {
+    // send-cred lives in the bot's BOT_HOME (<BOTMUX_HOME>/bots/<appId>/send-cred.json);
+    // sendCredFilePath takes SESSION_DATA_DIR and derives BOTMUX_HOME (its parent).
     cred = JSON.parse(readFileSync(sendCredFilePath(sd, appId), 'utf-8'));
   } catch {
     return; // no cred file → not isolated (or first layer supplies creds elsewhere)

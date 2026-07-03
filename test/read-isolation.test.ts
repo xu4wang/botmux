@@ -11,6 +11,7 @@ import {
   isolatedPaneReattachSafe,
   botHomePath,
   buildV2DenyPaths,
+  sendCredFilePath,
   assertSafeAppId,
   type ReadIsolationContext,
 } from '../src/adapters/cli/read-isolation.js';
@@ -288,8 +289,10 @@ describe('v2 HYBRID model (buildV2DenyPaths)', () => {
     expect(d).toContain('/Users/bot/.botmux/logs');
     expect(d).toContain('/Users/bot/.lark-cli-bots/cli_other1');
     expect(d).toContain('/Users/bot/.botmux/data/sessions-cli_other1.json');
-    expect(d).toContain('/Users/bot/.botmux/data/.send-cred-cli_other2');
     expect(d).toContain('/Users/bot/.botmux/bots/cli_other1');   // other bot's BOT_HOME
+    // other bots' send-cred now lives INSIDE their BOT_HOME → covered by the BOT_HOME
+    // deny above, no separate per-file deny; the old data-dir location is gone.
+    expect(d).not.toContain('/Users/bot/.botmux/data/.send-cred-cli_other2');
     expect(d).toContain('/Users/bot/.botmux/data/frozen-cards');
     expect(d).toContain('/Users/bot/.botmux/data/turn-sends');
     // NOT denied — the whole tree, own data, and the tooling botmux CLI needs
@@ -299,6 +302,34 @@ describe('v2 HYBRID model (buildV2DenyPaths)', () => {
     expect(d).not.toContain('/Users/bot/.botmux/data/sessions-cli_self.json');
     expect(d).not.toContain('/Users/bot/.botmux/config.json');         // config readable
     expect(d).not.toContain('/Users/bot/.lark-cli-bots/cli_self');     // own lark readable
+  });
+
+  it('send-cred lives inside BOT_HOME (unified per-bot private storage)', () => {
+    // The botmux-send credential is stored in the bot's BOT_HOME, the SAME private
+    // storage as its CLI data — one deny mechanism protects both (and any future
+    // per-bot secret, e.g. a github token, dropped in there). sendCredFilePath takes
+    // SESSION_DATA_DIR and derives BOTMUX_HOME (its parent) internally, matching the
+    // worker's BOT_HOME = botHomePath(dirname(SESSION_DATA_DIR)).
+    expect(sendCredFilePath('/Users/bot/.botmux/data', 'cli_self'))
+      .toBe('/Users/bot/.botmux/bots/cli_self/send-cred.json');
+    const d = buildV2DenyPaths(v2());
+    // an OTHER bot's send-cred sits under its denied BOT_HOME → no separate deny needed
+    expect(sendCredFilePath('/Users/bot/.botmux/data', 'cli_other2'))
+      .toBe('/Users/bot/.botmux/bots/cli_other2/send-cred.json');
+    expect(d).toContain('/Users/bot/.botmux/bots/cli_other2');
+    // own send-cred is under own BOT_HOME → readable (own BOT_HOME never denied)
+    expect(d).not.toContain('/Users/bot/.botmux/bots/cli_self');
+  });
+
+  it('send-cred path follows a customized SESSION_DATA_DIR (review: codex)', () => {
+    // BOTMUX_HOME is defined as dirname(SESSION_DATA_DIR); a custom data dir must
+    // still resolve worker-write and deny to the SAME BOT_HOME — no hardcoded ~/.botmux.
+    expect(sendCredFilePath('/var/botmux/data', 'cli_x'))
+      .toBe('/var/botmux/bots/cli_x/send-cred.json');
+    // v1 legacy deny (buildReadDenyPaths) must derive the same location from its sd
+    const d = buildReadDenyPaths(ctx({ sessionDataDir: '/var/botmux/data' }));
+    expect(d).toContain('/var/botmux/bots/cli_other1/send-cred.json');
+    expect(d).not.toContain('/Users/bot/.botmux/bots/cli_other1/send-cred.json');
   });
 
   it('folds extraDenyPaths into the deny set (no allow carve-out to override them)', () => {

@@ -4407,12 +4407,14 @@ function spawnCli(cfg: Extract<DaemonToWorker, { type: 'init' }>): void {
           p.startsWith('~') ? join(homedir(), p.slice(1)) : p,
         ),
       };
-      // Write this bot's OWN send-credential to a file the isolated CLI can read
-      // (its own; siblings' are denied). `botmux send` reads the secret from here
-      // instead of bots.json — so the secret never travels via env/argv (no
-      // cross-bot `ps aux` leak) and the CLI never needs to escape the sandbox.
+      // Write this bot's OWN send-credential into its BOT_HOME (the same per-bot
+      // private storage as its CLI data; siblings' BOT_HOMEs are whole-denied).
+      // `botmux send` reads the secret from here instead of bots.json — so the
+      // secret never travels via env/argv (no cross-bot `ps aux` leak) and the CLI
+      // never needs to escape the sandbox.
       try {
         const credPath = sendCredFilePath(sessionDataDir, cfg.larkAppId);
+        mkdirSync(dirname(credPath), { recursive: true });
         writeFileSync(
           credPath,
           JSON.stringify({ larkAppId: cfg.larkAppId, larkAppSecret: cfg.larkAppSecret, brand: cfg.brand }),
@@ -4518,8 +4520,8 @@ function spawnCli(cfg: Extract<DaemonToWorker, { type: 'init' }>): void {
   childEnv.BOTMUX_LARK_APP_ID = cfg.larkAppId;
   childEnv.BOTMUX_ROOT_MESSAGE_ID = cfg.rootMessageId;
   // NOTE: under read isolation `botmux send` gets this bot's secret from the worker-
-  // written cred FILE (.send-cred-<appId>, see sendCredFilePath) keyed by the
-  // BOTMUX_LARK_APP_ID above — NOT from the env. The secret is deliberately kept OUT
+  // written cred FILE in its BOT_HOME (send-cred.json, see sendCredFilePath) located
+  // via the BOTMUX_LARK_APP_ID above — NOT from the env. The secret is deliberately kept OUT
   // of the child env so a sibling bot cannot recover it via `ps eww` / process-info
   // (Seatbelt denies file reads, not process-metadata enumeration). Non-isolated bots
   // read bots.json unchanged (send fallback in cli.ts).

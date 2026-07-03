@@ -84,12 +84,22 @@ export function defaultCredentialDenyPaths(homeDir: string): string[] {
 }
 
 /** Path of the per-bot `botmux send` credential file the worker writes under read
- *  isolation. Lives directly in SESSION_DATA_DIR (not a denied subdir) so the bot
- *  can read its OWN; {@link buildReadDenyPaths} denies every OTHER bot's. The
+ *  isolation. Lives INSIDE the bot's BOT_HOME ({@link botHomePath}) — the same
+ *  per-bot private storage as its redirected CLI data — so the bot reads its OWN
+ *  while every OTHER bot's is already covered by the whole-BOT_HOME deny (no
+ *  separate per-file deny needed). This makes BOT_HOME the single private-storage
+ *  primitive for any per-bot secret (send cred, future github token, …). The
  *  secret reaches `botmux send` only through this file — never env/argv — so it is
- *  not exposed to sibling bots via `ps aux` / `tmux show-environment`. */
+ *  not exposed to sibling bots via `ps aux` / `tmux show-environment`.
+ *
+ *  Takes SESSION_DATA_DIR (what every caller has) and derives BOTMUX_HOME as its
+ *  parent — the SAME definition the worker uses for BOT_HOME
+ *  (`botHomePath(dirname(SESSION_DATA_DIR))`). Centralizing the derivation here
+ *  keeps worker-write / CLI-read / deny in lock-step even for a customized
+ *  SESSION_DATA_DIR. */
 export function sendCredFilePath(sessionDataDir: string, appId: string): string {
-  return `${sessionDataDir.replace(/\/+$/, '')}/.send-cred-${appId}`;
+  const botmuxHome = sessionDataDir.replace(/\/+$/, '').replace(/\/[^/]+$/, '');
+  return `${botHomePath(botmuxHome, appId)}/send-cred.json`;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -106,7 +116,7 @@ export function sendCredFilePath(sessionDataDir: string, appId: string): string 
 // ─────────────────────────────────────────────────────────────────────────────
 
 /** A Feishu app id is safe to use as a path segment. Enforced because appId is
- *  concatenated into BOT_HOME / sessions-<appId>.json / .send-cred-<appId> paths and
+ *  concatenated into BOT_HOME (and its send-cred.json) / sessions-<appId>.json paths and
  *  into Seatbelt allow rules — a `/` or `..` (from a hand-edited bots.json) would
  *  traverse out of BOTMUX_HOME or mis-scope a carve-out. Real Feishu app ids match. */
 const SAFE_APP_ID = /^[A-Za-z0-9._-]+$/;
@@ -188,8 +198,8 @@ export function buildV2DenyPaths(ctx: V2IsolationContext): string[] {
       `${h}/.lark-cli`,                // default lark config (may hold creds)
       ...others.map((id) => `${h}/.lark-cli-bots/${id}`),   // other bots' lark configs
       ...others.map((id) => `${sd}/sessions-${id}.json`),   // other bots' session stores
-      ...others.map((id) => sendCredFilePath(sd, id)),      // other bots' send-creds
       ...others.map((id) => botHomePath(bh, id)),           // other bots' BOT_HOMEs
+                                                            //   (also covers their send-cred.json inside)
       `${sd}/sessions.json`,           // legacy shared store
       `${sd}/frozen-cards`,            // conversation content (all bots')
       `${sd}/turn-sends`,
@@ -236,8 +246,8 @@ export function buildReadDenyPaths(ctx: ReadIsolationContext): string[] {
     `${sd}/sessions.json`,
     // Other bots' session metadata (own sessions-<self>.json stays readable)
     ...ctx.otherAppIds.map((id) => `${sd}/sessions-${id}.json`),
-    // Other bots' `botmux send` credential files (mirror sessions-<other>): the
-    // worker writes each isolated bot's OWN secret here so `botmux send` can auth
+    // Other bots' `botmux send` credential files (now inside each BOT_HOME): the
+    // worker writes each isolated bot's OWN secret there so `botmux send` can auth
     // WITHOUT reading bots.json and WITHOUT the secret ever touching env/argv
     // (which `ps aux` would leak cross-bot). Own file stays readable; deny others'.
     ...ctx.otherAppIds.map((id) => sendCredFilePath(sd, id)),

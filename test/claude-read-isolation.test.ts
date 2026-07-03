@@ -1,7 +1,11 @@
 /**
- * Claude adapter × read-isolation: buildArgs merges the per-bot sandbox +
- * permissions.deny into the process-level --settings WITHOUT clobbering the
- * existing bypassPermissions keys.
+ * Claude adapter × read-isolation. In v2 Claude isolates via the EXTERNAL Seatbelt
+ * wrapper (readIsolationMechanism: 'external-wrapper'), NOT by injecting a sandbox
+ * block into --settings — buildArgs deliberately ignores the readIsolation context
+ * (`void readIsolation`). So the only adapter-level contract left to assert is that
+ * it declares the capability and never smuggles a sandbox block into --settings.
+ * (The old v1 --settings-injection tests were removed when Claude moved to the
+ * external wrapper.)
  */
 import { describe, it, expect, vi } from 'vitest';
 
@@ -31,21 +35,12 @@ describe('claude-code adapter × read isolation', () => {
     expect(adapter.supportsReadIsolation).toBe(true);
   });
 
-  it('injects sandbox + permissions.deny into --settings when readIsolation is passed', () => {
+  it('does NOT inject a sandbox block into --settings even when readIsolation is passed (v2 uses the external wrapper)', () => {
     const args = adapter.buildArgs({ sessionId: 's', resume: false, readIsolation: ctx });
     const s = settingsOf(args);
-    expect(s.sandbox?.enabled).toBe(true);
-    expect(s.sandbox?.failIfUnavailable).toBe(true);
-    expect(s.sandbox?.filesystem?.denyRead).toContain('/Users/bot/.botmux/bots.json');
-    expect(s.permissions?.deny).toContain('Read(//Users/bot/.claude/projects/**)');
-    expect(s.permissions?.deny).toContain('Read(//Users/bot/.lark-cli-bots/cli_other/**)');
-  });
-
-  it('preserves bypassPermissions while adding deny (merge, not overwrite)', () => {
-    const args = adapter.buildArgs({ sessionId: 's', resume: false, readIsolation: ctx });
-    const s = settingsOf(args);
+    expect(s.sandbox).toBeUndefined();
+    // --settings still carries the bypassPermissions default (unrelated to isolation)
     expect(s.permissions?.defaultMode).toBe('bypassPermissions');
-    expect(Array.isArray(s.permissions?.deny)).toBe(true);
   });
 
   it('does not add sandbox block when readIsolation is absent', () => {
