@@ -2767,18 +2767,23 @@ function handlePlatformTeamSync(payload: PlatformTeamSyncMessage): void {
   void maybeAnnounceHallPresence();
 }
 
-// 大厅打卡（union_id 自学触发）节流：per-bot 最小间隔 + 每进程尝试上限。打卡消息
-// 本身只有 bot 可见（大厅是 bot-only 群），上限只是防御发送持续失败时的无谓重试。
+// 大厅打卡节流：按「发送 bot ×大厅」记最小间隔与尝试上限——按 bot 记会让多团队
+// bot 在第一个大厅烧光预算后，新加入的大厅永远轮空（实测踩过）。上限防御发送
+// 持续失败/点名解析不到时的无谓重试；进程重启重置。
 const hallAnnounceState = new Map<string, { lastAt: number; tries: number }>();
 const HALL_ANNOUNCE_MIN_INTERVAL_MS = 10 * 60 * 1000;
 const HALL_ANNOUNCE_MAX_TRIES = 6;
 
 /**
- * 让还没学到自己 union_id 的本地 bot 去团队大厅发一条打卡消息：自家消息回声
- * （event-dispatcher isSelfMessage 分支）带回 sender.sender_id.union_id → 落盘
- * bot-union-ids → 下个心跳上报平台进 roster。一辈子一次；学到即永久跳过。
- * 顺带的副作用：大厅在各成员机器的 team-groups 里（team-sync 镜像），其他
- * daemon 收到这条消息会直接 recordTeamBot 学到该 bot——roster 之外的即时互学。
+ * 大厅打卡编排（union_id 自学）。实测大厅（bot-only 群）只有「直接点名 @」会
+ * 投递事件——普通消息、自 @、@all 全部静默，自家回声在大多数应用上永远等不来。
+ * 机制（与 event-dispatcher 的 hall 分支对偶）：
+ * - 每个大厅里每个未入册的本机 bot X 发打卡，点名 @ 同大厅其他本机成员
+ *   （open_id 由 X 自己 daemon 的 cross-ref 解析，per-app），并带 #hall-echo；
+ * - 被点到的未入册 bot 直接从 mentions[] 学到自己的 union_id；
+ * - 收到 #hall-echo 的 bot 回 @ 打卡者一次（open_id 取自事件 sender_id，无需
+ *   cross-ref）→ 打卡者从回执学到自己。任一方向可解析即收敛。
+ * 学到后随心跳上报平台进 roster；全部入册后跳过。跨机器成员由对方机器编排。
  */
 async function maybeAnnounceHallPresence(): Promise<void> {
   try {
@@ -2790,23 +2795,32 @@ async function maybeAnnounceHallPresence(): Promise<void> {
     for (const team of teams) {
       const hallChatId = team.groupChatIds[0];
       if (!hallChatId) continue;
-      for (const bot of team.bots) {
-        if (!localBotIds.has(bot.appId)) continue;            // 别的机器的 bot
-        if (getBotUnionId(dataDir, bot.appId)) continue;      // 已学到 → 永久跳过
-        const st = hallAnnounceState.get(bot.appId);
+      const locals = team.bots.filter(b => localBotIds.has(b.appId));
+      for (const bot of locals) {
+        if (getBotUnionId(dataDir, bot.appId)) continue;      // 已入册 → 永久跳过
+        const throttleKey = `${bot.appId}::${hallChatId}`;
+        const st = hallAnnounceState.get(throttleKey);
         if (st && (now - st.lastAt < HALL_ANNOUNCE_MIN_INTERVAL_MS || st.tries >= HALL_ANNOUNCE_MAX_TRIES)) continue;
-        hallAnnounceState.set(bot.appId, { lastAt: now, tries: (st?.tries ?? 0) + 1 });
+        hallAnnounceState.set(throttleKey, { lastAt: now, tries: (st?.tries ?? 0) + 1 });
+        // 点名目标：同大厅其他本机成员，已入册的优先（它们会回执教我），至多 4 个。
+        const targets = locals
+          .filter(b => b.appId !== bot.appId && b.name)
+          .sort((a, b2) => Number(!!getBotUnionId(dataDir, b2.appId)) - Number(!!getBotUnionId(dataDir, a.appId)))
+          .slice(0, 4)
+          .map(b => b.name as string);
         try {
           const r = await proxyToDaemon(bot.appId, '/api/platform/hall-announce', {
             method: 'POST',
             headers: { 'content-type': 'application/json' },
-            body: JSON.stringify({ chatId: hallChatId }),
+            body: JSON.stringify({ chatId: hallChatId, mentionNames: targets }),
           });
-          const j = await r.json().catch(() => ({} as { ok?: boolean; error?: string }));
+          const j = await r.json().catch(() => ({} as { ok?: boolean; error?: string; mentioned?: string[]; unresolved?: string[]; skipped?: string }));
           if (!r.ok || !(j as { ok?: boolean }).ok) {
             logger.warn(`[platform-tunnel] 大厅打卡失败 bot=${bot.appId} chat=${hallChatId.substring(0, 12)}: ${(j as { error?: string }).error ?? r.status}`);
           } else {
-            logger.info(`[platform-tunnel] 大厅打卡已发 bot=${bot.appId} chat=${hallChatId.substring(0, 12)}（等待回声学 union_id）`);
+            const mentioned = (j as { mentioned?: string[] }).mentioned ?? [];
+            const unresolved = (j as { unresolved?: string[] }).unresolved ?? [];
+            logger.info(`[platform-tunnel] 大厅打卡已发 bot=${bot.appId} chat=${hallChatId.substring(0, 12)}${mentioned.length ? ` 点名=[${mentioned.join(',')}]` : ''}${unresolved.length ? ` 未解析=[${unresolved.join(',')}]` : ''}`);
           }
         } catch (e) {
           logger.warn(`[platform-tunnel] 大厅打卡请求异常 bot=${bot.appId}: ${(e as Error).message}`);

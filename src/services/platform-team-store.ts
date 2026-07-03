@@ -134,6 +134,17 @@ export function listPlatformTeams(dataDir: string): PlatformTeamSyncTeam[] {
   return readFile(dataDir)?.teams ?? [];
 }
 
+/** 该 chat 是否是某个平台团队的机器人大厅。大厅是身份登记回声室：bot 发的消息
+ *  只用于学习（union_id / cross-ref / recordTeamBot），绝不当任务路由。 */
+export function isPlatformHallChat(dataDir: string, chatId: string | undefined): boolean {
+  const id = (chatId ?? '').trim();
+  if (!id) return false;
+  const data = readFile(dataDir);
+  if (!data) return false;
+  for (const t of data.teams) if (t.groupChatIds.includes(id)) return true;
+  return false;
+}
+
 /** Is `unionId` a bot in ANY platform team this machine belongs to? The auth
  *  gate's platform-mode predicate — membership-driven, no expiry. */
 export function isPlatformTeamBot(dataDir: string, unionId: string | undefined): boolean {
