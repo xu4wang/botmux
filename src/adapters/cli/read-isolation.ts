@@ -98,7 +98,8 @@ export interface V2IsolationContext {
  *  (the agent's botmux CLI needs its config/registry/pm2/data structure) — instead its
  *  cross-bot-SENSITIVE parts are denied surgically: bots.json, logs, other bots' lark
  *  configs / session files / send-creds / BOT_HOMEs, and the shared conversation-content
- *  dirs. Own BOT_HOME + own session/cred + config/registry stay readable by default.
+ *  dirs (frozen-cards, queues, attachments, whiteboards, …). Own BOT_HOME + own
+ *  session/cred + own attachments bucket + config/registry stay readable by default.
  *  Plus the system-credential stores. Everything else (code/repos/runtime) stays open.
  *
  *  NOTE: per-bot session stores (`sessions-<appId>.json`) are denied by PATTERN — see
@@ -148,10 +149,23 @@ export function buildV2DenyPaths(ctx: V2IsolationContext): string[] {
       `${bh}/bots`,
       `${sd}/sessions.json`,           // legacy shared store
       `${sd}/frozen-cards`,            // conversation content (all bots')
-      `${sd}/turn-sends`,
+      `${sd}/turn-sends`,              // CLI only APPENDS markers here — read-deny is safe
       `${sd}/crash-diagnostics`,
+      // All bots' Feishu-uploaded files. Own per-appId bucket (attachments/<self>/) is
+      // re-allowed via buildV2CarveOuts; siblings' buckets + the legacy flat
+      // per-messageId layout stay denied.
       `${sd}/attachments`,
       `${sd}/whiteboards`,
+      // Queued inbound messages (queues/<rootMessageId>.jsonl = full LarkMessage
+      // content for EVERY bot). Daemon-side only — the CLI never reads it.
+      `${sd}/queues`,
+      // Seatbelt profiles + reattach markers: filenames/rules enumerate sibling
+      // session ids and appIds. sandbox-exec parses the profile BEFORE applying it,
+      // and the markers are read by the daemon — the sandboxed CLI never reads these.
+      `${sd}/read-isolation`,
+      `${sd}/schedules.json`,          // all bots' scheduled prompts (conversation-adjacent)
+      `${bh}/feishu-session.json`,     // Feishu web login session (setup automation) — can mint bots
+      `${bh}/.dashboard-token`,        // dashboard admin bearer token (CLI never reads it)
       // NOTE: extraDenyPaths (readDenyExtraPaths) are NOT here — they go to
       // buildV2CarveOuts().finalDenyPaths so they win over the own-BOT_HOME allow.
     ]
@@ -186,6 +200,15 @@ export function buildV2DenyRegexes(ctx: V2IsolationContext): string[] {
     // bots.json.bak / .tmp / .bak.<suffix> but NOT the exact bots.json (that is
     // the subpath deny's job) and NOT an unrelated `bots.jsonx`.
     `^${escapeForRegex(bh)}/bots\\.json\\.`,
+    // LEGACY pre-BOT_HOME send-cred files (`<sd>/.send-cred-<appId>`): current
+    // builds write send-cred.json inside BOT_HOME, but leftovers from older
+    // builds still carry live per-bot send credentials at the data root.
+    `^${escapeForRegex(sd)}/\\.send-cred-`,
+    // Per-bot user display-name caches (`identities-<appId>.json`): open_id→name
+    // PII of every bot's interlocutors. The CLI never reads them (daemon-side
+    // prompt injection only), so the OWN file gets NO carve-out — the whole
+    // filename class is denied.
+    `^${escapeForRegex(sd)}/identities-[^/]+\\.json$`,
   ];
 }
 
@@ -214,10 +237,14 @@ export function buildV2CarveOuts(ctx: V2IsolationContext): {
       // Own routing metadata (`botmux send` reads it to route replies); siblings'
       // stay denied by the buildV2DenyRegexes filename pattern.
       `${sd}/sessions-${self}.json`,
+      // Own Feishu-upload bucket (attachments/<appId>/<messageId>/…) — the agent must
+      // read files the user uploads in chat. getAttachmentsDir keys the bucket on the
+      // appId precisely so this spawn-time-static carve-out can exist.
+      `${sd}/attachments/${self}`,
     ],
     // file-read-metadata on the wholesale-denied parents so the CLI/skill can realpath()
     // through them WITHOUT `ls` (enumeration) leaking.
-    traverseDirs: [`${bh}/bots`, `${h}/.lark-cli-bots`],
+    traverseDirs: [`${bh}/bots`, `${h}/.lark-cli-bots`, `${sd}/attachments`],
     finalDenyPaths: (ctx.extraDenyPaths ?? [])
       .map(normalizeIsolationPath)
       .filter((p): p is string => !!p),
