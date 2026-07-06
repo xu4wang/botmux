@@ -7,6 +7,7 @@ export const DASHBOARD_LOCALE_STORAGE_KEY = 'botmux.dashboard.locale';
 const zh: DashboardMessages = {
   'app.name': 'botmux',
   'app.subtitle': '飞书 AI CLI 控制台',
+  'nav.docs': '文档',
   'time.secondsAgo': '{value} 秒前',
   'time.minutesAgo': '{value} 分钟前',
   'time.hoursAgo': '{value} 小时前',
@@ -1433,6 +1434,7 @@ const zh: DashboardMessages = {
 const en: DashboardMessages = {
   'app.name': 'botmux',
   'app.subtitle': 'Feishu AI CLI Control',
+  'nav.docs': 'Docs',
   'time.secondsAgo': '{value}s ago',
   'time.minutesAgo': '{value}m ago',
   'time.hoursAgo': '{value}h ago',
