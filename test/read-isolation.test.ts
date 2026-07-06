@@ -68,7 +68,10 @@ describe('v2 HYBRID model (buildV2DenyPaths)', () => {
     expect(d).toContain('/Users/bot/.botmux/data/read-isolation'); // profiles enumerate sibling sessions
     expect(d).toContain('/Users/bot/.botmux/data/schedules.json'); // all bots' scheduled prompts
     expect(d).toContain('/Users/bot/.botmux/feishu-session.json'); // Feishu web login session (can mint bots)
+    expect(d).toContain('/Users/bot/.botmux/.dashboard-secret');   // loopback-HMAC signing key (mints write tokens)
     expect(d).toContain('/Users/bot/.botmux/.dashboard-token');    // dashboard admin bearer token
+    // `.dashboard-port` is a bare port number (no credential value) — must stay readable
+    expect(d).not.toContain('/Users/bot/.botmux/.dashboard-port');
     // NO per-sibling enumeration anywhere: sibling session stores are covered by the
     // filename-pattern regex (buildV2DenyRegexes), not per-appId path entries.
     expect(d.some((p) => p.includes('cli_other'))).toBe(false);

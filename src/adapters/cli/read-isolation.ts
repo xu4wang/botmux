@@ -165,7 +165,17 @@ export function buildV2DenyPaths(ctx: V2IsolationContext): string[] {
       `${sd}/read-isolation`,
       `${sd}/schedules.json`,          // all bots' scheduled prompts (conversation-adjacent)
       `${bh}/feishu-session.json`,     // Feishu web login session (setup automation) — can mint bots
-      `${bh}/.dashboard-token`,        // dashboard admin bearer token (CLI never reads it)
+      // The dashboard admin credentials. `.dashboard-secret` signs the loopback-HMAC
+      // that gates `/__cli/rotate` AND the daemon-IPC write-link routes — the ipc-server
+      // comment (dashboard-ipc-server.ts) explicitly relies on the sandbox hiding it to
+      // "keep a sandboxed worker from minting write tokens" for sessions it doesn't own
+      // (a cross-bot escalation reachable by a semi-trusted conversant driving the agent).
+      // Only owner-facing admin verbs (`botmux dashboard`/`term-link`) sign with it — the
+      // agent's send/list/status never do, so denying it costs the agent nothing. Its
+      // sibling `.dashboard-token` (dashboard bearer) is denied for the same reason;
+      // `.dashboard-port` is just a port number (no credential value) → left readable.
+      `${bh}/.dashboard-secret`,
+      `${bh}/.dashboard-token`,
       // NOTE: extraDenyPaths (readDenyExtraPaths) are NOT here — they go to
       // buildV2CarveOuts().finalDenyPaths so they win over the own-BOT_HOME allow.
     ]

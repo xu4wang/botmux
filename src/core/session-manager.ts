@@ -198,7 +198,18 @@ export async function downloadResources(larkAppId: string, messageId: string, re
   if (resources.length === 0) return { attachments: [], needLogin: false };
 
   const attachments: LarkAttachment[] = [];
-  const dir = getAttachmentsDir(larkAppId, messageId);
+  // Resolve the per-appId bucket up front. assertSafeAppId (inside getAttachmentsDir)
+  // throws on a path-unsafe appId (only reachable via a hand-edited bots.json — real
+  // Feishu ids always pass). SOFT-fail rather than let it propagate: an invalid appId
+  // must not sink the whole message (event-dispatcher would drop the text too). Log and
+  // return no attachments, same shape as a download failure — the text still processes.
+  let dir: string;
+  try {
+    dir = getAttachmentsDir(larkAppId, messageId);
+  } catch (err: any) {
+    logger.warn(`[${larkAppId}] skipping attachment download — unusable appId as path segment: ${err.message}`);
+    return { attachments: [], needLogin: false };
+  }
   let needLogin = false;
 
   for (const res of resources) {
