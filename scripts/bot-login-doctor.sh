@@ -107,15 +107,43 @@ printf '文件源 access token 剩余: %s 分钟\n' "$EXP"
 # ── 2. 【第一道闸】keychain 不变量:条目必须不存在 ──
 # 只要条目在,native bot(非隔离/cc-connect)就读它、迟早随 refresh 轮换分裂 —— 与文件好坏无关,
 # 所以先于花 API 的功能测试处理。用 find(不带 -w)只查存在:SSH 查得到但删不了(见 header【2】)。
+# GUI(Aqua)会话下能读出 keychain(可能弹授权框)→ 走【安全恢复】:合并最新 token→删→suspend。
+# ⚠️ 绝不盲删:keychain 重现时好 token 常在 keychain、文件陈旧,直接删会让全员回退陈旧文件→全掉。
 if [ "$HAS_SECURITY" = 1 ] && security find-generic-password -s "$KC_SVC" >/dev/null 2>&1; then
-  printf '⚠️  keychain 条目【存在】—— 有人在 GUI 登录过 CC CLI,分裂源\n'
-  hr
-  printf '诊断: 【最高优先级:先删 keychain】\n'
-  printf '  只要它在,native bot 就读它、随 refresh 轮换必然分裂,与文件当前好坏无关。\n'
-  printf '  必须在 *GUI Terminal* 里删(SSH 删不了):\n'
-  printf '    security delete-generic-password -s "%s"\n' "$KC_SVC"
-  printf '  删完后重跑本脚本 —— 它会继续验证文件源并按需重播种。\n'
-  exit 3
+  printf '⚠️  keychain 条目【存在】—— 有人 GUI 登录 / bot 自刷,分裂源\n'
+  KCRAW="$(security find-generic-password -s "$KC_SVC" -w 2>/dev/null)"
+  if [ -n "$KCRAW" ] && printf '%s' "$KCRAW" | node -e 'let s="";process.stdin.on("data",d=>s+=d);process.stdin.on("end",()=>{try{Number(JSON.parse(s).claudeAiOauth.expiresAt);process.exit(0)}catch(e){process.exit(1)}})'; then
+    # ── 能读出(GUI 授权)→ 安全恢复:比新鲜度,合并最新到文件,再删,再 suspend ──
+    KCEXP=$(printf '%s' "$KCRAW" | node -e 'let s="";process.stdin.on("data",d=>s+=d);process.stdin.on("end",()=>{try{console.log(Number(JSON.parse(s).claudeAiOauth.expiresAt)||0)}catch(e){console.log(0)}})')
+    FILEEXP=$(node -e 'try{console.log(Number(JSON.parse(require("fs").readFileSync(process.argv[1])).claudeAiOauth.expiresAt)||0)}catch(e){console.log(0)}' "$CRED")
+    if [ "${KCEXP:-0}" -gt "${FILEEXP:-0}" ]; then NEWER=kc; printf '   ✅ 能读出 keychain;keychain 更新、文件陈旧 → 需先把 keychain 合并进文件\n'
+    else NEWER=file; printf '   ✅ 能读出 keychain;文件已是最新 → 直接删 keychain 即可\n'; fi
+    hr
+    printf '诊断: 【keychain 重现,GUI 安全恢复:合并最新 token → 删 keychain → suspend all】\n'
+    if [ "$APPLY" = 1 ]; then
+      if [ "$NEWER" = kc ]; then
+        printf '%s' "$KCRAW" > "$CRED.tmp.$$" && chmod 600 "$CRED.tmp.$$" && mv -f "$CRED.tmp.$$" "$CRED" && printf '  ↳ keychain 最新 token 已写入共享文件\n'
+      fi
+      for d in "$HOME"/.botmux/bots/*/claude/.credentials.json; do [ -e "$d" ] && cp "$CRED" "$d.tmp.$$" && chmod 600 "$d.tmp.$$" && mv -f "$d.tmp.$$" "$d" && printf '  ↳ 播种 %s\n' "$(echo "$d"|sed -E 's#.*/cli_([^/]+)/.*#cli_\1#')"; done
+      if security delete-generic-password -s "$KC_SVC" >/dev/null 2>&1; then printf '  ✅ keychain 已删(收敛回单一文件源)\n'; else printf '  ⚠️ keychain 删除失败(授权框未点允许?);文件已合并,可手动删后再 suspend\n'; fi
+      "$BOTMUX_BIN" suspend all >/dev/null 2>&1 && printf '  ↳ suspend all 完成\n'
+      CC=$(launchctl list 2>/dev/null | grep -i cc-connect | awk '{print $3}' | head -1)
+      [ -n "$CC" ] && launchctl kickstart -k "gui/$UID_N/$CC" >/dev/null 2>&1 && printf '  ↳ cc-connect 重启\n'
+      printf '✅ 恢复完成。飞书确认各 bot。\n'
+      exit 0
+    else
+      printf '  → 跑 --fix 执行:合并最新 token 到文件 + 删 keychain + suspend all(此会话能读出,可自动)\n'
+      exit 3
+    fi
+  else
+    # ── 读不出(SSH/未授权)→ 只能人工 GUI 处理 ──
+    hr
+    printf '诊断: 【keychain 重现,但当前会话读不出它(SSH/未授权,claude-only ACL)】\n'
+    printf '  ⚠️ 别在 SSH 盲删:keychain 可能握最新 token、文件陈旧,盲删→全员回退陈旧文件→全掉。\n'
+    printf '  请在 *GUI Terminal* 里跑:  bot-login-doctor --fix\n'
+    printf '  (GUI 下会:读 keychain→取最新 token 合并进文件→删 keychain→suspend all)\n'
+    exit 3
+  fi
 fi
 printf '%s\n' "$([ "$HAS_SECURITY" = 1 ] && echo '✅ keychain 无条目(单一文件源不变量 OK)' || echo 'ℹ️  非 macOS,无 keychain(天然单一文件源)')"
 
