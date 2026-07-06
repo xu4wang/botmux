@@ -82,6 +82,20 @@ leftmin(){ node -e 'try{const o=JSON.parse(require("fs").readFileSync(process.ar
 
 LEFT=$(leftmin "$CRED"); OLD=$(accfp "$CRED")
 log "共享凭证 acc=$OLD 剩余 ${LEFT} 分钟"
+
+# ── keychain 异常探测(每次运行都查,不受 margin/mode 影响)──
+# 稳态下 keychain 应始终不存在(已删 + cron 保鲜→无 bot 自刷)。一旦重现 = cron 漏跑致某 bot
+# 自刷、或有人 GUI /login → 分裂正在形成,趁 bot 还没掉线早报警。注:重现时好 token 常在
+# keychain(bot 刚刷)、文件反而陈旧,且原生写入的 keychain 是 claude-only ACL(automation
+# 读它 exit36)→ 本脚本只报警,不盲目自动删(删了会让全员回退陈旧文件→全掉),人工 GUI 处理。
+KC_SVC="${CLAUDE_KEYCHAIN_SERVICE:-Claude Code-credentials}"
+if command -v security >/dev/null 2>&1 && security find-generic-password -s "$KC_SVC" >/dev/null 2>&1; then
+  log "⚠️⚠️ keychain 条目【重现】($KC_SVC)—— 单一文件源不变量被破坏,分裂风险!"
+  log "     成因:cron 漏跑致 bot 自刷 或 有人 GUI /login。好 token 多半在 keychain、文件已陈旧。"
+  log "     处理(GUI):security delete-generic-password -s \"$KC_SVC\"  然后 SSH /login + bot-login-doctor --fix"
+  date '+%Y-%m-%dT%H:%M:%S keychain-reappeared' >> "$HOME/.botmux/logs/cred-keychain-alerts.log" 2>/dev/null
+fi
+
 [ "$MODE" = check ] && { log "check 模式,结束"; exit 0; }
 if [ "$MODE" = refresh ]; then
   case "$LEFT" in ''|*[!0-9-]*) log "expiresAt 解析失败(LEFT=$LEFT),跳过"; exit 3 ;; esac
