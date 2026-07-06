@@ -4,16 +4,23 @@
 #   用法: bot-cred-refresh.sh          # 近到期才刷(定时任务默认)
 #         bot-cred-refresh.sh --force  # 无视到期,立刻刷+播(验证/手动)
 #         bot-cred-refresh.sh --check  # 只报到期情况,不刷不播(安全)
-#   环境: MARGIN_MIN(默认60,剩余分钟数≤它才刷) SUSPEND(=1 播种后 suspend all 强制重读)
+#   环境: MARGIN_MIN(默认60,剩余分钟数≤它才刷) SUSPEND(默认1,播种后 suspend all 强制重读)
 #         CLAUDE_CREDENTIALS / CLAUDE_BIN / BOTMUX_BIN
 #
 # 原理见记忆 claude-cred-keychain-file-split。要点:
 #  ▸ 单一刷新权威:只有本脚本刷,bot 从不自己刷 → 没有并发轮换竞争。
 #  ▸ 刷新手段:把凭证副本的 expiresAt 改成过去 → 用它跑 claude -p,骗 claude 用自己的
-#    OAuth 逻辑刷新(robust,不逆向端点)→ 从副本抓回新 {AT,RT}。Background 会话下
-#    claude 写不了 keychain、只写文件,所以能稳稳抓到。(实测伪过期能触发刷新)
+#    OAuth 逻辑刷新(robust,不逆向端点)→ 从副本抓回新 {AT,RT}。
+#  ▸ 【沙箱 deny-keychain】跑刷新的 claude:launchd 任务其实在 Aqua 会话、有 keychain 写权限,
+#    无沙箱的 claude 会把刷新写进 keychain(中午翻车根因)→ 套 Seatbelt deny ~/Library/Keychains
+#    逼它只写文件,我们才抓得到。(隔离 bot 每天以同机制刷新写文件为证)
 #  ▸ 只有确认"新 token 已捕获且有效"才动 live 文件;否则 live 不动、安全退出。
+#  ▸ SUSPEND=1(默认):播种后 suspend all,让正在跑的 bot 冷启动重读新 token —— 否则进程
+#    内存里攥旧 token,文件换了也不重读,到期即掉(中午 SUSPEND=0 的第二个 bug)。
 #
+# ⚠️ 残留脆弱点:正确性押在"cron 可靠地在到期前刷新"。cron 漏一个周期(Mac 长睡)→ 某 bot
+#    到期自刷 → 非隔离 bot 重建 keychain / 隔离 bot 轮换 RT → 分裂回来,需 bot-login-doctor 兜底。
+#    彻底根治仍是 ANTHROPIC_API_KEY(不刷新不轮换)。
 # ══════════════════════════════════════════════════════════════════════════════
 # 定时任务(launchd)—— 其它 agent 按此安装 / 管理 / 排查
 # ══════════════════════════════════════════════════════════════════════════════
@@ -44,7 +51,7 @@ STATE_JSON="$HOME/.claude/.claude.json"
 CLAUDE_BIN="${CLAUDE_BIN:-$(command -v claude || echo /opt/homebrew/bin/claude)}"
 BOTMUX_BIN="${BOTMUX_BIN:-$(command -v botmux || echo "$HOME/.botmux/bin/botmux")}"
 MARGIN_MIN="${MARGIN_MIN:-60}"
-SUSPEND="${SUSPEND:-0}"
+SUSPEND="${SUSPEND:-1}"          # 默认 1:播种后 suspend all 强制冷启动重读,消除"进程攥旧 token"掉线(中午 SUSPEND=0 的教训)
 UID_N="$(id -u)"
 LOG="$HOME/.botmux/logs/cred-refresh.log"
 LOCKDIR="$HOME/.botmux/cred-refresh.lock.d"
@@ -81,13 +88,25 @@ if [ "$MODE" = refresh ]; then
   if [ "$LEFT" -gt "$MARGIN_MIN" ]; then log "未进入刷新窗口(剩 ${LEFT}>${MARGIN_MIN}),no-op 退出"; exit 0; fi
 fi
 
-# ── 刷新:伪过期副本 → claude 刷 → 抓新 token ──
+# ── 刷新:伪过期副本 → 【沙箱 deny keychain】里跑 claude → 逼它写文件而非 keychain → 抓新 token ──
+# 中午翻车根因:无沙箱的 claude 有 keychain 写权限 → 刷新写进了 keychain,我们从文件读到 ERR
+# 没捕获,但服务端 RT 已轮换 → 投毒掉线。这里套 Seatbelt deny ~/Library/Keychains(和隔离
+# bot 同一机制,已被隔离 bot 每天证明:keychain 被 deny + CLAUDE_CONFIG_DIR 文件模式 → claude
+# 刷新写文件)。sandbox-exec 缺失(非 macOS)则退回无沙箱(Linux 本就无 keychain,claude 只写文件)。
 mkdir -p "$TMP/cfg"
 node -e 'const fs=require("fs");const o=JSON.parse(fs.readFileSync(process.argv[1]));o.claudeAiOauth.expiresAt=Date.now()-3600000;fs.writeFileSync(process.argv[2],JSON.stringify(o));' "$CRED" "$TMP/cfg/.credentials.json"
 [ -f "$STATE_JSON" ] && cp "$STATE_JSON" "$TMP/cfg/.claude.json"
 CLAUDE_OUT="$TMP/claude.out"
-log "触发 claude 刷新(伪过期 CLAUDE_CONFIG_DIR=$TMP/cfg)…"
-CLAUDE_CONFIG_DIR="$TMP/cfg" perl -e 'alarm 90; exec @ARGV' "$CLAUDE_BIN" -p "reply with exactly: OK" </dev/null >"$CLAUDE_OUT" 2>&1
+SB_PREFIX=()
+if command -v sandbox-exec >/dev/null 2>&1; then
+  SB_PROFILE="$TMP/deny-keychain.sb"
+  printf '(version 1)\n(allow default)\n(deny file-read* (subpath "%s/Library/Keychains"))\n(deny file-write* (subpath "%s/Library/Keychains"))\n' "$HOME" "$HOME" > "$SB_PROFILE"
+  SB_PREFIX=(sandbox-exec -f "$SB_PROFILE")
+  log "触发 claude 刷新(沙箱 deny-keychain, CLAUDE_CONFIG_DIR=$TMP/cfg)…"
+else
+  log "触发 claude 刷新(无 sandbox-exec,非 macOS;CLAUDE_CONFIG_DIR=$TMP/cfg)…"
+fi
+CLAUDE_CONFIG_DIR="$TMP/cfg" perl -e 'alarm 90; exec @ARGV' "${SB_PREFIX[@]}" "$CLAUDE_BIN" -p "reply with exactly: OK" </dev/null >"$CLAUDE_OUT" 2>&1
 CRC=$?
 NEWCRED="$TMP/cfg/.credentials.json"
 NEW=$(accfp "$NEWCRED"); NEWLEFT=$(leftmin "$NEWCRED")
