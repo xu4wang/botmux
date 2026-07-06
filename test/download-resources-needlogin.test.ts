@@ -54,4 +54,13 @@ describe('downloadResources — needLogin gating', () => {
     expect(attachments).toHaveLength(1);
     expect(attachments[0]).toMatchObject({ type: 'image', name: 'k.jpg' });
   });
+
+  it('saves into the per-appId bucket (attachments/<appId>/<messageId>/) for the read-isolation carve-out', async () => {
+    // Read isolation wholesale-denies attachments/ and re-allows only
+    // attachments/<own appId>/ — the storage layout must match the carve-out key.
+    (downloadMessageResource as any).mockResolvedValue(undefined);
+    const { attachments } = await downloadResources('app', 'om_1', [img]);
+    expect(attachments[0].path).toMatch(/\/attachments\/app\/om_1\/k\.jpg$/);
+    expect((downloadMessageResource as any).mock.calls[0][4]).toMatch(/\/attachments\/app\/om_1\/k\.jpg$/);
+  });
 });
