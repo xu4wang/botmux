@@ -62,6 +62,7 @@ import { interactiveSelect, pickChoice, pickCliSelection } from './setup/interac
 import { buildPreset, serializePreset, presetFilename } from './setup/agent-preset.js';
 import type { CliId } from './adapters/cli/types.js';
 import { logger } from './utils/logger.js';
+import { scheduleTimeZone } from './utils/timezone.js';
 import { expandHomePath, invalidWorkingDirs } from './utils/working-dir.js';
 import { firstPositional } from './cli/arg-utils.js';
 import { dispatchPrimaryMessage, findStdinAliasAttachment, sendFileAttachments } from './cli/send-dispatch.js';
@@ -4049,8 +4050,8 @@ async function cmdSchedule(sub: string, rest: string[]): Promise<void> {
     console.log(`定时任务 (${filtered.length}${filter ? '/' + tasks.length : ''}):\n`);
     for (const t of filtered) {
       const status = t.enabled ? '✅' : '⏸️';
-      const next = t.nextRunAt ? new Date(t.nextRunAt).toLocaleString('zh-CN', { timeZone: 'Asia/Shanghai' }) : '—';
-      const last = t.lastRunAt ? new Date(t.lastRunAt).toLocaleString('zh-CN', { timeZone: 'Asia/Shanghai' }) : '—';
+      const next = t.nextRunAt ? new Date(t.nextRunAt).toLocaleString('zh-CN', { timeZone: scheduleTimeZone() }) : '—';
+      const last = t.lastRunAt ? new Date(t.lastRunAt).toLocaleString('zh-CN', { timeZone: scheduleTimeZone() }) : '—';
       const display = t.parsed?.display ?? t.schedule;
       const prompt = t.prompt ?? '';
       const chatId = t.chatId ?? '—';
@@ -4116,7 +4117,7 @@ async function cmdSchedule(sub: string, rest: string[]): Promise<void> {
       deliver,
     });
 
-    const next = task.nextRunAt ? new Date(task.nextRunAt).toLocaleString('zh-CN', { timeZone: 'Asia/Shanghai' }) : '—';
+    const next = task.nextRunAt ? new Date(task.nextRunAt).toLocaleString('zh-CN', { timeZone: scheduleTimeZone() }) : '—';
     console.log(`✅ 已创建定时任务 [${task.id}] ${task.name}`);
     console.log(`   规则: ${parsed.display}`);
     console.log(`   下次执行: ${next}`);

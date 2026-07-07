@@ -547,12 +547,16 @@ describe('computeNextRun', () => {
     expect(next).toBeNull();
   });
 
-  it('cron: returns next wall-clock occurrence', () => {
-    // 0 9 * * * — daily at 09:00
+  it('cron: returns next wall-clock occurrence in the HOST-LOCAL timezone', () => {
+    // 0 9 * * * — daily at 09:00. computeNextRun now uses the host's local timezone
+    // (scheduleTimeZone()), matching how one-shot「明天9点」is parsed via setHours().
+    // Pre-fix it was hard-coded to Asia/Shanghai, so on any non-+8 host getHours()
+    // would NOT be 9. Host-independent assertion: both sides read the same local zone.
     const next = computeNextRun({ kind: 'cron', expr: '0 9 * * *', display: '每天 9:00' });
     expect(next).toBeTruthy();
     const nextDate = new Date(next!);
-    // Since timezone is Asia/Shanghai, getUTCHours should be 1 (09 - 08) except during DST (none in CN)
     expect(nextDate.getTime()).toBeGreaterThan(Date.now());
+    expect(nextDate.getHours()).toBe(9);
+    expect(nextDate.getMinutes()).toBe(0);
   });
 });
