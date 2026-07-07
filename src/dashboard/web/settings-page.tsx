@@ -14,7 +14,18 @@ interface DashboardSettings {
   localDevInstall: boolean;
   whiteboard: { enabled: boolean };
   remoteAccess: boolean;
+  /** Configured schedule-task timezone override (IANA), or '' when unset ⇒ follow host. */
+  scheduleTimeZone: string;
+  /** Host's auto-detected local zone — the effective fallback when override is ''. */
+  hostTimeZone: string;
 }
+
+/** A handful of common IANA zones offered as a datalist for the timezone field. */
+const COMMON_TIMEZONES = [
+  'Asia/Shanghai', 'Asia/Hong_Kong', 'Asia/Tokyo', 'Asia/Singapore', 'Asia/Kolkata',
+  'UTC', 'Europe/London', 'Europe/Paris', 'Europe/Moscow',
+  'America/Los_Angeles', 'America/New_York', 'America/Sao_Paulo', 'Australia/Sydney',
+];
 
 interface InstallEntry { binPath: string; root: string; kind: 'npm-global' | 'source-checkout' | 'unknown' }
 interface NodeCheck { version: string; major: number; required: number; ok: boolean }
@@ -40,6 +51,8 @@ function parseSettings(s: any): DashboardSettings {
     localDevInstall: s?.localDevInstall === true,
     whiteboard: { enabled: s?.whiteboard?.enabled === true },
     remoteAccess: s?.remoteAccess === true,
+    scheduleTimeZone: typeof s?.scheduleTimeZone === 'string' ? s.scheduleTimeZone : '',
+    hostTimeZone: typeof s?.hostTimeZone === 'string' && s.hostTimeZone ? s.hostTimeZone : 'UTC',
   };
 }
 
@@ -439,6 +452,21 @@ function SettingsBody(props: {
           </label>
         </section>
         <section className="bd-section">
+          <h3 className="bd-section-title">{tr('settings.sectionSchedule')}</h3>
+          <TimeZoneRow
+            value={settings.scheduleTimeZone}
+            host={settings.hostTimeZone}
+            disabled={dis || savingKey === 'scheduleTimeZone'}
+            onSave={tz => {
+              void props.onSave(
+                'scheduleTimeZone',
+                { scheduleTimeZone: tz },
+                s => ({ ...s, scheduleTimeZone: tz ?? '' }),
+              );
+            }}
+          />
+        </section>
+        <section className="bd-section">
           <h3 className="bd-section-title">{tr('settings.sectionMaintenance')}</h3>
           <ToggleRow
             title={tr('settings.autoUpdate')}
@@ -490,6 +518,47 @@ function SettingsBody(props: {
         </div>
       </article>
     </div>
+  );
+}
+
+export function TimeZoneRow(props: {
+  value: string;
+  host: string;
+  disabled: boolean;
+  onSave(tz: string | null): void;
+}) {
+  const tr = useT();
+  const [draft, setDraft] = useState(props.value);
+  // Re-sync when a save round-trips (or another client changes the value).
+  useEffect(() => { setDraft(props.value); }, [props.value]);
+
+  const commit = () => {
+    const next = draft.trim();
+    if (next === props.value.trim()) return; // unchanged — skip the PUT
+    props.onSave(next === '' ? null : next); // empty ⇒ clear override, follow host
+  };
+
+  const effective = props.value.trim() || props.host;
+  return (
+    <label className="form-row">
+      <span>{tr('settings.scheduleTimeZone')}</span>
+      <input
+        type="text"
+        list="tz-common"
+        value={draft}
+        placeholder={props.host}
+        disabled={props.disabled}
+        onChange={e => setDraft(e.currentTarget.value)}
+        onBlur={commit}
+        onKeyDown={e => {
+          if (e.key === 'Enter') { e.preventDefault(); e.currentTarget.blur(); }
+        }}
+      />
+      <datalist id="tz-common">
+        {COMMON_TIMEZONES.map(z => <option key={z} value={z} />)}
+      </datalist>
+      <small>{tr('settings.scheduleTimeZoneHelp', { host: props.host, effective })}</small>
+    </label>
   );
 }
 

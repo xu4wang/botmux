@@ -1,6 +1,6 @@
 import { Cron } from 'croner';
 import * as scheduleStore from '../services/schedule-store.js';
-import { scheduleTimeZone } from '../utils/timezone.js';
+import { scheduleTimeZone, zonedTomorrowAt } from '../utils/timezone.js';
 import { emitHookEvent } from '../services/hook-runner.js';
 import { logger } from '../utils/logger.js';
 import { dashboardEventBus } from './dashboard-events.js';
@@ -158,9 +158,9 @@ function parseChineseSchedule(input: string): { parsed: ParsedSchedule; rest: st
   if (m) {
     const t = parseTimeHM(m[1]);
     if (t) {
-      const d = new Date();
-      d.setDate(d.getDate() + 1);
-      d.setHours(t.hour, t.minute, 0, 0);
+      // 「明天HH:MM」是墙上时间：解析到 scheduleTimeZone()（与 cron 触发/显示同源），
+      // 而非主机本地 setHours() —— 否则在非目标时区主机上，一次性与重复类会错开一个时差。
+      const d = zonedTomorrowAt(scheduleTimeZone(), t.hour, t.minute);
       return { parsed: { kind: 'once', runAt: d.toISOString(), display: `明天 ${t.hour}:${String(t.minute).padStart(2,'0')}` }, rest: t.rest };
     }
   }

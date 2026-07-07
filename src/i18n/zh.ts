@@ -989,6 +989,9 @@ export const messages: Record<string, string> = {
   'settings.autoUpdateHelp': '在每天指定时间自动拉取最新版本。',
   'settings.autoRestart': '更新后自动重启',
   'settings.autoRestartHelp': '需要先开启自动更新。',
+  'settings.sectionSchedule': '定时任务',
+  'settings.scheduleTimeZone': '时区',
+  'settings.scheduleTimeZoneHelp': '定时任务的触发与显示所用时区（IANA 名，如 Asia/Shanghai）。留空＝跟随主机时区（当前主机：{host}）。当前生效：{effective}。',
   // ─── i18n coverage v2: shared fragments + cards + chat messages ───────────
   'common.operator': '操作人：{by}',
   'common.empty_paren': '（空）',

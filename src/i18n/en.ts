@@ -986,6 +986,9 @@ export const messages: Record<string, string> = {
   'settings.autoUpdateHelp': 'Auto-pull the latest version at the scheduled time.',
   'settings.autoRestart': 'Auto-restart after update',
   'settings.autoRestartHelp': 'Requires auto-update enabled.',
+  'settings.sectionSchedule': 'Scheduled tasks',
+  'settings.scheduleTimeZone': 'Timezone',
+  'settings.scheduleTimeZoneHelp': 'Timezone used to fire and display scheduled tasks (IANA name, e.g. Asia/Shanghai). Leave empty to follow the host zone (current host: {host}). Effective: {effective}.',
   // ─── i18n coverage v2: shared fragments + cards + chat messages ───────────
   'common.operator': 'By: {by}',
   'common.empty_paren': '(empty)',

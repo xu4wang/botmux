@@ -466,6 +466,30 @@ describe('One-shot Chinese patterns', () => {
     expect(runAt.getHours()).toBe(9);
     expect(runAt.getMinutes()).toBe(0);
   });
+
+  it('明天X点 honors an explicit schedule timezone (host-independent wall clock)', () => {
+    // The one-shot「明天HH:MM」path now resolves to scheduleTimeZone() (env →
+    // config → host), NOT host-local setHours(). With an explicit override the
+    // wall clock must land at HH:MM in THAT zone regardless of the host TZ — the
+    // exact bug being fixed (on a non-+8 host, cron used Asia/Shanghai while
+    // one-shot used host-local, so they disagreed).
+    const prev = process.env.BOTMUX_SCHEDULE_TIMEZONE;
+    process.env.BOTMUX_SCHEDULE_TIMEZONE = 'Asia/Shanghai';
+    try {
+      const result = parseNaturalSchedule('明天9:00 看下邮件');
+      expect(result).not.toBeNull();
+      const runAt = new Date(result!.parsed.runAt!);
+      const parts = new Intl.DateTimeFormat('en-US', {
+        timeZone: 'Asia/Shanghai', hourCycle: 'h23', hour: '2-digit', minute: '2-digit',
+      }).formatToParts(runAt);
+      expect(parts.find(p => p.type === 'hour')!.value).toBe('09');
+      expect(parts.find(p => p.type === 'minute')!.value).toBe('00');
+      expect(runAt.getTime()).toBeGreaterThan(Date.now());
+    } finally {
+      if (prev === undefined) delete process.env.BOTMUX_SCHEDULE_TIMEZONE;
+      else process.env.BOTMUX_SCHEDULE_TIMEZONE = prev;
+    }
+  });
 });
 
 // ─── New: parseSchedule() — bare schedule parser for CLI ─────────────────────

@@ -25,6 +25,7 @@ import {
 } from '../global-config.js';
 import { isLocale } from '../i18n/types.js';
 import { isLocalDevInstall } from '../utils/install-info.js';
+import { isValidTimeZone } from '../utils/timezone.js';
 
 /**
  * Snapshot returned by `resolveDashboardSettings` — mirrors the existing
@@ -39,6 +40,12 @@ export interface ResolvedDashboardSettingsView {
   maintenance: MaintenanceConfig;
   localDevInstall: boolean;
   remoteAccess?: boolean;
+  /** Configured schedule-task timezone override (IANA), or null/absent when
+   *  unset ⇒ the scheduler follows `hostTimeZone`. */
+  scheduleTimeZone?: string | null;
+  /** Host's auto-detected local zone — shown in the UI as the effective
+   *  fallback when no override is set. */
+  hostTimeZone?: string;
 }
 
 export type ParseMaintenanceResult =
@@ -51,8 +58,9 @@ export interface SettingsWriteApplierDeps {
   readGlobalConfig: () => GlobalConfig;
   /** Atomic write of dashboard-level fields (publicReadOnly / openTerminalInFeishu). */
   mergeDashboardConfig: (patch: DashboardGlobalConfig) => DashboardGlobalConfig;
-  /** Atomic write of global-level fields (repoPickerMode). */
-  mergeGlobalConfig: (patch: Partial<GlobalConfig>) => void;
+  /** Atomic write of global-level fields (repoPickerMode / scheduleTimeZone / …).
+   *  Mirrors the real `mergeGlobalConfig`: a `null` value deletes that key. */
+  mergeGlobalConfig: (patch: Partial<Record<keyof GlobalConfig, GlobalConfig[keyof GlobalConfig] | null>>) => void;
   /** Atomic write of maintenance-level fields (autoUpdate / autoRestart). */
   mergeMaintenanceConfig: (patch: MaintenanceConfig) => MaintenanceConfig;
   /** Set global UI locale (null = clear). Fans out to daemons via IPC. */
@@ -103,6 +111,7 @@ export type ApplySettingsWriteError =
   | 'invalid_chatBotDiscovery'
   | 'invalid_repoPickerMode'
   | 'invalid_remoteAccess'
+  | 'invalid_scheduleTimeZone'
   | 'invalid_whiteboard'
   | 'invalid_whiteboard_enabled'
   | 'invalid_lang'
@@ -174,6 +183,20 @@ export async function applySettingsWrite(
     }
     deps.mergeGlobalConfig({ remoteAccess: obj.remoteAccess });
     touched = true;
+  }
+
+  if ('scheduleTimeZone' in obj) {
+    const v = obj.scheduleTimeZone;
+    if (v === null || v === '') {
+      // Clear the override → the scheduler falls back to the host local zone.
+      deps.mergeGlobalConfig({ scheduleTimeZone: null });
+      touched = true;
+    } else if (typeof v === 'string' && isValidTimeZone(v.trim())) {
+      deps.mergeGlobalConfig({ scheduleTimeZone: v.trim() });
+      touched = true;
+    } else {
+      return { ok: false, error: 'invalid_scheduleTimeZone' };
+    }
   }
 
   if ('whiteboard' in obj) {

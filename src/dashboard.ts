@@ -43,6 +43,7 @@ import {
 } from './setup/cli-selection.js';
 import { invalidWorkingDirs } from './utils/working-dir.js';
 import { invalidateGlobalConfigCache, mergeGlobalConfig, readGlobalConfig, type MaintenanceConfig, type RepoPickerMode, type WhiteboardConfig } from './global-config.js';
+import { hostLocalTimeZone } from './utils/timezone.js';
 import { buildDashboardUrls, type DashboardUrls } from './core/dashboard-url.js';
 import { deleteWhiteboard, listWhiteboards, readWhiteboard, whiteboardEnabled } from './services/whiteboard-store.js';
 import { isLocalDevInstall, botmuxVersion, botmuxCliEntry } from './utils/install-info.js';
@@ -295,6 +296,12 @@ interface ResolvedDashboardSettings {
   /** 远程访问: emit central-platform URLs (terminals / cards / webhooks) instead
    *  of local host:port. Off by default; only meaningful when bound. */
   remoteAccess: boolean;
+  /** Configured schedule-task timezone override (IANA), or null when unset
+   *  ⇒ the scheduler follows `hostTimeZone`. */
+  scheduleTimeZone: string | null;
+  /** Host's auto-detected local zone — the effective fallback shown in the UI
+   *  when no override is set (e.g. 'America/Los_Angeles'). */
+  hostTimeZone: string;
 }
 
 function resolveDashboardSettings(): ResolvedDashboardSettings {
@@ -309,6 +316,8 @@ function resolveDashboardSettings(): ResolvedDashboardSettings {
     localDevInstall: isLocalDevInstall(),
     whiteboard: { enabled: global.whiteboard?.enabled === true },
     remoteAccess: global.remoteAccess === true,
+    scheduleTimeZone: global.scheduleTimeZone ?? null,
+    hostTimeZone: hostLocalTimeZone(),
   };
 }
 
