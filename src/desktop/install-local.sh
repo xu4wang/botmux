@@ -32,6 +32,62 @@ fail() {
   exit 1
 }
 
+resolve_app_version() {
+  local version="${BOTMUX_DESKTOP_VERSION:-}"
+  local package_version
+  local tag_version
+
+  if [[ -z "$version" ]]; then
+    package_version="$(node -p "require('./package.json').version" 2>/dev/null || true)"
+    version="${package_version#v}"
+  fi
+
+  if [[ -z "$version" || "$version" == "0.0.0" ]]; then
+    tag_version="$(git describe --tags --abbrev=0 2>/dev/null || true)"
+    version="${tag_version#v}"
+  fi
+
+  # Source archives without .git still need a concrete macOS bundle version.
+  # Prefer tags, but fall back to a clearly local semver instead of 0.0.0.
+  if [[ ! "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$ || "$version" == "0.0.0" ]]; then
+    version="0.0.1-local"
+  fi
+
+  printf '%s\n' "$version"
+}
+
+path_contains() {
+  case ":$PATH:" in
+    *":$1:"*) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+ensure_pnpm_global_bin_in_path() {
+  local candidate
+  local candidates=()
+  local configured_bin
+
+  configured_bin="$(pnpm config get global-bin-dir 2>/dev/null || true)"
+  if [[ -n "$configured_bin" && "$configured_bin" != "undefined" && "$configured_bin" != "null" ]]; then
+    candidates+=("$configured_bin")
+  fi
+
+  # `pnpm link --global` validates PNPM_HOME even when global-bin-dir is set.
+  # Non-login shells often miss this path, so source installs add it locally.
+  if [[ -n "${PNPM_HOME:-}" ]]; then
+    candidates+=("$PNPM_HOME")
+  fi
+  candidates+=("$HOME/Library/pnpm/bin")
+
+  for candidate in "${candidates[@]}"; do
+    [[ -n "$candidate" ]] || continue
+    if ! path_contains "$candidate"; then
+      export PATH="$candidate:$PATH"
+    fi
+  done
+}
+
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --app-path)
@@ -89,21 +145,27 @@ if [[ "$SKIP_DEPS" -eq 0 && ! -x node_modules/.bin/tsc ]]; then
 fi
 
 if [[ "$SKIP_BUILD" -eq 0 ]]; then
+  APP_VERSION="$(resolve_app_version)"
+
   log "Build CLI and dashboard"
   pnpm build
 
   log "Build Desktop bundle"
   pnpm desktop:bundle
 
-  log "Package Botmux.app locally"
-  pnpm exec electron-builder --mac dir --config electron-builder.yml
+  log "Package Botmux.app locally (version $APP_VERSION)"
+  pnpm exec electron-builder --mac dir --config electron-builder.yml -c.extraMetadata.version="$APP_VERSION"
 fi
 
 if [[ "$SKIP_LINK" -eq 0 ]]; then
   log "Link this source checkout as the global botmux CLI"
   # The Desktop app is CLI-first. Linking keeps the App and global CLI on the
   # same source checkout without adding App installation commands to botmux CLI.
+  ensure_pnpm_global_bin_in_path
   pnpm link --global
+  # Keep Botmux's own shim in sync too; Desktop can discover it when GUI PATH
+  # does not expose the package-manager global binary.
+  pnpm use:here
 fi
 
 BUILT_APP=""
