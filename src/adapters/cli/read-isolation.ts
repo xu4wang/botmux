@@ -155,7 +155,12 @@ export function buildV2DenyPaths(ctx: V2IsolationContext): string[] {
       // re-allowed via buildV2CarveOuts; siblings' buckets + the legacy flat
       // per-messageId layout stay denied.
       `${sd}/attachments`,
-      `${sd}/whiteboards`,
+      // whiteboards/ is deliberately NOT denied (owner decision): whiteboards are
+      // shared content, meant to be visible across the bots that collaborate on
+      // them. NOTE the store is currently GLOBAL (no per-chat scoping), so a
+      // sandboxed bot can `whiteboard list`/`read` boards from other chats too —
+      // an accepted tradeoff until whiteboards are bucketed by chat/appId. Also
+      // un-denying the read avoids the read-modify-write clobber a deny would cause.
       // Queued inbound messages (queues/<rootMessageId>.jsonl = full LarkMessage
       // content for EVERY bot). Daemon-side only — the CLI never reads it.
       `${sd}/queues`,
@@ -163,7 +168,12 @@ export function buildV2DenyPaths(ctx: V2IsolationContext): string[] {
       // session ids and appIds. sandbox-exec parses the profile BEFORE applying it,
       // and the markers are read by the daemon — the sandboxed CLI never reads these.
       `${sd}/read-isolation`,
-      `${sd}/schedules.json`,          // all bots' scheduled prompts (conversation-adjacent)
+      // NOTE: schedules.json is deliberately NOT denied. It's a read-modify-write
+      // store: denying the read makes a sandboxed `botmux schedule` load an empty
+      // map then overwrite the shared file, silently wiping EVERY bot's tasks
+      // (read-modify-write degraded to write-only). We accept the minor leak
+      // (isolated bots can read others' scheduled prompts) until schedule-store
+      // fail-closes on read errors (ENOENT vs EPERM). See PR #387 review.
       `${bh}/feishu-session.json`,     // Feishu web login session (setup automation) — can mint bots
       // The dashboard admin credentials. `.dashboard-secret` signs the loopback-HMAC
       // that gates `/__cli/rotate` AND the daemon-IPC write-link routes — the ipc-server

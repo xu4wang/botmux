@@ -1,5 +1,6 @@
 import { Cron } from 'croner';
 import * as scheduleStore from '../services/schedule-store.js';
+import { scheduleTimeZone } from '../utils/timezone.js';
 import { emitHookEvent } from '../services/hook-runner.js';
 import { logger } from '../utils/logger.js';
 import { dashboardEventBus } from './dashboard-events.js';
@@ -215,7 +216,7 @@ export function parseSchedule(input: string): ParsedSchedule {
   if (/^\d{4}-\d{2}-\d{2}(T| |$)/.test(s)) {
     const dt = new Date(s);
     if (!isNaN(dt.getTime())) {
-      return { kind: 'once', runAt: dt.toISOString(), display: `once at ${dt.toLocaleString('zh-CN', { timeZone: 'Asia/Shanghai' })}` };
+      return { kind: 'once', runAt: dt.toISOString(), display: `once at ${dt.toLocaleString('zh-CN', { timeZone: scheduleTimeZone() })}` };
     }
   }
 
@@ -307,7 +308,7 @@ export function computeNextRun(parsed: ParsedSchedule, lastRunAt?: string): stri
   if (parsed.kind === 'cron') {
     if (!parsed.expr) return null;
     try {
-      const job = new Cron(parsed.expr, { timezone: 'Asia/Shanghai' });
+      const job = new Cron(parsed.expr, { timezone: scheduleTimeZone() });
       const next = job.nextRun(new Date(now));
       return next ? next.toISOString() : null;
     } catch {
@@ -325,7 +326,7 @@ function computeGraceSeconds(parsed: ParsedSchedule): number {
     periodSec = parsed.minutes * 60;
   } else if (parsed.kind === 'cron' && parsed.expr) {
     try {
-      const job = new Cron(parsed.expr, { timezone: 'Asia/Shanghai' });
+      const job = new Cron(parsed.expr, { timezone: scheduleTimeZone() });
       const first = job.nextRun(new Date());
       const second = first ? job.nextRun(first) : null;
       periodSec = first && second ? (second.getTime() - first.getTime()) / 1000 : MIN_GRACE_SECONDS;

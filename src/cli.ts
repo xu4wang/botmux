@@ -62,6 +62,7 @@ import { interactiveSelect, pickChoice, pickCliSelection } from './setup/interac
 import { buildPreset, serializePreset, presetFilename } from './setup/agent-preset.js';
 import type { CliId } from './adapters/cli/types.js';
 import { logger } from './utils/logger.js';
+import { scheduleTimeZone } from './utils/timezone.js';
 import { expandHomePath, invalidWorkingDirs } from './utils/working-dir.js';
 import { firstPositional } from './cli/arg-utils.js';
 import { dispatchPrimaryMessage, findStdinAliasAttachment, sendFileAttachments } from './cli/send-dispatch.js';
@@ -4029,8 +4030,8 @@ async function cmdSchedule(sub: string, rest: string[]): Promise<void> {
     console.log(`定时任务 (${filtered.length}${filter ? '/' + tasks.length : ''}):\n`);
     for (const t of filtered) {
       const status = t.enabled ? '✅' : '⏸️';
-      const next = t.nextRunAt ? new Date(t.nextRunAt).toLocaleString('zh-CN', { timeZone: 'Asia/Shanghai' }) : '—';
-      const last = t.lastRunAt ? new Date(t.lastRunAt).toLocaleString('zh-CN', { timeZone: 'Asia/Shanghai' }) : '—';
+      const next = t.nextRunAt ? new Date(t.nextRunAt).toLocaleString('zh-CN', { timeZone: scheduleTimeZone() }) : '—';
+      const last = t.lastRunAt ? new Date(t.lastRunAt).toLocaleString('zh-CN', { timeZone: scheduleTimeZone() }) : '—';
       const display = t.parsed?.display ?? t.schedule;
       const prompt = t.prompt ?? '';
       const chatId = t.chatId ?? '—';
@@ -4096,7 +4097,7 @@ async function cmdSchedule(sub: string, rest: string[]): Promise<void> {
       deliver,
     });
 
-    const next = task.nextRunAt ? new Date(task.nextRunAt).toLocaleString('zh-CN', { timeZone: 'Asia/Shanghai' }) : '—';
+    const next = task.nextRunAt ? new Date(task.nextRunAt).toLocaleString('zh-CN', { timeZone: scheduleTimeZone() }) : '—';
     console.log(`✅ 已创建定时任务 [${task.id}] ${task.name}`);
     console.log(`   规则: ${parsed.display}`);
     console.log(`   下次执行: ${next}`);
@@ -4295,6 +4296,11 @@ async function cmdQuoted(rest: string[]): Promise<void> {
     process.exit(1);
   }
 
+  // Read isolation: register this bot from its own send-cred file so the Lark
+  // client (getMessageDetail below) is available WITHOUT reading the denied
+  // bots.json — same as cmdHistory / cmdSend. Missing this was why a sandboxed
+  // isolated bot's `botmux quoted` failed "Bot not registered".
+  await registerSelfFromCredFile();
   const { larkAppId: appId } = await resolveSessionAppId(sessionIdArg);
 
   const { getMessageDetail } = await import('./im/lark/client.js');
@@ -4317,6 +4323,19 @@ async function cmdQuoted(rest: string[]): Promise<void> {
     if (rendered.msgType === 'interactive') {
       const merged = await resolveMergedCardContent(appId, messageId).catch(() => null);
       if (merged) rendered.content = merged.text;
+    }
+    // The referenced message's file/media resources arrive as key+name only. A
+    // read-isolated agent can't call the Lark resource API itself (bots.json
+    // creds are deny-read), so download the bytes HERE — via the bot client
+    // registered above — into this bot's OWN attachment bucket
+    // (attachments/<appId>/<messageId>/, read-allowed by its carve-out; sandbox
+    // denies file *reads*, not writes). Surface the local paths so the agent can
+    // actually open the file instead of only seeing its key.
+    if (rendered.resources?.length) {
+      const { downloadResources } = await import('./core/session-manager.js');
+      const { attachments, needLogin } = await downloadResources(appId, messageId, rendered.resources);
+      (rendered as { attachments?: unknown }).attachments = attachments;
+      if (needLogin) (rendered as { needLogin?: boolean }).needLogin = true;
     }
     console.log(JSON.stringify(rendered, null, 2));
   } catch (err: any) {

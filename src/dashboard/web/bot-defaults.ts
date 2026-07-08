@@ -760,6 +760,8 @@ export function wireBotDefaultsPage(root: HTMLElement): PageDisposer {
   // a per-session bwrap file sandbox (Linux). Auto-saves on change.
   function renderSandboxSection(b: any): string {
     const on = b.sandbox === true;
+    const isoOn = b.readIsolation === true;
+    const isoSupported = b.readIsolationSupported === true;
     return `<section class="bd-section">
       <h3 class="bd-section-title">${t('botDefaults.sectionSandbox')}</h3>
       <label class="toggle-row">
@@ -768,8 +770,15 @@ export function wireBotDefaultsPage(root: HTMLElement): PageDisposer {
         <span class="toggle-tx"><strong>${t('botDefaults.sandboxToggle')}</strong>
         <small>${t('botDefaults.sandboxHelp')}</small></span>
       </label>
+      <label class="toggle-row">
+        <input type="checkbox" data-action="toggle-read-isolation" ${isoOn ? 'checked' : ''} ${(!isoSupported && !isoOn) ? 'disabled' : ''}>
+        <span class="switch" aria-hidden="true"></span>
+        <span class="toggle-tx"><strong>${t('botDefaults.readIsolationToggle')}</strong>
+        <small>${t('botDefaults.readIsolationHelp')}${isoSupported ? '' : ' <b>' + t(isoOn ? 'botDefaults.readIsolationStaleOn' : 'botDefaults.readIsolationUnsupported') + '</b>'}</small></span>
+      </label>
       <div class="actions">
         <span class="oncall-status" data-sandbox-status></span>
+        <span class="oncall-status" data-read-isolation-status></span>
       </div>
     </section>`;
   }
@@ -1004,6 +1013,16 @@ export function wireBotDefaultsPage(root: HTMLElement): PageDisposer {
                 cached.wrapperCli = body.wrapperCli ?? null;
                 cached.model = body.model ?? '';
                 cached.agentSelectionKey = body.selectionKey ?? agentCliSel.value;
+                // Changing the agent may auto-clear read isolation (new CLI/wrapper
+                // can't enforce it) or flip its supported state — reflect it on the
+                // toggle now so it doesn't show a stale enabled/supported state.
+                cached.readIsolation = body.readIsolation === true;
+                cached.readIsolationSupported = body.readIsolationSupported === true;
+                const riCb = card.querySelector<HTMLInputElement>('input[data-action=toggle-read-isolation]');
+                if (riCb) {
+                  riCb.checked = cached.readIsolation;
+                  riCb.disabled = !cached.readIsolationSupported && !cached.readIsolation;
+                }
               }
             } else {
               agentStatusEl.textContent = `✗ ${body.error ?? r.status}`;
@@ -1422,6 +1441,42 @@ export function wireBotDefaultsPage(root: HTMLElement): PageDisposer {
             sandboxCb.checked = !enabled;
           } finally {
             sandboxCb.disabled = false;
+          }
+        });
+      }
+
+      // ── Read-isolation toggle (auto-save on change) ───────────────────────
+      const readIsoCb = card.querySelector<HTMLInputElement>('input[data-action=toggle-read-isolation]');
+      const readIsoStatusEl = card.querySelector<HTMLSpanElement>('[data-read-isolation-status]');
+      if (readIsoCb) {
+        readIsoCb.addEventListener('change', async () => {
+          const enabled = readIsoCb.checked;
+          if (readIsoStatusEl) { readIsoStatusEl.textContent = ''; readIsoStatusEl.className = 'oncall-status'; }
+          readIsoCb.disabled = true;
+          try {
+            const r = await fetch(`/api/bots/${encodeURIComponent(appId)}/read-isolation`, {
+              method: 'PUT',
+              headers: { 'content-type': 'application/json' },
+              body: JSON.stringify({ enabled }),
+            });
+            const body = await r.json().catch(() => ({}));
+            if (r.ok && body.ok) {
+              if (readIsoStatusEl) { readIsoStatusEl.textContent = `✓ ${t('botDefaults.readIsolationSaved')}`; readIsoStatusEl.classList.add('hint-ok'); }
+              const cached = cache.bots.find((bb: any) => bb.larkAppId === appId);
+              if (cached) cached.readIsolation = body.readIsolation === true;
+            } else {
+              if (readIsoStatusEl) { readIsoStatusEl.textContent = `✗ ${body.error ?? r.status}`; readIsoStatusEl.classList.add('hint-warn-inline'); }
+              readIsoCb.checked = !enabled;  // revert on failure
+            }
+          } catch (e: any) {
+            if (readIsoStatusEl) { readIsoStatusEl.textContent = `✗ ${e?.message ?? e}`; readIsoStatusEl.classList.add('hint-warn-inline'); }
+            readIsoCb.checked = !enabled;
+          } finally {
+            // Restore the correct disabled state (not unconditionally enabled): an
+            // OFF + unsupported toggle must stay disabled so it can't be re-enabled
+            // into the fail-close it just recovered from. ON stays clickable (to turn off).
+            const cachedNow = cache.bots.find((bb: any) => bb.larkAppId === appId);
+            readIsoCb.disabled = !(cachedNow?.readIsolationSupported === true) && !readIsoCb.checked;
           }
         });
       }
