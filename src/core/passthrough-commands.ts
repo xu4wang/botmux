@@ -21,6 +21,7 @@ export const DAEMON_COMMANDS = new Set(['/close', '/restart', '/status', '/help'
  */
 export const PASSTHROUGH_COMMANDS = new Set([
   '/compact', '/model', '/clear', '/plugin', '/usage',
+  '/new',
   // 只读 / 低副作用，飞书卡片里能直接吐文本：
   '/context', '/cost', '/mcp', '/diff',
   '/code-review', '/security-review', '/review',
