@@ -163,7 +163,12 @@ export function buildV2DenyPaths(ctx: V2IsolationContext): string[] {
       // session ids and appIds. sandbox-exec parses the profile BEFORE applying it,
       // and the markers are read by the daemon — the sandboxed CLI never reads these.
       `${sd}/read-isolation`,
-      `${sd}/schedules.json`,          // all bots' scheduled prompts (conversation-adjacent)
+      // NOTE: schedules.json is deliberately NOT denied. It's a read-modify-write
+      // store: denying the read makes a sandboxed `botmux schedule` load an empty
+      // map and then overwrite the shared file, silently wiping EVERY bot's tasks
+      // (read-modify-write degraded to write-only). We accept the minor leak
+      // (isolated bots can read others' scheduled prompts) until schedule-store
+      // fail-closes on read errors (ENOENT vs EPERM). See PR #387 review.
       `${bh}/feishu-session.json`,     // Feishu web login session (setup automation) — can mint bots
       // The dashboard admin credentials. `.dashboard-secret` signs the loopback-HMAC
       // that gates `/__cli/rotate` AND the daemon-IPC write-link routes — the ipc-server

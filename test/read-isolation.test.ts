@@ -66,7 +66,11 @@ describe('v2 HYBRID model (buildV2DenyPaths)', () => {
     expect(d).toContain('/Users/bot/.botmux/data/turn-sends');
     expect(d).toContain('/Users/bot/.botmux/data/queues');        // all bots' inbound message content
     expect(d).toContain('/Users/bot/.botmux/data/read-isolation'); // profiles enumerate sibling sessions
-    expect(d).toContain('/Users/bot/.botmux/data/schedules.json'); // all bots' scheduled prompts
+    // schedules.json is a read-modify-write store — denying the read makes a
+    // sandboxed `botmux schedule` load an empty map then overwrite the shared
+    // file, wiping every bot's tasks. Deliberately NOT denied (accept the minor
+    // leak of others' scheduled prompts) until schedule-store fail-closes. PR #387.
+    expect(d).not.toContain('/Users/bot/.botmux/data/schedules.json');
     expect(d).toContain('/Users/bot/.botmux/feishu-session.json'); // Feishu web login session (can mint bots)
     expect(d).toContain('/Users/bot/.botmux/.dashboard-secret');   // loopback-HMAC signing key (mints write tokens)
     expect(d).toContain('/Users/bot/.botmux/.dashboard-token');    // dashboard admin bearer token
