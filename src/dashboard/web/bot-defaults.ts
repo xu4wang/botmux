@@ -1461,7 +1461,11 @@ export function wireBotDefaultsPage(root: HTMLElement): PageDisposer {
             });
             const body = await r.json().catch(() => ({}));
             if (r.ok && body.ok) {
-              if (readIsoStatusEl) { readIsoStatusEl.textContent = `✓ ${t('botDefaults.readIsolationSaved')}`; readIsoStatusEl.classList.add('hint-ok'); }
+              const n = Number(body.suspendedSessions) || 0;
+              const msg = n > 0
+                ? t('botDefaults.readIsolationSavedRestarted', { count: n })
+                : t('botDefaults.readIsolationSaved');
+              if (readIsoStatusEl) { readIsoStatusEl.textContent = `✓ ${msg}`; readIsoStatusEl.classList.add('hint-ok'); }
               const cached = cache.bots.find((bb: any) => bb.larkAppId === appId);
               if (cached) cached.readIsolation = body.readIsolation === true;
             } else {

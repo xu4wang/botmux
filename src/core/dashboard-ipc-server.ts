@@ -59,7 +59,7 @@ import { listActiveSessions, findActiveBySessionId, closeSession, getActiveSessi
 import { listOnlineDaemons } from '../utils/daemon-discovery.js';
 import { getChatMode, replyMessage, sendMessage, resolveUnionIdFromOpenId, listThreadMessages, listChatMessages, getUserProfile } from '../im/lark/client.js';
 import { parseApiMessage, cardContentHasUpgradeFallback, resolveMergedCardContent } from '../im/lark/message-parser.js';
-import { resumeSession, spawnDashboardSession, activateQueuedSession, closeCliMismatchedSessionsForBot } from './session-manager.js';
+import { resumeSession, spawnDashboardSession, activateQueuedSession, closeCliMismatchedSessionsForBot, suspendActiveSessionsForBot } from './session-manager.js';
 import { parseSpawnRequest } from './session-create.js';
 import { getCliDisplayName } from '../im/lark/card-builder.js';
 import { locateLimiter } from './dashboard-locate.js';
@@ -1902,7 +1902,12 @@ ipcRoute('PUT', '/api/bot-read-isolation', async (req, res) => {
   }
   const r = await sandboxStore.updateBotReadIsolation(cachedLarkAppId, enable);
   if (!r.ok) return jsonRes(res, 400, { ok: false, error: r.reason });
-  jsonRes(res, 200, { ok: true, readIsolation: r.readIsolation });
+  // Read isolation only takes effect at COLD spawn (provisionIsolatedBotHome +
+  // Seatbelt wrapper run then). Suspend this bot's active sessions so the next
+  // message cold-restarts under the new state — otherwise close+resume would keep
+  // running the old, un-provisioned state and the toggle would silently no-op.
+  const suspendedSessions = await suspendActiveSessionsForBot(cachedLarkAppId);
+  jsonRes(res, 200, { ok: true, readIsolation: r.readIsolation, suspendedSessions });
 });
 
 // 实时切换 UI 语言（locale），无需重启 daemon。`botmux lang` / Dashboard 语言开关
