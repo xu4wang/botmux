@@ -1,4 +1,4 @@
-export type TriggerSourceType = 'webhook' | 'ui' | 'workflow' | 'schedule';
+export type TriggerSourceType = 'webhook' | 'ui' | 'workflow' | 'schedule' | 'vc_meeting';
 export type TriggerTargetKind = 'turn' | 'workflow';
 export type TriggerAction = 'queued' | 'delivered' | 'dry_run' | 'ignored' | 'completed';
 export type TriggerAsyncStatus = 'pending' | 'completed';

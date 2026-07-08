@@ -3616,6 +3616,8 @@ botmux v${getVersion()} — IM ↔ AI 编程 CLI 桥接
   voice                配置语音总结（高级功能，独立于 setup）— 交互式填 TTS 引擎+凭证
        voice status    查看当前语音配置（凭证打码）
        voice disable   关闭语音功能（移除配置）
+  vc-agent tat-gate|poll
+                       飞书会议智能体 P0：校验 TAT 会中事件读取、轮询会议事件并触发 workflow
   whiteboard status|enable|disable
                        本地项目白板（默认关闭；enable 只打开能力，不创建白板）
        current --create / list / read / update / write --yes
@@ -6699,6 +6701,11 @@ switch (command) {
   case 'quoted':   await cmdQuoted(process.argv.slice(3)); break;
   case 'lang':     await cmdLang(process.argv.slice(3)); break;
   case 'voice':    await cmdVoiceSetup(process.argv.slice(3)); break;
+  case 'vc-agent': {
+    const { cmdVcAgent } = await import('./cli/vc-agent.js');
+    await cmdVcAgent(process.argv[3] ?? '', process.argv.slice(4));
+    break;
+  }
   case 'whiteboard':
   case 'wb':       await cmdWhiteboard(process.argv[3] ?? 'status', process.argv.slice(4)); break;
   case 'thread':   {

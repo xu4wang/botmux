@@ -111,6 +111,12 @@ vi.mock('@larksuiteoapi/node-sdk', () => {
 
 import { __resetAnchorQueues } from '../src/utils/anchor-serializer.js';
 import { __resetEventClaimsForTest, canOperate, canTalk, decideRouting, ensureBotOpenId, isBotMentioned, mentionsAnotherMember, startLarkEventDispatcher, writeBotInfoFile, type EventHandlers } from '../src/im/lark/event-dispatcher.js';
+import {
+  VC_BOT_MEETING_ACTIVITY_EVENT,
+  VC_BOT_MEETING_ENDED_EVENT,
+  VC_BOT_MEETING_INVITED_EVENT,
+  VC_PARTICIPANT_MEETING_JOINED_EVENT,
+} from '../src/vc-agent/push-source.js';
 // grant-pending is a real (unmocked) module-level table; reset it per test so the
 // grant-card throttle state never leaks across cases (it backs the @blocked card path).
 import { _resetForTest as _resetGrantPending } from '../src/im/lark/grant-pending.js';
@@ -189,11 +195,13 @@ function setupBotState(opts?: {
   isSessionOwner: ReturnType<typeof vi.fn>;
   onChatModeConverted: ReturnType<typeof vi.fn>;
   resolveReplyThreadAlias: ReturnType<typeof vi.fn>;
+  handleVcMeetingPush: ReturnType<typeof vi.fn>;
 } {
   return {
     handleCardAction: vi.fn(async () => undefined),
     handleNewTopic: vi.fn(async () => {}),
     handleThreadReply: vi.fn(async () => {}),
+    handleVcMeetingPush: vi.fn(async () => {}),
     isSessionOwner: vi.fn(() => false),
     resolveReplyThreadAlias: vi.fn(() => null),
     onChatModeConverted: vi.fn(),
@@ -268,6 +276,134 @@ function makeUserMessageEvent(opts: {
     },
   };
 }
+
+describe('startLarkEventDispatcher — VC bot meeting push events', () => {
+  beforeEach(() => {
+    capturedHandlers = {};
+    __resetEventClaimsForTest();
+  });
+
+  it('registers invited/activity/ended handlers and dispatches activity ACK-safe', async () => {
+    const handlers = makeHandlers();
+    startLarkEventDispatcher(MY_APP_ID, 'secret', handlers);
+
+    expect(capturedHandlers[VC_BOT_MEETING_INVITED_EVENT]).toBeTypeOf('function');
+    expect(capturedHandlers[VC_BOT_MEETING_ACTIVITY_EVENT]).toBeTypeOf('function');
+    expect(capturedHandlers[VC_BOT_MEETING_ENDED_EVENT]).toBeTypeOf('function');
+    expect(capturedHandlers[VC_PARTICIPANT_MEETING_JOINED_EVENT]).toBeTypeOf('function');
+
+    capturedHandlers[VC_BOT_MEETING_ACTIVITY_EVENT]?.({
+      header: { event_id: 'evt_vc_1', event_type: VC_BOT_MEETING_ACTIVITY_EVENT },
+      event: {
+        meeting_actitivty_items: [
+          {
+            activity_event_type: 'transcript_received',
+            meeting: { id: 'm_1', topic: 'Design review' },
+            transcript_received_items: [
+              { sentence_id: 'sent_1', speaker: { open_id: 'ou_a' }, text: 'hello' },
+            ],
+          },
+        ],
+      },
+    });
+    await flushEventWork();
+
+    expect(handlers.handleVcMeetingPush).toHaveBeenCalledTimes(1);
+    expect(handlers.handleVcMeetingPush).toHaveBeenCalledWith(expect.objectContaining({
+      larkAppId: MY_APP_ID,
+      kind: 'meeting_activity',
+      eventType: VC_BOT_MEETING_ACTIVITY_EVENT,
+      eventId: 'evt_vc_1',
+      meeting: expect.objectContaining({ id: 'm_1', topic: 'Design review' }),
+    }));
+  });
+
+  it('dispatches participant meeting joined lifecycle events to the VC handler', async () => {
+    const handlers = makeHandlers();
+    startLarkEventDispatcher(MY_APP_ID, 'secret', handlers);
+
+    capturedHandlers[VC_PARTICIPANT_MEETING_JOINED_EVENT]?.({
+      header: { event_id: 'evt_user_joined', event_type: VC_PARTICIPANT_MEETING_JOINED_EVENT },
+      event: {
+        meeting_id: 'm_user_joined',
+        meeting_no: '123456789',
+        topic: 'User joined review',
+        timestamp: '2026-07-01T17:00:00+08:00',
+      },
+    });
+    await flushEventWork();
+
+    expect(handlers.handleVcMeetingPush).toHaveBeenCalledTimes(1);
+    expect(handlers.handleVcMeetingPush).toHaveBeenCalledWith(expect.objectContaining({
+      larkAppId: MY_APP_ID,
+      kind: 'participant_meeting_joined',
+      eventType: VC_PARTICIPANT_MEETING_JOINED_EVENT,
+      eventId: 'evt_user_joined',
+      meeting: expect.objectContaining({
+        id: 'm_user_joined',
+        meetingNo: '123456789',
+        topic: 'User joined review',
+      }),
+      occurredAtMs: Date.parse('2026-07-01T17:00:00+08:00'),
+    }));
+  });
+
+  it('dedupes VC meeting push redelivery by event id', async () => {
+    const handlers = makeHandlers();
+    startLarkEventDispatcher(MY_APP_ID, 'secret', handlers);
+    const payload = {
+      header: { event_id: 'evt_vc_dup', event_type: VC_BOT_MEETING_ENDED_EVENT },
+      event: { meeting: { id: 'm_1' } },
+    };
+
+    capturedHandlers[VC_BOT_MEETING_ENDED_EVENT]?.(payload);
+    capturedHandlers[VC_BOT_MEETING_ENDED_EVENT]?.(payload);
+    await flushEventWork();
+
+    expect(handlers.handleVcMeetingPush).toHaveBeenCalledTimes(1);
+    expect(handlers.handleVcMeetingPush).toHaveBeenCalledWith(expect.objectContaining({
+      kind: 'meeting_ended',
+      meeting: expect.objectContaining({ id: 'm_1' }),
+    }));
+  });
+
+  it('does not dedupe unkeyed VC activity batches by meeting id', async () => {
+    const handlers = makeHandlers();
+    startLarkEventDispatcher(MY_APP_ID, 'secret', handlers);
+
+    capturedHandlers[VC_BOT_MEETING_ACTIVITY_EVENT]?.({
+      header: { event_type: VC_BOT_MEETING_ACTIVITY_EVENT },
+      event: {
+        meeting_actitivty_items: [
+          {
+            activity_event_type: 'transcript_received',
+            meeting: { id: 'm_1', topic: 'Design review' },
+            transcript_received_items: [
+              { sentence_id: 'sent_1', speaker: { open_id: 'ou_a' }, text: 'first batch' },
+            ],
+          },
+        ],
+      },
+    });
+    capturedHandlers[VC_BOT_MEETING_ACTIVITY_EVENT]?.({
+      header: { event_type: VC_BOT_MEETING_ACTIVITY_EVENT },
+      event: {
+        meeting_actitivty_items: [
+          {
+            activity_event_type: 'transcript_received',
+            meeting: { id: 'm_1', topic: 'Design review' },
+            transcript_received_items: [
+              { sentence_id: 'sent_2', speaker: { open_id: 'ou_b' }, text: 'second batch' },
+            ],
+          },
+        ],
+      },
+    });
+    await flushEventWork();
+
+    expect(handlers.handleVcMeetingPush).toHaveBeenCalledTimes(2);
+  });
+});
 
 // ─── Tests ──────────────────────────────────────────────────────────────────
 
