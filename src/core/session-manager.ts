@@ -14,6 +14,7 @@ import { logger } from '../utils/logger.js';
 import { forkWorker, forkAdoptWorker, killStalePids, getCurrentCliVersion, restoreUsageLimitRuntimeState, setActiveSessionSafe, isRelayableRealSession, closeSession, getActiveSessionsRegistry } from './worker-pool.js';
 import { createCliAdapterSync } from '../adapters/cli/registry.js';
 import { buildBotmuxShellHints } from '../adapters/cli/shared-hints.js';
+import { assertSafeAppId } from '../adapters/cli/read-isolation.js';
 import {
   resolveSkillInjectionModeForApp,
   builtinSkillEntries,
@@ -190,15 +191,32 @@ export function getProjectScanDirs(ds?: DaemonSession): string[] {
 
 // ─── Attachment download ─────────────────────────────────────────────────────
 
-export function getAttachmentsDir(messageId: string): string {
-  return join(resolve(config.session.dataDir), 'attachments', messageId);
+export function getAttachmentsDir(larkAppId: string, messageId: string): string {
+  // Per-appId bucket (attachments/<appId>/<messageId>/): the read-isolation Seatbelt
+  // profile is static at CLI spawn time, so an isolated bot's own uploads can only be
+  // re-allowed by a spawn-time-known key — its appId (see buildV2CarveOuts). The
+  // attachments/ root stays wholesale-denied, covering every sibling's bucket AND the
+  // legacy per-messageId layout. assertSafeAppId keeps the segment traversal-safe —
+  // the same guarantee the carve-out path construction relies on.
+  return join(resolve(config.session.dataDir), 'attachments', assertSafeAppId(larkAppId), messageId);
 }
 
 export async function downloadResources(larkAppId: string, messageId: string, resources: MessageResource[]): Promise<{ attachments: LarkAttachment[]; needLogin: boolean }> {
   if (resources.length === 0) return { attachments: [], needLogin: false };
 
   const attachments: LarkAttachment[] = [];
-  const dir = getAttachmentsDir(messageId);
+  // Resolve the per-appId bucket up front. assertSafeAppId (inside getAttachmentsDir)
+  // throws on a path-unsafe appId (only reachable via a hand-edited bots.json — real
+  // Feishu ids always pass). SOFT-fail rather than let it propagate: an invalid appId
+  // must not sink the whole message (event-dispatcher would drop the text too). Log and
+  // return no attachments, same shape as a download failure — the text still processes.
+  let dir: string;
+  try {
+    dir = getAttachmentsDir(larkAppId, messageId);
+  } catch (err: any) {
+    logger.warn(`[${larkAppId}] skipping attachment download — unusable appId as path segment: ${err.message}`);
+    return { attachments: [], needLogin: false };
+  }
   let needLogin = false;
 
   for (const res of resources) {
