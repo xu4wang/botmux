@@ -204,8 +204,19 @@ export interface LarkMention {
   key: string;        // e.g. "@_user_1"
   name: string;       // display name
   openId?: string;    // open_id of the mentioned user/bot
+  userId?: string;    // user_id of the mentioned user, when Lark includes it
   unionId?: string;   // stable user id across bot app namespaces when present
   idType?: string;     // e.g. "open_id" or "app_id" from Lark event payloads
+}
+
+export interface SubstituteTrigger {
+  target: {
+    name?: string;
+    openId?: string;
+    userId?: string;
+    unionId?: string;
+  };
+  disclosure?: 'prefix' | 'none';
 }
 
 export interface LarkMessage {
