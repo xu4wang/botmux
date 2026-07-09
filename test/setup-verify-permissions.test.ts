@@ -38,6 +38,8 @@ import {
   buildRemainingSteps,
   BOTMUX_REQUIRED_SCOPES,
   DOC_FEATURE_SCOPES,
+  VC_MEETING_BOT_EVENTS,
+  VC_MEETING_FEATURE_SCOPES,
 } from '../src/setup/verify-permissions.js';
 import { DOC_COMMENT_OAUTH_SCOPES } from '../src/utils/user-token.js';
 
@@ -307,5 +309,32 @@ describe('BOTMUX_REQUIRED_SCOPES', () => {
     expect(DOC_FEATURE_SCOPES.map(s => s.name).sort()).toEqual([...DOC_COMMENT_OAUTH_SCOPES].sort());
     // Doc-feature scopes are opt-in → must never be critical (would nag every bot).
     expect(DOC_FEATURE_SCOPES.every(s => !s.critical)).toBe(true);
+  });
+
+  it('VC meeting feature scopes are valid manifest scopes and opt-in only', async () => {
+    const { readFileSync } = await import('node:fs');
+    const { fileURLToPath } = await import('node:url');
+    const { dirname, join } = await import('node:path');
+    const here = dirname(fileURLToPath(import.meta.url));
+    const manifest = JSON.parse(readFileSync(join(here, '..', 'src', 'setup', 'lark-scopes.json'), 'utf-8'));
+    const declared = new Set<string>([...(manifest.scopes?.tenant ?? []), ...(manifest.scopes?.user ?? [])]);
+
+    const missing = VC_MEETING_FEATURE_SCOPES.filter(s => !declared.has(s.name));
+    expect(missing, `VC_MEETING_FEATURE_SCOPES not in lark-scopes.json: ${missing.map(s => s.name).join(', ')}`).toEqual([]);
+    expect(VC_MEETING_FEATURE_SCOPES.map(s => s.name).sort()).toEqual([
+      'vc:meeting.bot.join:write',
+      'vc:meeting.meetingevent:read',
+      'vc:meeting.message:write',
+    ]);
+    expect(VC_MEETING_FEATURE_SCOPES.every(s => !s.critical)).toBe(true);
+  });
+
+  it('VC meeting bot event checklist uses the confirmed Open Platform keys', () => {
+    expect([...VC_MEETING_BOT_EVENTS]).toEqual([
+      'vc.bot.meeting_invited_v1',
+      'vc.bot.meeting_activity_v1',
+      'vc.bot.meeting_ended_v1',
+      'vc.meeting.participant_meeting_joined_v1',
+    ]);
   });
 });

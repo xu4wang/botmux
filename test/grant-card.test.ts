@@ -58,7 +58,7 @@ describe('buildGrantCard', () => {
     expect(flat).toContain('<at id=ou_b></at>');
   });
 
-  // 申晗实测 bug 修复：bot grantee 绝不能用 <at>（会唤醒对方 bot 的 daemon 误拉空会话），
+  // 实测 bug 修复：bot grantee 绝不能用 <at>（会唤醒对方 bot 的 daemon 误拉空会话），
   // 改用纯文本名字；真人 grantee 仍 @ 点名（真人被 @ 不会自动开会话）。
   it('buildGrantNotifyCard renders bot grantees as PLAIN name (no <at>), humans as @', () => {
     const card = JSON.parse(buildGrantNotifyCard('chat', [

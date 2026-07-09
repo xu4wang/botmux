@@ -137,7 +137,7 @@ export class ZellijObserveBackend implements ObserveBackend {
    * Every `zellij action` the pollers run (dump-screen poll @700ms, list-panes
    * liveness @1000ms) connects a transient client to the server, which makes the
    * server repaint ALL attached clients — so an attached web client redraws its
-   * zellij chrome ~2×/s, i.e. the flicker 申晗 saw. While ≥1 attach client is up
+   * zellij chrome ~2×/s, i.e. the reported flicker. While ≥1 attach client is up
    * the dump-screen poll is redundant (the attach IS the live view) so we stop
    * it, and liveness degrades to the churn-free pid syscall (see checkLiveness).
    * Reference-counted so multiple browser tabs compose; resumes on the last one.

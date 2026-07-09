@@ -4,7 +4,7 @@
 
 ## 1. 抽象总览
 
-botmux 的会话后端在 [types.ts](file:///Users/bytedance/Playground/botmux/src/adapters/backend/types.ts) 处定义为统一接口 `SessionBackend`。截至本 PR，三种后端在抽象层级上是这样分布的：
+botmux 的会话后端在 [types.ts](../../src/adapters/backend/types.ts) 处定义为统一接口 `SessionBackend`。截至本 PR，三种后端在抽象层级上是这样分布的：
 
 ```
                        SessionBackend (接口)
@@ -40,7 +40,7 @@ botmux 的会话后端在 [types.ts](file:///Users/bytedance/Playground/botmux/s
 
 | 概念 | tmux 侧 | herdr 侧 | PR 中的表达 / 复用情况 |
 |---|---|---|---|
-| **持久会话命名** | `bmx-<sessionId.slice(0,8)>` | 同 | [TmuxBackend.sessionName](file:///Users/bytedance/Playground/botmux/src/adapters/backend/tmux-backend.ts#L67-L70) ↔ [HerdrBackend.sessionName](file:///Users/bytedance/Playground/botmux/src/adapters/backend/herdr-backend.ts#L110-L112)，命名规则与签名一致 ✅ |
+| **持久会话命名** | `bmx-<sessionId.slice(0,8)>` | 同 | [TmuxBackend.sessionName](../../src/adapters/backend/tmux-backend.ts#L67-L70) ↔ [HerdrBackend.sessionName](../../src/adapters/backend/herdr-backend.ts#L110-L112)，命名规则与签名一致 ✅ |
 | **静态生命周期 API** | `hasSession` / `killSession` / `listBotmuxSessions` | 同 | 形成事实上的「PersistentBackend 静态接口」，但**未提取成 TS interface**；多处用 `backendType === 'tmux' ? TmuxBackend : HerdrBackend` 二分支 ⚠️ |
 | **可用性探测** | `TmuxBackend.isAvailable()` 走 `probeTmuxFunctional` | `HerdrBackend.isAvailable()` 走 `herdr --version` | 概念一致 ✅，但语义强度不同（tmux 是「能起 server」，herdr 只是「二进制存在」） |
 | **后端选择入口** | `selectSessionBackend({ useTmux })` | `selectSessionBackend({ backendType })` | 入参从 boolean 改成 `BackendType`，是合理升级 ✅ |
@@ -49,7 +49,7 @@ botmux 的会话后端在 [types.ts](file:///Users/bytedance/Playground/botmux/s
 | **Pipe 模式标志** | `isPipeMode = true`（pipe-pane 复刻，不 attach） | `isPipeMode = true`（pane read 轮询） | worker 把两者都标 `isPipeMode`，下游 transient-snapshot / web-terminal 路径**对待方式相同** ✅ |
 | **Tmux 模式标志** | `isTmuxMode = true` 控制 idle / spawn / resize 走 tmux 分支 | `isTmuxMode = false`（herdr 不依赖 tmux idle 路径） | 合理：`isTmuxMode` 是 tmux-specific，不应污染 herdr 路径 ✅ |
 | **当前屏幕/视口快照** | `TmuxPipeBackend.captureCurrentScreen / captureViewport` 走 `tmux capture-pane` | `HerdrBackend.captureCurrentScreen / captureViewport` 走 `herdr pane read --source recent / visible` | 通过把这三个方法**升格为 `SessionBackend` 可选成员** + transient-snapshot 改成鸭子类型 `SnapshotCapableBackend`，把 instanceof 依赖去掉了 ✅ 这是本 PR 最干净的一处抽象提升 |
-| **Pane 尺寸** | `TmuxPipeBackend.getPaneSize()` 实时查询 tmux | `HerdrBackend.getPaneSize()` 返回 `resize()` 缓存的值 | herdr 没有「向 backend 查询真实尺寸」的能力（pane read 也没返回尺寸），只能靠本地缓存 — 这是 herdr 协议层限制，可以接受 ⚠️ 但 [discoverHerdrAdoptableSessions](file:///Users/bytedance/Playground/botmux/src/core/session-discovery.ts#L297-L344) 处直接硬编码 `paneCols: 200, paneRows: 50` 是真假数据 ❌ |
+| **Pane 尺寸** | `TmuxPipeBackend.getPaneSize()` 实时查询 tmux | `HerdrBackend.getPaneSize()` 返回 `resize()` 缓存的值 | herdr 没有「向 backend 查询真实尺寸」的能力（pane read 也没返回尺寸），只能靠本地缓存 — 这是 herdr 协议层限制，可以接受 ⚠️ 但 [discoverHerdrAdoptableSessions](../../src/core/session-discovery.ts#L297-L344) 处直接硬编码 `paneCols: 200, paneRows: 50` 是真假数据 ❌ |
 | **Adopt validation** | `validateTmuxAdoptTarget(target, pid)` 走 pid tree 比对 | `validateHerdrAdoptTarget(sessionName, paneId)` 走 `agent list` 包含查 | `validateAdoptTargetState` 把两者收口到三态 `'alive' \| 'missing' \| 'unknown'`，**新增 unknown 是合理的**（herdr CLI 暂时报错时不应误关 session）✅ |
 | **Bridge transcript（消息回灌）** | tmux adopt 走 `bridgeJsonlPath` (claude) / codex rollout / coco events / mtr sqlite | 同（herdr adopt 复用了同一套 transcript 路径） | 复用了 `setupAdoptTranscriptBridges` 抽出的 helper ✅；但 herdr 缺少 PTY idle 信号，PR 引入了 `HERDR_ADOPT_BRIDGE_QUIET_MS=3000` 静默触发器 — 这是 herdr-specific 必要补丁 ✅ |
 | **Persistent backing-session 重建** | `restoreActiveSessions` 中 tmux 专属循环 + cliId-mismatch 守卫 | 同 | PR 把 tmux 专属循环抽象成 `getSessionPersistentBackendType / persistentSessionName / persistentSessionExists / killPersistentSession` 四个 helper，**循环本身只写一次** ✅；但四个 helper 都是 `if backendType === 'tmux' then Tmux else Herdr` 二分支，抽象层级**比真正的 strategy/registry 低一档** ⚠️ |
@@ -134,7 +134,7 @@ sequenceDiagram
 
 ### ⚠️ 应该类比但抽象不够彻底的
 
-1. **PersistentBackend 静态接口**：tmux 和 herdr 都暴露 `sessionName / hasSession / killSession / listBotmuxSessions / isAvailable` 五个静态方法，签名完全一致。本 PR 在 [session-manager.ts](file:///Users/bytedance/Playground/botmux/src/core/session-manager.ts) 和 [worker-pool.ts](file:///Users/bytedance/Playground/botmux/src/core/worker-pool.ts) 用 `if (backendType === 'tmux') ... else ...` 二分支调度，本应抽成一个 registry：
+1. **PersistentBackend 静态接口**：tmux 和 herdr 都暴露 `sessionName / hasSession / killSession / listBotmuxSessions / isAvailable` 五个静态方法，签名完全一致。本 PR 在 [session-manager.ts](../../src/core/session-manager.ts) 和 [worker-pool.ts](../../src/core/worker-pool.ts) 用 `if (backendType === 'tmux') ... else ...` 二分支调度，本应抽成一个 registry：
     ```ts
     interface PersistentBackendOps {
       sessionName(id: string): string;
@@ -148,7 +148,7 @@ sequenceDiagram
     };
     ```
     引入第三种 persistent backend 时再加二分支会指数级膨胀。
-2. **PaneSize 真值来源**：tmux 通过 `display -p` 实时查询，herdr 协议层无此能力 → 但 [discoverHerdrAdoptableSessions](file:///Users/bytedance/Playground/botmux/src/core/session-discovery.ts) 不应硬编码 200×50；应该至少从 worker 当前协商的尺寸传过来，或在 session 元数据里持久化。
+2. **PaneSize 真值来源**：tmux 通过 `display -p` 实时查询，herdr 协议层无此能力 → 但 [discoverHerdrAdoptableSessions](../../src/core/session-discovery.ts) 不应硬编码 200×50；应该至少从 worker 当前协商的尺寸传过来，或在 session 元数据里持久化。
 
 ### ❌ 不能直接类比、需要 herdr-specific 处理的
 

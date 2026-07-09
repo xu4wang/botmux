@@ -8,7 +8,7 @@ import { readFileSync, mkdirSync, existsSync } from 'node:fs';
 import { atomicWriteFileSync } from '../../utils/atomic-write.js';
 import { join } from 'node:path';
 import { getBot, getAllBots, findOncallChat, getOwnerOpenId, type BotState } from '../../bot-registry.js';
-import { config } from '../../config.js';
+import { config, isVcMeetingAgentGloballyEnabled, vcMeetingAgentGlobalListenerBotAppId } from '../../config.js';
 import { getChatInfo, getChatMode, getCachedChatMode, listChatBotMembers, replyMessage, sendMessage, sendUserMessage, isHumanOpenId, updateMessage } from './client.js';
 import { logger } from '../../utils/logger.js';
 import { BoundedMap } from '../../utils/bounded-map.js';
@@ -23,7 +23,16 @@ import { isPlatformTeamBot, isPlatformHallChat, isPlatformTeamMemberChat } from 
 import { recordBotUnionId, recordBotUnionIdFromMentions } from '../../services/bot-union-ids-store.js';
 import { getDocSubscription, listAllDocSubscriptions, type DocSubscription } from '../../services/doc-subs-store.js';
 import { getDocComment, isBotAuthoredReply, hasBotSentinel, commentTriggerAllowed } from './doc-comment.js';
-import { BOTMUX_REQUIRED_SCOPES, DOC_FEATURE_SCOPES, DOC_COMMENT_EVENT, buildScopeDeepLink } from '../../setup/verify-permissions.js';
+import {
+  BOTMUX_REQUIRED_SCOPES,
+  DOC_FEATURE_SCOPES,
+  DOC_COMMENT_EVENT,
+  VC_MEETING_BOT_EVENTS,
+  VC_MEETING_FEATURE_SCOPES,
+  VC_MEETING_REALTIME_VOICE_SCOPES,
+  buildEventSubDeepLink,
+  buildScopeDeepLink,
+} from '../../setup/verify-permissions.js';
 import { type Brand, larkHosts, normalizeBrand, sdkDomain } from './lark-hosts.js';
 import { tryHandleGrantCommand } from './grant-command.js';
 import { tryHandleReplyModeCommand } from './reply-mode-command.js';
@@ -36,6 +45,15 @@ import { ensureDefaultOncallBound } from '../../services/oncall-store.js';
 import { resolveRegularGroupMode, resolveGroupMentionMode } from '../../services/chat-reply-mode-store.js';
 import { buildSummaryCommandPrompt, type SummaryChatKind, type SummaryCommandMatch, type SummaryCommandRuntimeContext } from './summary-command.js';
 import { DEFAULT_SUMMARY_PROMPT, summaryRangeFromBotConfig } from '../../services/summary-range-store.js';
+import {
+  parseVcMeetingPushEvent,
+  VC_BOT_MEETING_ACTIVITY_EVENT,
+  VC_BOT_MEETING_ENDED_EVENT,
+  VC_BOT_MEETING_INVITED_EVENT,
+  VC_PARTICIPANT_MEETING_JOINED_EVENT,
+  type VcMeetingPushEventType,
+} from '../../vc-agent/push-source.js';
+import type { VcMeetingPushContext, VcMeetingPushEventKind } from '../../vc-agent/types.js';
 
 // 大厅回执互教的防环闸：每进程对同一打卡者只回一次（见 hall swallow 分支）。
 const hallEchoReplied = new Set<string>();
@@ -277,6 +295,49 @@ export async function checkRequiredScopes(larkAppId: string): Promise<void> {
       }
     } catch (err: any) {
       logger.debug(`[${larkAppId}] doc-feature readiness check errored: ${err?.message ?? err}`);
+    }
+
+    // VC meeting agent readiness: app scopes can be checked; Open Platform event
+    // subscription status cannot be listed via public API, so we surface the
+    // exact required event keys as an explicit operator checklist.
+    try {
+      const globalVcListenerAppId = vcMeetingAgentGlobalListenerBotAppId();
+      if (
+        isVcMeetingAgentGloballyEnabled()
+        && bot.config.vcMeetingAgent?.enabled === true
+        && (!globalVcListenerAppId || globalVcListenerAppId === larkAppId)
+      ) {
+        const requiredVcScopes = bot.config.vcMeetingAgent.realtimeVoice?.enabled === true
+          ? [...VC_MEETING_FEATURE_SCOPES, ...VC_MEETING_REALTIME_VOICE_SCOPES]
+          : VC_MEETING_FEATURE_SCOPES;
+        const missingVc = requiredVcScopes.filter(s => !grantedScopes.has(s.name));
+        const eventList = VC_MEETING_BOT_EVENTS.map(e => `\`${e}\``).join('、');
+        const eventSubUrl = buildEventSubDeepLink(bot.config.larkAppId, brand);
+        if (missingVc.length > 0) {
+          const summary = missingVc.map(s => `${s.name}(${s.desc})`).join('、');
+          logger.error(
+            `[${larkAppId}] vcMeetingAgent 已启用但缺 ${missingVc.length} 项 VC 权限：${summary}。` +
+            `会议智能体入会/读事件可能失败。请到权限管理开通，并确认事件订阅页包含 ${VC_MEETING_BOT_EVENTS.join(', ')}。`,
+          );
+          const adminVc = getAdminOpenId(bot);
+          if (adminVc) {
+            const lines = missingVc.map((s, i) => `${i + 1}. **${s.desc}** (\`${s.name}\`)\n   ${buildScopeDeepLink(bot.config.larkAppId, s.name, brand)}`).join('\n\n');
+            await dmAdmin(larkAppId, adminVc,
+              `⚠️ 机器人 "${bot.botName ?? larkAppId}" 已启用 \`vcMeetingAgent\`，但缺少会议智能体所需权限：\n\n${lines}\n\n` +
+              `另外请确认开发者后台「事件订阅」里已添加这 3 个事件：${eventList}\n\n` +
+              `事件订阅页：${eventSubUrl}\n\n` +
+              `注意：飞书目前没有公开 API 可自动确认这 3 个事件是否已订阅/发布；缺事件时 daemon 只会收不到 push，不会有运行时错误。开通 + 发布后执行 \`botmux restart\`。`,
+              `missing vc-meeting scopes: ${missingVc.map(s => s.name).join(',')}`);
+          }
+        } else {
+          logger.info(
+            `[${larkAppId}] vcMeetingAgent VC 权限齐全；请确保后台事件订阅页已添加 ${VC_MEETING_BOT_EVENTS.join(', ')} ` +
+            `并已发布（无法自动检测）：${eventSubUrl}`,
+          );
+        }
+      }
+    } catch (err: any) {
+      logger.debug(`[${larkAppId}] vc-meeting readiness check errored: ${err?.message ?? err}`);
     }
 
     // Diff against the canonical list. Critical-missing is the main signal;
@@ -847,14 +908,21 @@ export function mentionsAnotherMember(larkAppId: string, message: any): boolean 
   const mentions: any[] = message.mentions ?? [];
   for (const m of mentions) {
     // mentionOpenId() tolerates both the WS event object shape ({ open_id }) and
-    // the REST bare-string shape (a bot @ is a "cli_…" string). A naked
-    // m.id.open_id silently misses the string form → the redirect carve-out
-    // breaks and the ambient bot keeps answering instead of backing off.
+    // the REST bare-string shape. Bot mentions may also arrive as app_id
+    // (id_type='app_id' / { app_id }) with no open_id; isBotMentioned handles
+    // that shape via mentionMatchesBot(), so the redirect/yield check must too.
     const oid = mentionOpenId(m);
-    if (!oid) continue;
-    if (oid === botOpenId) continue; // that's me
-    if (oid === 'all') continue;     // @all → everyone incl. me
-    return true;                     // a specific other member
+    if (oid) {
+      if (oid === botOpenId) continue; // that's me
+      if (oid === 'all') continue;     // @all → everyone incl. me
+      return true;                     // a specific other member
+    }
+    const appId = mentionAppId(m);
+    if (appId) {
+      if (appId === larkAppId) continue; // that's me, addressed by app_id
+      if (appId === 'all') continue;
+      return true;                       // another bot addressed by app_id
+    }
   }
 
   // 2. inline `at` nodes in post content (bot-sent / rich messages)
@@ -1023,7 +1091,7 @@ export function evaluateTalk(
   }
   // 平台团队成员（人）：发送者 union_id 是本群所属平台团队的成员 → talk 免 grant。
   // 严格 chat 作用域（isPlatformTeamMemberChat 要求成员与群在同一团队），只放 talk：
-  // canOperate 不引这一腿，/restart 等仍限 allowedUsers。滕鹏飞在团队群里 @ bot 即免卡。
+  // canOperate 不引这一腿，/restart 等仍限 allowedUsers。授权用户在团队群里 @ bot 即免卡。
   if (memberUnionId && isPlatformTeamMemberChat(config.session.dataDir, chatId, memberUnionId)) {
     return { allowed: true, reason: 'teamMember' };
   }
@@ -1192,6 +1260,16 @@ export interface EventHandlers {
   /** 文档评论入口（/subscribe-lark-doc）：一条命中订阅的文档评论被喂进其绑定
    *  会话。daemon 负责定位会话、投递给 worker、记录该轮回评论的落点。 */
   handleDocComment?: (ctx: DocCommentContext) => Promise<void>;
+  /** VC bot meeting push events (`vc.bot.meeting_*_v1`). ACK-safe; daemon owns meeting session state. */
+  handleVcMeetingPush?: (ctx: VcMeetingPushContext) => Promise<void>;
+  /** Best-effort hook before a human inbound turn reaches the CLI session. Used
+   *  by VC meeting listener groups to catch up pending meeting context before a
+   *  user asks the selected agent a follow-up question. */
+  beforeSessionTurn?: (
+    data: any,
+    ctx: RoutingContext,
+    meta: { senderOpenId?: string; explicitlyMentionedThisBot: boolean },
+  ) => Promise<void>;
 }
 
 /** 一条已通过订阅 + 触发范围 + 自触发过滤的文档评论，交给 daemon 投递。 */
@@ -1540,6 +1618,24 @@ function handleCommentEventAckSafe(data: any, larkAppId: string, handlers: Event
   }, 'doc-comment event');
 }
 
+function handleVcMeetingPushEventAckSafe(
+  data: any,
+  larkAppId: string,
+  handlers: EventHandlers,
+  kind: VcMeetingPushEventKind,
+  eventType: VcMeetingPushEventType,
+): void {
+  const parsed = parseVcMeetingPushEvent({ data, larkAppId, kind, eventType });
+  const eventKey = `${eventType}:${larkAppId}:${parsed.eventId ?? unkeyableEventKey()}`;
+  scheduleAckSafeEvent(eventKey, async () => {
+    if (!handlers.handleVcMeetingPush) {
+      logger.info(`[vc-agent] ${eventType} ignored: daemon has no VC meeting handler`);
+      return;
+    }
+    await handlers.handleVcMeetingPush(parsed);
+  }, `vc-meeting ${kind} event`);
+}
+
 async function processCommentEvent(
   parsed: ReturnType<typeof parseCommentEvent>,
   larkAppId: string,
@@ -1635,6 +1731,14 @@ export function startLarkEventDispatcher(larkAppId: string, larkAppSecret: strin
     // 订阅对应事件。注意：评论事件是 per-文档 推送（订阅时按 file_token 注册）。
     'drive.file.comment_add_v1': (data: any) => handleCommentEventAckSafe(data, larkAppId, handlers),
     'drive.notice.comment_add_v1': (data: any) => handleCommentEventAckSafe(data, larkAppId, handlers),
+    [VC_BOT_MEETING_INVITED_EVENT]: (data: any) =>
+      handleVcMeetingPushEventAckSafe(data, larkAppId, handlers, 'meeting_invited', VC_BOT_MEETING_INVITED_EVENT),
+    [VC_BOT_MEETING_ACTIVITY_EVENT]: (data: any) =>
+      handleVcMeetingPushEventAckSafe(data, larkAppId, handlers, 'meeting_activity', VC_BOT_MEETING_ACTIVITY_EVENT),
+    [VC_BOT_MEETING_ENDED_EVENT]: (data: any) =>
+      handleVcMeetingPushEventAckSafe(data, larkAppId, handlers, 'meeting_ended', VC_BOT_MEETING_ENDED_EVENT),
+    [VC_PARTICIPANT_MEETING_JOINED_EVENT]: (data: any) =>
+      handleVcMeetingPushEventAckSafe(data, larkAppId, handlers, 'participant_meeting_joined', VC_PARTICIPANT_MEETING_JOINED_EVENT),
     'card.action.trigger': (data: any) => handleCardActionAckSafe(data, larkAppId, handlers),
     // 表情回复事件——一旦在开发者后台订阅了 reaction，SDK 每收到一次都会因
     // 没有 handler 打 "no im.message.reaction.created_v1 handle" 警告刷屏。
@@ -1915,13 +2019,14 @@ export function startLarkEventDispatcher(larkAppId: string, larkAppSecret: strin
         // "@ required" so this fold-back is skipped (non-@ thread chatter falls
         // through to the gate below and is ignored — only an explicit @ continues
         // a shared topic); 'topic', 'never' and 'ambient' enable the seamless
-        // no-@ fold-back. Carve-out: under 'ambient', a non-@ reply that @mentions
-        // another specific member (person/bot) is a redirect to someone else →
-        // back off, don't fold it in (mentionsAnotherMember). 'never'
-        // (unconditional) and 'topic' are unaffected.
+        // no-@ fold-back. Carve-out: under 'topic' / 'ambient', a non-@ reply
+        // that @mentions another specific member (person/bot) is a redirect to
+        // someone else → back off, don't fold it in (mentionsAnotherMember).
+        // 'never' stays unconditional by design.
+        const mentionModeForAlias = resolveGroupMentionMode(larkAppId);
         if (!explicitlyMentionedThisBot
-            && resolveGroupMentionMode(larkAppId) !== 'always'
-            && !(resolveGroupMentionMode(larkAppId) === 'ambient' && mentionsAnotherMember(larkAppId, message))
+            && mentionModeForAlias !== 'always'
+            && !((mentionModeForAlias === 'topic' || mentionModeForAlias === 'ambient') && mentionsAnotherMember(larkAppId, message))
             && routing.scope === 'thread' && message.root_id && message.thread_id && chatType === 'group') {
           const alias = handlers.resolveReplyThreadAlias?.(message.root_id, chatId, larkAppId) ?? null;
           if (alias) {
@@ -2074,7 +2179,9 @@ export function startLarkEventDispatcher(larkAppId: string, larkAppSecret: strin
           //   • 'topic' — only inside a topic the bot already owns: a non-@ reply
           //     INSIDE such a thread (new-topic / 话题群 thread the bot owns, or a
           //     shared-topic alias via replyRootId) continues without @, while a
-          //     brand-new top-level conversation still requires @.
+          //     brand-new top-level conversation still requires @. If the user
+          //     explicitly @mentions another member/bot without @ing this bot,
+          //     treat it as a hand-off and stay quiet.
           // Both gated on isAllowed so restricted groups still only react to
           // permitted senders. (The shared fold-back's replyRootId is already
           // handled by the first clause.)
@@ -2100,7 +2207,7 @@ export function startLarkEventDispatcher(larkAppId: string, larkAppSecret: strin
             || (isAllowed && mentionMode === 'never')
             || (isAllowed && mentionMode === 'ambient' && !mentionsAnotherMember(larkAppId, message))
             || ownedTopicGroupFollowup
-            || (isAllowed && mentionMode === 'topic' && ownsSession && !!message.thread_id)
+            || (isAllowed && mentionMode === 'topic' && ownsSession && !!message.thread_id && !mentionsAnotherMember(larkAppId, message))
             || (ownsSession && isAllowed && !!stats && stats.userCount <= 1 && stats.botCount <= 1);
           if (!relax) {
             const access = await checkGroupMessageAccess(larkAppId, message, chatId, senderOpenId, humanSenderUnionId);
@@ -2157,6 +2264,10 @@ export function startLarkEventDispatcher(larkAppId: string, larkAppSecret: strin
             ? { name: 'summary-command', chatKind: summaryCommandMatch.chatKind }
             : undefined,
         };
+        if (explicitlyMentionedThisBot) {
+          await handlers.beforeSessionTurn?.(data, ctx, { senderOpenId, explicitlyMentionedThisBot });
+          ownsSession = handlers.isSessionOwner?.(ctx.anchor, larkAppId) ?? ownsSession;
+        }
         // Serialize per anchor so two messages to the same thread/chat are
         // processed in arrival order — never concurrently. Without this a fast
         // second message interleaves with the first's async session-spawn and is
@@ -2185,10 +2296,21 @@ export function startLarkEventDispatcher(larkAppId: string, larkAppSecret: strin
       try {
         const et: string = data?.header?.event_type ?? data?.event_type ?? data?.type ?? 'unknown';
         const isCommentish = typeof et === 'string' && et.includes('comment');
+        const isVcMeeting = typeof et === 'string' && (et.startsWith('vc.bot.meeting_') || et === VC_PARTICIPANT_MEETING_JOINED_EVENT);
         if (isCommentish) {
           const ev = data?.event ?? data;
           const p = parseCommentEvent(data);
           logger.info(`[ws-event] ${larkAppId} event_type=${et} → parsed fileToken=${p.fileToken ?? '?'} commentId=${p.commentId ?? '?'} replyId=${p.replyId ?? '?'} isMentioned=${p.isMentioned} | notice_meta=${JSON.stringify(ev?.notice_meta ?? ev?.noticeMeta ?? null)}`);
+        } else if (isVcMeeting) {
+          const kind: VcMeetingPushEventKind = et === VC_BOT_MEETING_INVITED_EVENT
+            ? 'meeting_invited'
+            : et === VC_BOT_MEETING_ENDED_EVENT
+              ? 'meeting_ended'
+              : et === VC_PARTICIPANT_MEETING_JOINED_EVENT
+                ? 'participant_meeting_joined'
+                : 'meeting_activity';
+          const parsed = parseVcMeetingPushEvent({ data, larkAppId, kind, eventType: et as VcMeetingPushEventType });
+          logger.info(`[ws-event] ${larkAppId} event_type=${et} eventId=${parsed.eventId ?? '?'} meetingId=${parsed.meeting.id || '?'} items=${Array.isArray((data?.event ?? data)?.meeting_actitivty_items) ? (data?.event ?? data).meeting_actitivty_items.length : '?'}`);
         } else if (process.env.DEBUG) {
           logger.info(`[ws-event] ${larkAppId} event_type=${et}`);
         }

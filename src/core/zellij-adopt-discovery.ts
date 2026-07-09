@@ -202,7 +202,7 @@ export function discoverAdoptableZellijSessions(filterCliId?: CliId): ZellijAdop
     // specific CLI pid WITHOUT a cwd match, which is essential when several
     // panes/tabs run the SAME cli from the SAME dir (e.g. multiple `codex` in
     // ~): a cwd match is then ambiguous and silently drops them all (the bug
-    // 申晗 hit). Counts must match or the alignment is unreliable → refuse.
+    // reported issue). Counts must match or the alignment is unreliable → refuse.
     // paneShellChildren filters the transient ps/zellij-client processes that
     // briefly parent to the server during discovery (see its doc) — only
     // persistent pane shells/commands remain, so the count guard is stable.

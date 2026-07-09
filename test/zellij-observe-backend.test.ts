@@ -66,7 +66,7 @@ describe('ZellijObserveBackend input encoding', () => {
 
   it('normalises dump-screen bare \\n to \\r\\n (else xterm staircases lines)', () => {
     // zellij emits "line one\nline two\n…"; the xterm needs \r\n or each line
-    // continues from the previous end column (the misalignment 申晗 hit).
+    // continues from the previous end column (the reported misalignment).
     expect(be.captureViewport()).toBe('line one\r\nline two\r\nline three\r\n');
     expect(be.captureCurrentScreen()).toBe('line one\r\nline two\r\nline three\r\n');
   });

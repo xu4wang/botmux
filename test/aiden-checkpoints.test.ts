@@ -15,7 +15,7 @@ function writeCheckpoint(root: string, cwd: string, sessionId: string, checkpoin
 
 describe('aidenWorkspaceKey', () => {
   it('matches Aiden checkpoint workspace hashing', () => {
-    expect(aidenWorkspaceKey('/Users/bytedance/git/botmux')).toBe('76aea787c17c');
+    expect(aidenWorkspaceKey('/Users/example/git/botmux')).toBe('9bb857f57788');
   });
 });
 

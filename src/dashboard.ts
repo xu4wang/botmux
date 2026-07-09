@@ -43,6 +43,7 @@ import {
 } from './setup/cli-selection.js';
 import { invalidWorkingDirs } from './utils/working-dir.js';
 import { invalidateGlobalConfigCache, mergeGlobalConfig, readGlobalConfig, type MaintenanceConfig, type RepoPickerMode, type WhiteboardConfig } from './global-config.js';
+import { hostLocalTimeZone, scheduleTimeZone } from './utils/timezone.js';
 import { buildDashboardUrls, type DashboardUrls } from './core/dashboard-url.js';
 import { deleteWhiteboard, listWhiteboards, readWhiteboard, whiteboardEnabled } from './services/whiteboard-store.js';
 import { isLocalDevInstall, botmuxVersion, botmuxCliEntry } from './utils/install-info.js';
@@ -87,7 +88,8 @@ import {
   updateInstalledSkillAsync,
 } from './services/skill-registry-store.js';
 import { redactGitUrlCredentials } from './core/skills/sources.js';
-import { loadBotConfigs } from './bot-registry.js';
+import { getBot, loadBotConfigs, type BotConfig, type VcMeetingAgentConfig } from './bot-registry.js';
+import { findEntryIndex, readRawConfig, requireConfigPath, writeRawConfigAtomic } from './services/config-store.js';
 import type { BotSkillPolicy, SkillPackage } from './core/skills/types.js';
 import { discoverNativeCliSkillGroups } from './core/skills/discovery.js';
 import { analyzeSkillReferences, type SkillReferenceBot, type SkillReferenceSummary } from './core/skills/references.js';
@@ -101,6 +103,11 @@ import { startPlatformTunnelClient, type PlatformBotInfo, type PlatformTeamSyncM
 import { applyPlatformTeamSync, getPlatformTeamSyncRev, listPlatformTeams } from './services/platform-team-store.js';
 import { getBotUnionId } from './services/bot-union-ids-store.js';
 import { cleanupIdleSessions, parseIdleCleanupHours } from './dashboard/session-cleanup.js';
+import { larkHosts } from './im/lark/lark-hosts.js';
+import {
+  VC_MEETING_FEATURE_SCOPES,
+  VC_MEETING_REALTIME_VOICE_SCOPES,
+} from './setup/verify-permissions.js';
 
 const SECRET_PATH = join(homedir(), '.botmux', '.dashboard-secret');
 const TOKEN_PATH = join(homedir(), '.botmux', '.dashboard-token');
@@ -284,6 +291,18 @@ interface ResolvedDashboardSettings {
   openTerminalInFeishu: boolean;
   /** Experimental current-chat bot discovery via Lark `/members/bots`. Default ON. */
   chatBotDiscovery: boolean;
+  /** Machine-wide VC meeting listener kill-switch. Default ON. */
+  vcMeetingAgent: {
+    enabled: boolean;
+    listenerBotAppId?: string | null;
+    listenerBotOptions: Array<{
+      larkAppId: string;
+      botName?: string | null;
+      cliId?: string;
+      vcMeetingAgentEnabled: boolean;
+      hasLarkCliProfile: boolean;
+    }>;
+  };
   repoPickerMode: RepoPickerMode;
   /** Auto-update / auto-restart schedule (off by default). */
   maintenance: MaintenanceConfig;
@@ -295,6 +314,195 @@ interface ResolvedDashboardSettings {
   /** 远程访问: emit central-platform URLs (terminals / cards / webhooks) instead
    *  of local host:port. Off by default; only meaningful when bound. */
   remoteAccess: boolean;
+  /** Configured schedule-task timezone override (IANA), or null when unset
+   *  ⇒ the scheduler follows `hostTimeZone`. */
+  scheduleTimeZone: string | null;
+  /** Host's auto-detected local zone (e.g. 'America/Los_Angeles'). */
+  hostTimeZone: string;
+  /** The TRUE effective zone the scheduler fires/displays in = scheduleTimeZone()
+   *  (env `BOTMUX_SCHEDULE_TIMEZONE` → config → host). The UI must use THIS for
+   *  "currently effective" — never reconstruct it from configured||host, which
+   *  ignores the env override. */
+  effectiveScheduleTimeZone: string;
+}
+
+function vcMeetingListenerBotOptions(): ResolvedDashboardSettings['vcMeetingAgent']['listenerBotOptions'] {
+  try {
+    const onlineByAppId = new Map(registry.list().map(bot => [bot.larkAppId, bot] as const));
+    return loadBotConfigs().map(bot => ({
+      larkAppId: bot.larkAppId,
+      botName: bot.displayName ?? onlineByAppId.get(bot.larkAppId)?.botName ?? bot.name ?? null,
+      cliId: onlineByAppId.get(bot.larkAppId)?.cliId ?? bot.cliId,
+      vcMeetingAgentEnabled: bot.vcMeetingAgent?.enabled === true,
+      hasLarkCliProfile: typeof bot.vcMeetingAgent?.larkCliProfile === 'string' && bot.vcMeetingAgent.larkCliProfile.trim().length > 0,
+    }));
+  } catch {
+    return [];
+  }
+}
+
+async function fetchGrantedScopesForBotConfig(bot: BotConfig): Promise<{ ok: true; granted: Set<string> } | { ok: false; error: string }> {
+  const brand = bot.brand === 'lark' ? 'lark' : 'feishu';
+  const openApi = larkHosts(brand).openApi;
+  const ac = new AbortController();
+  const timer = setTimeout(() => ac.abort(), 10_000);
+  try {
+    const tokenRes = await fetch(`${openApi}/open-apis/auth/v3/tenant_access_token/internal`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ app_id: bot.larkAppId, app_secret: bot.larkAppSecret }),
+      signal: ac.signal,
+    });
+    const tokenData = await tokenRes.json() as any;
+    if (tokenData?.code !== 0 || typeof tokenData?.tenant_access_token !== 'string') {
+      return { ok: false, error: `vcMeetingAgent_listenerBot_invalid_credentials: code=${tokenData?.code ?? '?'} msg=${tokenData?.msg ?? ''}` };
+    }
+    const infoRes = await fetch(
+      `${openApi}/open-apis/application/v6/applications/${bot.larkAppId}?lang=zh_cn`,
+      { headers: { Authorization: `Bearer ${tokenData.tenant_access_token}` }, signal: ac.signal },
+    );
+    const infoData = await infoRes.json() as any;
+    if (infoData?.code === 99991672) {
+      return { ok: false, error: 'vcMeetingAgent_listenerBot_scope_check_unavailable: missing application:application:self_manage' };
+    }
+    if (infoData?.code !== 0) {
+      return { ok: false, error: `vcMeetingAgent_listenerBot_scope_check_failed: code=${infoData?.code ?? '?'} msg=${infoData?.msg ?? ''}` };
+    }
+    const scopesRaw: any[] =
+      infoData.data?.app?.scopes
+      ?? infoData.data?.application?.scopes
+      ?? infoData.data?.scopes
+      ?? [];
+    if (!Array.isArray(scopesRaw) || scopesRaw.length === 0) {
+      return { ok: false, error: 'vcMeetingAgent_listenerBot_scope_check_failed: empty scopes' };
+    }
+    const granted = new Set(
+      scopesRaw.map(s => typeof s === 'string' ? s : s?.scope).filter(Boolean) as string[],
+    );
+    return { ok: true, granted };
+  } catch (err: any) {
+    return {
+      ok: false,
+      error: ac.signal.aborted
+        ? 'vcMeetingAgent_listenerBot_scope_check_timeout'
+        : `vcMeetingAgent_listenerBot_scope_check_failed: ${err?.message ?? err}`,
+    };
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+async function validateVcMeetingListenerBotAppId(appId: string): Promise<{ ok: true } | { ok: false; error: string }> {
+  let bots: BotConfig[];
+  try {
+    bots = loadBotConfigs();
+  } catch (err: any) {
+    return { ok: false, error: `vcMeetingAgent_listenerBot_config_unavailable: ${err?.message ?? err}` };
+  }
+  const bot = bots.find(b => b.larkAppId === appId);
+  if (!bot) return { ok: false, error: 'vcMeetingAgent_listenerBot_unknown' };
+  const cfg = bot.vcMeetingAgent ?? {};
+  if (!cfg.larkCliProfile) return { ok: false, error: 'vcMeetingAgent_listenerBot_missing_larkCliProfile' };
+
+  const granted = await fetchGrantedScopesForBotConfig(bot);
+  if (!granted.ok) return granted;
+  const required = cfg.realtimeVoice?.enabled === true
+    ? [...VC_MEETING_FEATURE_SCOPES, ...VC_MEETING_REALTIME_VOICE_SCOPES]
+    : VC_MEETING_FEATURE_SCOPES;
+  const missing = required.filter(scope => !granted.granted.has(scope.name));
+  if (missing.length > 0) {
+    return { ok: false, error: `vcMeetingAgent_listenerBot_missing_scopes: ${missing.map(s => s.name).join(',')}` };
+  }
+  return { ok: true };
+}
+
+function normalizeVcMeetingAgentRecord(raw: unknown): Record<string, unknown> {
+  return raw && typeof raw === 'object' && !Array.isArray(raw)
+    ? { ...(raw as Record<string, unknown>) }
+    : {};
+}
+
+function compactVcMeetingAgentEntry(entry: Record<string, unknown>, next: Record<string, unknown>): void {
+  if (Object.keys(next).length > 0) entry.vcMeetingAgent = next;
+  else delete entry.vcMeetingAgent;
+}
+
+function refreshLocalVcMeetingAgentConfig(appId: string): void {
+  try {
+    const latest = loadBotConfigs().find(bot => bot.larkAppId === appId);
+    const live = getBot(appId);
+    live.config.vcMeetingAgent = latest?.vcMeetingAgent as VcMeetingAgentConfig | undefined;
+  } catch {
+    // This dashboard process may not host the target bot daemon.
+  }
+}
+
+async function reloadVcMeetingBotConfigOnDaemons(appIds: string[]): Promise<void> {
+  const unique = [...new Set(appIds.filter(Boolean))];
+  for (const appId of unique) refreshLocalVcMeetingAgentConfig(appId);
+  await Promise.all(unique.map(async appId => {
+    const d = registry.getByAppId(appId);
+    if (!d) return;
+    await fetch(`http://127.0.0.1:${d.ipcPort}/api/bot-config/reload`, {
+      method: 'POST',
+      signal: AbortSignal.timeout(10_000),
+    }).catch(() => undefined);
+  }));
+}
+
+async function syncVcMeetingListenerBotConfig(listenerBotAppId: string | null, previousListenerBotAppId?: string | null): Promise<{ ok: true } | { ok: false; error: string }> {
+  const nextAppId = listenerBotAppId?.trim() || null;
+  const prevAppId = previousListenerBotAppId?.trim() || null;
+  if (!nextAppId && !prevAppId) return { ok: true };
+
+  const changedAppIds = new Set<string>();
+  try {
+    const path = requireConfigPath();
+    await withFileLock(path, async () => {
+      const raw = await readRawConfig(path);
+      let changed = false;
+
+      if (nextAppId) {
+        const idx = findEntryIndex(raw, nextAppId);
+        if (idx < 0) throw new Error('bot_not_in_config');
+        const entry = raw[idx] as Record<string, unknown>;
+        const next = normalizeVcMeetingAgentRecord(entry.vcMeetingAgent);
+        let entryChanged = false;
+        if (next.enabled !== true) {
+          next.enabled = true;
+          next.dashboardManagedListener = true;
+          entryChanged = true;
+        }
+        if (entryChanged) {
+          compactVcMeetingAgentEntry(entry, next);
+          changed = true;
+          changedAppIds.add(nextAppId);
+        }
+      }
+
+      if (prevAppId && prevAppId !== nextAppId) {
+        const idx = findEntryIndex(raw, prevAppId);
+        if (idx >= 0) {
+          const entry = raw[idx] as Record<string, unknown>;
+          const next = normalizeVcMeetingAgentRecord(entry.vcMeetingAgent);
+          if (next.dashboardManagedListener === true) {
+            delete next.dashboardManagedListener;
+            if (next.enabled === true) delete next.enabled;
+            compactVcMeetingAgentEntry(entry, next);
+            changed = true;
+            changedAppIds.add(prevAppId);
+          }
+        }
+      }
+
+      if (changed) await writeRawConfigAtomic(path, raw);
+    });
+  } catch (err: any) {
+    return { ok: false, error: `vcMeetingAgent_listenerBot_config_write_failed: ${err?.message ?? err}` };
+  }
+
+  if (changedAppIds.size > 0) await reloadVcMeetingBotConfigOnDaemons([...changedAppIds]);
+  return { ok: true };
 }
 
 function resolveDashboardSettings(): ResolvedDashboardSettings {
@@ -304,11 +512,19 @@ function resolveDashboardSettings(): ResolvedDashboardSettings {
     publicReadOnly: dashboard.publicReadOnly ?? config.dashboard.publicReadOnly,
     openTerminalInFeishu: dashboard.openTerminalInFeishu === true,
     chatBotDiscovery: dashboard.chatBotDiscovery !== false, // default ON
+    vcMeetingAgent: {
+      enabled: global.vcMeetingAgent?.enabled !== false,
+      listenerBotAppId: global.vcMeetingAgent?.listenerBotAppId ?? null,
+      listenerBotOptions: vcMeetingListenerBotOptions(),
+    },
     repoPickerMode: global.repoPickerMode ?? 'all',
     maintenance: global.maintenance ?? {},
     localDevInstall: isLocalDevInstall(),
     whiteboard: { enabled: global.whiteboard?.enabled === true },
     remoteAccess: global.remoteAccess === true,
+    scheduleTimeZone: global.scheduleTimeZone ?? null,
+    hostTimeZone: hostLocalTimeZone(),
+    effectiveScheduleTimeZone: scheduleTimeZone(),
   };
 }
 
@@ -321,6 +537,8 @@ async function reloadLocaleOnAllDaemons(): Promise<void> {
   ));
 }
 const settingsWriteApplierDeps = defaultSettingsWriteApplierDeps(resolveDashboardSettings, reloadLocaleOnAllDaemons);
+settingsWriteApplierDeps.syncVcMeetingListenerBotConfig = syncVcMeetingListenerBotConfig;
+settingsWriteApplierDeps.validateVcMeetingListenerBotAppId = validateVcMeetingListenerBotAppId;
 
 /** Helper to render a {status, body} HandlerResult through `res`. */
 function writeHandlerResult(res: import('node:http').ServerResponse, result: GroupsHandlerResult): void {
@@ -1323,7 +1541,10 @@ const server = createServer(async (req, res) => {
       const schedules = authed
         ? aggregator.getSchedules()
         : redactSchedulesForPublic(aggregator.getSchedules());
-      return jsonRes(res, 200, { schedules });
+      // Effective schedule timezone: nextRunAt/lastRunAt instants must be
+      // rendered in the zone the scheduler fires in (not the viewer's browser
+      // zone), so the web schedule/overview lists match cron/card/CLI displays.
+      return jsonRes(res, 200, { schedules, timezone: scheduleTimeZone() });
     }
     if (req.method === 'GET' && url.pathname === '/api/settings') {
       // `authed` lets the Settings page disable toggles for read-only
@@ -2360,6 +2581,26 @@ const server = createServer(async (req, res) => {
       for await (const c of req) chunks.push(c as Buffer);
       const raw = Buffer.concat(chunks).toString('utf8') || '{}';
       const upstream = await proxyToDaemon(appId, `/api/bot-p2p-mode`, {
+        method: 'PUT',
+        headers: { 'content-type': 'application/json' },
+        body: raw,
+      });
+      res.writeHead(upstream.status, { 'content-type': 'application/json' });
+      res.end(await upstream.text());
+      return;
+    }
+
+    // PUT /api/bots/:appId/skill-injection — proxy to that bot's daemon. Body
+    // `{ skillInjection: 'global'|'prompt'|'off'|'' }` (''/other clears back to
+    // the machine default). Governs how botmux built-in skills reach global-
+    // skillsDir CLIs (codex/gemini/…).
+    let mBotSkillInjection: RegExpMatchArray | null;
+    if (req.method === 'PUT' && (mBotSkillInjection = url.pathname.match(/^\/api\/bots\/([^/]+)\/skill-injection$/))) {
+      const appId = decodeURIComponent(mBotSkillInjection[1]);
+      const chunks: Buffer[] = [];
+      for await (const c of req) chunks.push(c as Buffer);
+      const raw = Buffer.concat(chunks).toString('utf8') || '{}';
+      const upstream = await proxyToDaemon(appId, `/api/bot-skill-injection`, {
         method: 'PUT',
         headers: { 'content-type': 'application/json' },
         body: raw,

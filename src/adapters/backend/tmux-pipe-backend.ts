@@ -59,7 +59,7 @@ export function normaliseCaptureLineEndings(s: string): string {
  * from the app's coordinates) and parks the cursor on the bottom row instead of
  * the app's real row. The first relative redraw then lands a row low, and
  * because the CLI tracks position relatively, every subsequent frame stays
- * shifted (the status-line update bleeds into the line below — the bug 申晗
+ * shifted (the status-line update bleeds into the line below — the bug 示例用户
  * reported).
  *
  * Fix: strip the SINGLE trailing line terminator so no extra scroll happens,

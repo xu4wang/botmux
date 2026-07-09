@@ -38,7 +38,7 @@ function liveWorkers(activeSessions: Map<string, DaemonSession>): DaemonSession[
  * running detached; the next message / terminal open re-forks the worker
  * (daemon.ts worker-null resume path).
  *
- * Deliberately has NO idle-time threshold: 申晗's policy is "while resources
+ * Deliberately has NO idle-time threshold: the policy is "while resources
  * allow, never time out an old session" — suspension only kicks in to enforce
  * an explicit per-bot count cap. The only guard kept is correctness, not a
  * timeout: a session that is mid-turn (`lastScreenStatus !== 'idle'`) is never

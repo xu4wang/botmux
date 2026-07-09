@@ -19,6 +19,7 @@ import { getDeploymentIdentity } from '../services/deployment-identity.js';
 import { getBotUnionId } from '../services/bot-union-ids-store.js';
 import * as grantPrefsStore from '../services/grant-prefs-store.js';
 import { findConfigField, applyConfigField, coerceConfigValue } from '../services/bot-config-store.js';
+import { globalBuiltinSkillInjectionDefault, resolveSkillInjectionSupport } from '../skills/injection-mode.js';
 import { summaryRangeFromBotConfig, updateDashboardSummaryRange } from '../services/summary-range-store.js';
 import { config } from '../config.js';
 import { computeSandboxDiff, applySandboxDiff } from '../services/sandbox-land.js';
@@ -28,7 +29,7 @@ import { readRawConfig, findEntryIndex, requireConfigPath, rmwBotEntry } from '.
 import { setDefaultLocale, localeForBot, t } from '../i18n/index.js';
 import { isLocale, type Locale } from '../i18n/types.js';
 import { readGlobalConfig } from '../global-config.js';
-import { normalizeChatReplyMode, type ChatReplyMode } from '../services/chat-reply-mode-store.js';
+import { normalizeChatReplyMode, setChatReplyMode, type ChatReplyMode } from '../services/chat-reply-mode-store.js';
 import * as chatFirstSeenStore from '../services/chat-first-seen-store.js';
 import * as scheduler from './scheduler.js';
 import { listActiveSessions, findActiveBySessionId, closeSession, getActiveSessionsRegistry, transferSession, deliverWriteLinkCardToOwners, forkWorker, suspendWorker } from './worker-pool.js';
@@ -84,7 +85,7 @@ import {
   getBotName,
   type SessionRow,
 } from './dashboard-rows.js';
-import { getBotBrand, getBot, readBotSkillPolicy } from '../bot-registry.js';
+import { getBotBrand, getBot, loadBotConfigs, readBotSkillPolicy } from '../bot-registry.js';
 import { normalizeKanbanColumn, normalizeKanbanPosition, normalizeSessionTitle } from './session-board.js';
 import type { DaemonToWorker, ScheduledTask, ParsedSchedule, Session } from '../types.js';
 import type { DaemonSession } from './types.js';
@@ -410,6 +411,19 @@ ipcRoute('POST', '/api/sessions/spawn', async (req, res) => {
   });
   if (!r.ok) return jsonRes(res, r.error === 'session_exists' ? 409 : 500, r);
   jsonRes(res, 200, r);
+});
+
+ipcRoute('POST', '/api/chat-reply-mode', async (req, res) => {
+  if (!cachedLarkAppId) return jsonRes(res, 503, { ok: false, reason: 'larkAppId_not_set' });
+  let body: unknown;
+  try { body = await readJsonBody(req); } catch { return jsonRes(res, 400, { ok: false, reason: 'invalid_json' }); }
+  const chatId = typeof (body as any)?.chatId === 'string' ? (body as any).chatId.trim() : '';
+  const mode = normalizeChatReplyMode(typeof (body as any)?.mode === 'string' ? (body as any).mode : undefined);
+  if (!chatId) return jsonRes(res, 400, { ok: false, reason: 'chatId_required' });
+  if (!mode) return jsonRes(res, 400, { ok: false, reason: 'invalid_mode' });
+  const result = await setChatReplyMode(cachedLarkAppId, chatId, mode);
+  if (!result.ok) return jsonRes(res, 500, { ok: false, reason: result.reason });
+  jsonRes(res, 200, { ok: true, mode: result.mode });
 });
 
 // 会话历史：实时拉取该会话所在话题/群的飞书消息（与 botmux history 同链路，
@@ -1012,6 +1026,13 @@ ipcRoute('POST', '/api/trigger', async (req, res) => {
   }
   const valid = validateTriggerRequest(body);
   if (!valid.ok) return jsonRes(res, valid.status, valid.body);
+  if (valid.request.target.botId && valid.request.target.botId !== cachedLarkAppId) {
+    return jsonRes(res, 400, {
+      ok: false,
+      errorCode: 'bot_not_found',
+      error: `request target botId ${valid.request.target.botId} does not match daemon ${cachedLarkAppId}`,
+    });
+  }
   try {
     let result;
     if (valid.request.target.kind === 'workflow') {
@@ -1360,6 +1381,18 @@ ipcRoute('GET', '/api/bot-default-oncall', async (_req, res) => {
   const grantPrefs = grantPrefsStore.getBotGrantPrefs(cachedLarkAppId);
   let p2pMode: 'thread' | 'chat' = 'thread';
   try { if (getBot(cachedLarkAppId).config.p2pMode === 'chat') p2pMode = 'chat'; } catch { /* default thread */ }
+  let skillInjection: 'global' | 'prompt' | 'off' | null = null;
+  // How this bot's CLI delivers botmux skills, so the dashboard can render the
+  // control correctly: 'dynamic' = per-session --plugin-dir (claude-family, not
+  // configurable); 'global' = global skills dir (codex-family, prompt/global/off
+  // selectable); 'none' = CLI has no skill dir at all (control hidden).
+  let skillInjectionSupport: 'dynamic' | 'global' | 'none' = 'none';
+  try {
+    const cfg = getBot(cachedLarkAppId).config;
+    const s = cfg.skillInjection;
+    if (s === 'global' || s === 'prompt' || s === 'off') skillInjection = s;
+    skillInjectionSupport = resolveSkillInjectionSupport(cfg.cliId, cfg.cliPathOverride);
+  } catch { /* unset → machine default; support → none */ }
   let cliId = '';
   let wrapperCli: string | null = null;
   let model: string | null = null;
@@ -1394,9 +1427,11 @@ ipcRoute('GET', '/api/bot-default-oncall', async (_req, res) => {
   // defaultOncall in the dashboard 3-way selector; the frontend derives the
   // current mode from (defaultOncall.enabled ? oncall : defaultWorkingDir ? default : off).
   let defaultWorkingDir: string | null = null;
+  let defaultWorkingDirAutoWorktree = false;
   try {
-    const d = getBot(cachedLarkAppId).config.defaultWorkingDir;
-    if (typeof d === 'string' && d.trim()) defaultWorkingDir = d;
+    const cfg = getBot(cachedLarkAppId).config;
+    if (typeof cfg.defaultWorkingDir === 'string' && cfg.defaultWorkingDir.trim()) defaultWorkingDir = cfg.defaultWorkingDir;
+    defaultWorkingDirAutoWorktree = cfg.defaultWorkingDirAutoWorktree === true;
   } catch { /* none */ }
   // 展示名编辑框数据：displayName = 自定义备注名（null = 未设，跟随飞书名称）；
   // larkBotName = 飞书探测到的应用名（供 placeholder /「恢复默认」提示用）。
@@ -1418,6 +1453,7 @@ ipcRoute('GET', '/api/bot-default-oncall', async (_req, res) => {
     agentSelectionKey,
     defaultOncall: defaultOncall ?? { enabled: false, workingDir: '', since: 0 },
     defaultWorkingDir,
+    defaultWorkingDirAutoWorktree,
     autoboundChatCount: autoboundChats.length,
     brandLabel: brandStore.getBotBrandLabel(cachedLarkAppId) ?? null,
     sandbox: sandboxStore.getBotSandbox(cachedLarkAppId),
@@ -1436,6 +1472,11 @@ ipcRoute('GET', '/api/bot-default-oncall', async (_req, res) => {
     autoGrantRequestCards: grantPrefs.autoGrantRequestCards,
     messageQuotaDefaultLimit: grantPrefs.messageQuotaDefaultLimit,
     p2pMode,
+    skillInjection,
+    skillInjectionSupport,
+    // Resolved machine-wide default → the dashboard shows it as the pre-selected
+    // value when this bot has no explicit override (prompt/global/off).
+    skillInjectionDefault: globalBuiltinSkillInjectionDefault(),
     maxLiveWorkers,
     startupCommands,
     launchShell: getBot(cachedLarkAppId).config.launchShell ?? '',
@@ -1674,6 +1715,26 @@ ipcRoute('PUT', '/api/bot-p2p-mode', async (req, res) => {
   jsonRes(res, 200, { ok: true, p2pMode: value ?? 'thread' });
 });
 
+// Per-bot 内置技能注入模式 skillInjection。Body `{ skillInjection: 'global'|'prompt'|'off'|'' }`:
+//   • 'global'|'prompt'|'off' → 显式覆盖本 bot
+//   • ''/其它                  → 清回机器级默认（config.json skills.builtinInjection）
+// 走 applyConfigField（与 /config 同一写盘 + 热更新路径）。next-session 生效；
+// 切到/离开 global 的全局盘安装受 once-cache 限，需重启 daemon 才完全生效。
+ipcRoute('PUT', '/api/bot-skill-injection', async (req, res) => {
+  if (!cachedLarkAppId) return jsonRes(res, 503, { error: 'larkAppId_not_set' });
+  let body: { skillInjection?: unknown };
+  try { body = await readJsonBody<{ skillInjection?: unknown }>(req); }
+  catch { return jsonRes(res, 400, { ok: false, error: 'bad_json' }); }
+
+  const spec = findConfigField('skillInjection');
+  if (!spec) return jsonRes(res, 500, { ok: false, error: 'spec_missing' });
+  const v = body.skillInjection;
+  const value = v === 'global' || v === 'prompt' || v === 'off' ? v : null;
+  const r = await applyConfigField(cachedLarkAppId, spec, value);
+  if (!r.ok) return jsonRes(res, 400, { ok: false, error: r.reason });
+  jsonRes(res, 200, { ok: true, skillInjection: value });
+});
+
 // Per-bot 启动命令 startupCommands。Body `{ startupCommands: string }`（原始文本，
 // 逗号/换行分隔，每条可带参数如 `/effort ultracode`）：空白 → 清除（不发任何命令）。
 // 走 applyConfigField（与 /botconfig 文本子卡同一写盘 + 内存热更新路径），next-session
@@ -1877,6 +1938,21 @@ ipcRoute('POST', '/api/locale/reload', async (_req, res) => {
   jsonRes(res, 200, { ok: true, defaultLocale: resolvedDefault, botLang });
 });
 
+// Hot-reload the current daemon's per-bot config from bots.json after another
+// process edits the shared config file. Keep the live Lark client / resolved
+// allowlist intact; VC listener routing only needs the vcMeetingAgent block.
+ipcRoute('POST', '/api/bot-config/reload', async (_req, res) => {
+  if (!cachedLarkAppId) return jsonRes(res, 503, { ok: false, error: 'larkAppId_not_set' });
+  try {
+    const latest = loadBotConfigs().find(bot => bot.larkAppId === cachedLarkAppId);
+    if (!latest) return jsonRes(res, 404, { ok: false, error: 'bot_not_in_config' });
+    getBot(cachedLarkAppId).config.vcMeetingAgent = latest.vcMeetingAgent;
+    jsonRes(res, 200, { ok: true, larkAppId: cachedLarkAppId, vcMeetingAgentEnabled: latest.vcMeetingAgent?.enabled === true });
+  } catch (err: any) {
+    jsonRes(res, 500, { ok: false, error: err?.message ?? String(err) });
+  }
+});
+
 ipcRoute('PUT', '/api/bot-default-oncall', async (req, res) => {
   if (!cachedLarkAppId) return jsonRes(res, 503, { error: 'larkAppId_not_set' });
   let body: { enabled?: unknown; workingDir?: unknown };
@@ -1914,8 +1990,8 @@ ipcRoute('PUT', '/api/bot-default-oncall', async (req, res) => {
 // next-session 生效（运行中会话需 /restart）。
 ipcRoute('PUT', '/api/bot-working-dir-mode', async (req, res) => {
   if (!cachedLarkAppId) return jsonRes(res, 503, { error: 'larkAppId_not_set' });
-  let body: { mode?: unknown; workingDir?: unknown };
-  try { body = await readJsonBody<{ mode?: unknown; workingDir?: unknown }>(req); }
+  let body: { mode?: unknown; workingDir?: unknown; autoWorktree?: unknown };
+  try { body = await readJsonBody<{ mode?: unknown; workingDir?: unknown; autoWorktree?: unknown }>(req); }
   catch { return jsonRes(res, 400, { ok: false, error: 'bad_json' }); }
 
   const mode = body.mode;
@@ -1923,6 +1999,8 @@ ipcRoute('PUT', '/api/bot-working-dir-mode', async (req, res) => {
     return jsonRes(res, 400, { ok: false, error: 'invalid_mode' });
   }
   const workingDir = typeof body.workingDir === 'string' ? body.workingDir.trim() : '';
+  // 「仅默认目录」模式下的「自动创建 worktree」开关；其余模式 setWorkingDirMode 会强制清掉。
+  const autoWorktree = body.autoWorktree === true;
 
   // 非「关闭」模式必须给一个真实存在的目录。
   let resolvedPath = '';
@@ -1933,11 +2011,12 @@ ipcRoute('PUT', '/api/bot-working-dir-mode', async (req, res) => {
     resolvedPath = v.resolvedPath;
   }
 
-  const r = await oncallStore.setWorkingDirMode(cachedLarkAppId, mode, workingDir);
+  const r = await oncallStore.setWorkingDirMode(cachedLarkAppId, mode, workingDir, autoWorktree);
   if (!r.ok) return jsonRes(res, 400, r);
   return jsonRes(res, 200, {
     ok: true, mode,
     defaultWorkingDir: r.defaultWorkingDir,
+    defaultWorkingDirAutoWorktree: r.defaultWorkingDirAutoWorktree,
     defaultOncall: r.defaultOncall,
     resolvedPath: resolvedPath || undefined,
   });

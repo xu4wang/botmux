@@ -65,7 +65,7 @@ export function setDeploymentName(dataDir: string, name: string): DeploymentIden
 /** Bind the owner's Feishu identity (via /pair or auto-bind). Also adopts the
  *  owner's Feishu name as the DEPLOYMENT name — the deployment is shown to the
  *  team by its owner's real name (no custom labels), so the roster reads
- *  naturally ("申晗 的部署" instead of a hostname). Returns the updated identity. */
+ *  naturally ("示例用户 的部署" instead of a hostname). Returns the updated identity. */
 export function setDeploymentOwner(dataDir: string, owner: { unionId?: string; name?: string }): DeploymentIdentity {
   const cur = getDeploymentIdentity(dataDir);
   const next: DeploymentIdentity = {

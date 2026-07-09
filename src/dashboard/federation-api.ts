@@ -217,7 +217,7 @@ export async function handleFederationApi(
     return true;
   }
 
-  // ── 团队看板（申晗架构：编排存 host，会话源数据各部署自持）────────────────
+  // ── 团队看板（既定架构：编排存 host，会话源数据各部署自持）────────────────
   // 成员上报会话裁剪行：白名单清洗后按 deploymentId 覆盖式落盘。
   if (path === '/api/federation/team-sessions' && method === 'POST') {
     let body: any;

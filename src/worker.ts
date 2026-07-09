@@ -4439,6 +4439,7 @@ function spawnCli(cfg: Extract<DaemonToWorker, { type: 'init' }>): void {
     initialPrompt: deferInitialPrompt ? undefined : (cfg.prompt || undefined),
     botName: cfg.botName,
     botOpenId: cfg.botOpenId,
+    larkAppId: cfg.larkAppId,
     locale: cfg.locale,
     model: ttadkGateway ? undefined : cfg.model,
     disableCliBypass: cfg.disableCliBypass === true,
@@ -5273,7 +5274,7 @@ function startWebServer(host: string, preferredPort?: number): Promise<number> {
         // Each WS client gets its own `zellij attach` PTY sized to the browser.
         // zellij sizes the (shared) pane to the SMALLEST attached client, so
         // when the user's terminal is detached the web client governs the size
-        // → fully browser-responsive (申晗's insight, verified), never resizing
+        // → fully browser-responsive (browser-responsiveness insight, verified), never resizing
         // the user's terminal beyond min(theirs, browser). Locked-mode config
         // (cleared keybinds) makes every keystroke reach the codex pane instead
         // of being swallowed as a zellij shortcut. Bonus: raw byte stream — none
@@ -5353,7 +5354,7 @@ function startWebServer(host: string, preferredPort?: number): Promise<number> {
         // ownsSession=false so resize() is a no-op; zellij drives via
         // dump-screen). The client's FitAddon sizes its xterm to the browser,
         // but the snapshot lines carry the PANE's width — any mismatch wraps the
-        // full-width TUI box lines and garbles the layout (the misalignment 申晗
+        // full-width TUI box lines and garbles the layout (the misalignment 示例用户
         // saw). Pin the client xterm to the pane's fixed size via a botmux OSC
         // (sent BEFORE the seed so the client resizes before rendering it).
         if (lastInitConfig?.adoptMode && isObserveBackend(backend)) {
@@ -5569,7 +5570,7 @@ function sendResize(){
 // Debounce viewport resize: mobile fires a burst of window.resize as the address
 // bar / on-screen keyboard show & hide, and an un-debounced fit→resize on each
 // reflows the (shared) zellij pane every frame — the status bar toggles and the
-// text re-wraps, i.e. the flicker 申晗 saw. Coalesce to the settled size.
+// text re-wraps, i.e. the reported flicker. Coalesce to the settled size.
 function onViewportResize(){
   clearTimeout(_rzT);
   _rzT=setTimeout(function(){if(!fixedSize){try{fit.fit()}catch(e){}}sendResize()},250);

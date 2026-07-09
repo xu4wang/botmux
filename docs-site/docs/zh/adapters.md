@@ -65,11 +65,11 @@ MIRCLI_AUTO_START_MIRAMCP=0 botmux start
 3. **`chmod +x` 加可执行位（最容易漏！）**——botmux 用 node-pty 直接 exec 脚本，没有可执行位会 `EACCES`、CLI 起来即退、bot 崩溃重启。
 4. **直接执行脚本验证**（用 `~/.botmux/bin/xxx --version`，别用 `bash xxx` 测——走 bash 不需要可执行位会掩盖第 3 步问题）。然后在 `bots.json` 配 `cliPathOverride`（写**绝对路径**，别用 `~`），`botmux restart` 生效。
 
-各网关的**具体 wrapper 脚本**见对应配置文档（这些文档随上游更新，这里只放链接、不复制原文）：
+各网关的**具体 wrapper 脚本**通常随上游更新，请以对应 CLI / 网关团队发布的文档为准；这里不在公开仓库内放内部文档链接或复制原文。
 
-- **aiden × claude / aiden × codex** — [配置文档](https://bytedance.larkoffice.com/docx/T63VdOsCxoLnlSxCjARcd6ocnNf)（aiden×codex 需用 `script` 强套 PTY）
-- **ttadk** — [配置指南](https://bytedance.larkoffice.com/docx/SkG3dVFLsoRnNgxzE6NcvdeCnws)（含各 CLI 的 wrapper 脚本一览）
-- **MTR** — [使用文档](https://bytedance.larkoffice.com/wiki/XjYKwXjlTivKoWksIVtcnmN6noH)（社区贡献，`npm i -g @metamove-code/mtr-cli@latest`）
+- **aiden × claude / aiden × codex** — aiden×codex 需用 `script` 强套 PTY
+- **ttadk** — 配置时注意 wrapper 参数透传和登录态
+- **MTR** — 社区贡献，`npm i -g @metamove-code/mtr-cli@latest`
 >
 > 排查 wrapper 问题的通用手法：`botmux logs` 找 `Spawning fresh CLI:` 那行，复制完整命令在本地手动跑一遍即可定位（权限 / 参数黑名单 / 登录态）。
 

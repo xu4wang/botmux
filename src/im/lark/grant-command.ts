@@ -21,7 +21,7 @@ import { logger } from '../../utils/logger.js';
  *  **只取「命令词 /grant|/revoke 之后」出现的 @**：命令词之前的 @ 是「点名让哪个 bot 执行」
  *  （`@OperatorBot /grant @Grantee`），不是 grantee。否则 owner 一条 `@Claude @Codex /grant`
  *  把两个操作 bot 都前导 @ 了，每个 daemon 会把「另一个 bot」当成目标 → 两 bot 互相授权
- *  （申晗实测 bug）。位置过滤仅在能拿到位置信息（text 形态的 key / post 的节点序）时生效；
+ *  （实测 bug）。位置过滤仅在能拿到位置信息（text 形态的 key / post 的节点序）时生效；
  *  纯 mentions 的合成消息（无 content.text）退回历史「全部非本 bot」行为。 */
 export function parseGrantTargets(message: any, botOpenId: string | undefined): Array<{ openId: string; name: string }> {
   let content: any;

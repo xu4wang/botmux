@@ -2,7 +2,7 @@
 
 botmux 的中文功能文档站，基于 [**rspress**](https://rspress.dev/) 构建，发布在**飞书妙搭（Miaoda）**上。
 
-- 线上地址：<https://bytedance.aiforce.cloud/app/app_4k9smq6rdxher/>
+- 线上地址：由维护者通过 `BOTMUX_DOCS_APP_ID` 对应的妙搭应用发布；公开仓库不记录内部应用地址。
 - 源码：本目录（`docs/` 下的 Markdown + `rspress.config.ts`）
 
 ## 形态与托管（重要）
@@ -12,7 +12,7 @@ botmux 的中文功能文档站，基于 [**rspress**](https://rspress.dev/) 构
 - `rspress build` 产出多页静态站（`doc_build/`：每个路由一个 `.html` + `static/` 里的 JS/CSS/分包/搜索索引）。
 - **`static/` 整个推到 GitHub 的一个 git tag**（`docs-assets-vN`），用 [jsDelivr](https://www.jsdelivr.com/) 当 CDN 服务它；`rspress.config.ts` 里的 `assetPrefix` 指向这个 jsDelivr 前缀。
 - **只有那些 `.html` 壳发到妙搭**。浏览器打开妙搭给的 HTML → 主包 / 分包 / 搜索索引全部从 jsDelivr 加载，妙搭不碰资源。
-- `base` 设为妙搭子路径 `/app/app_4k9smq6rdxher/`，路由链接走妙搭、资源链接走 jsDelivr，互不干扰。
+- `base` 通过 `BOTMUX_DOCS_BASE` 配置为妙搭子路径，路由链接走妙搭、资源链接走 jsDelivr，互不干扰。
 - jsDelivr 对 **tag** 是不可变缓存（更新秒生效、免 purge），所以每次部署都发到一个**新的 tag 版本号**（`docs-assets-v1` → `v2` → …）。
 
 > 选妙搭而不是妙笔：rspress 是多页框架，妙笔 HTML Box 是单页 + 无 same-origin 沙箱，跑不了 rspress 路由；妙搭支持多 HTML 路由，所以文档站在妙搭。
@@ -45,4 +45,4 @@ cd docs-site
 
 `deploy.sh` 会：把 `assetPrefix` 指到新 tag → `rspress build` → 把 `static/` 推到该 tag（jsDelivr 立即可服务）→ 把 HTML 壳（去掉 `static/`）发到妙搭 app。
 
-前提：`pnpm install` 过、`lark-cli auth login --domain apps` 登录过妙搭、能 ssh push 到 `deepcoldy/botmux`。妙搭 app（`app_4k9smq6rdxher`）绑定在文档维护者的妙搭账号下，更新官方站需由持有该账号的人来跑。
+前提：`pnpm install` 过、`lark-cli auth login --domain apps` 登录过妙搭、能 ssh push 到 `deepcoldy/botmux`，并设置 `BOTMUX_DOCS_APP_ID` / `BOTMUX_DOCS_BASE`。妙搭 app 绑定在文档维护者的妙搭账号下，更新官方站需由持有该账号的人来跑。

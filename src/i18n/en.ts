@@ -260,6 +260,12 @@ export const messages: Record<string, string> = {
   'cmd.repo.worktree_in_progress': '⏳ A worktree is already being created — please wait…',
   'cmd.repo.worktree_created_not_switched': '🌿 Worktree created: `{path}` (branch `{branch}`), but the session changed meanwhile — not switched automatically. Use `/repo {path}` to open it.',
   'cmd.repo.worktree_switch_failed': '⚠️ Worktree created at `{path}`, but switching to it failed: {error}\nUse `/repo {path}` to open it manually.',
+  // Used when 「default-directory-only」mode has「auto-create worktree」on, at new
+  // session start (shared by interactive new topic / dashboard create / webhook).
+  'worktree.auto_creating': '🌿 Creating an isolated worktree for this session (includes a git fetch, may take a few seconds)…',
+  'worktree.auto_created': '🌿 Auto-created an isolated worktree for this session: `{path}`\nBranch `{branch}`, based on `{base}`. Your default directory is untouched.',
+  'worktree.auto_fallback': '⚠️ Could not create a worktree in the default directory `{dir}` ({error}); fell back to starting the session directly in the default directory.',
+  'worktree.err_not_git': 'default directory is not a git repository (or could not be confirmed)',
   'cmd.skip.opened': '▶️ Session started (working dir: {cwd})',
   'cmd.status.running': 'running',
   'cmd.status.waiting': 'idle',
@@ -517,6 +523,7 @@ export const messages: Record<string, string> = {
   'ai.routing.heredoc_example': "  Correct multi-line example:\n```bash\nbotmux send <<'EOF'\nline 1\nline 2\nEOF\n```",
   'ai.routing.usage_images': '- Attach images: `botmux send --images /path/to/img.png "caption"`',
   'ai.routing.usage_files': '- Attach files: `botmux send --files /path/to/file.pdf "FYI"`',
+  'ai.routing.usage_videos': '- Attach video previews: `botmux send --videos /path/to/replay.mp4 --video-covers /path/to/cover.png --no-mention "preview"`',
   'ai.routing.usage_history': '- Need prior context? Use `botmux history` to read this session\'s history.',
   'ai.routing.usage_bots_list': '- List collaborator bots in the group: `botmux bots list`',
 
@@ -527,27 +534,29 @@ export const messages: Record<string, string> = {
   'ai.identity.rule_silent_when_other': '- If the whole message is for another bot, stay silent — do not reply',
   'ai.identity.rule_no_proactive_pull': '- **Do not proactively pull other bots in by default.** Unless the user explicitly asks, or a segment can only be done by another bot, finish your part and stop.',
   'ai.identity.mention_intro': '**Hard fact about cross-bot collaboration**: in a Lark topic group, other bots **do NOT receive** the messages you send via `botmux send` by default —',
-  'ai.identity.mention_must': 'To hand work off to another bot, you **MUST** explicitly pass `--mention <other-bot-open-id>`. Without `--mention`, the other bot is not triggered at all.',
-  'ai.identity.mention_partners': '- Collaborator `open_id`s are listed in the `<available_bots>` block attached to every user message. You can also run `botmux bots list`.',
+  'ai.identity.mention_must': 'To communicate or collaborate with another bot (so it receives your message), you **MUST** explicitly pass `--mention <other-bot-open-id>`. Without `--mention`, the other bot is not triggered at all.',
+  'ai.identity.mention_partners': '- The first-turn `<available_bots>` block lists the bots you can currently collaborate with (with open_ids when there are few, names only when many); you can also run `botmux bots list` anytime to get an open_id.',
   'ai.identity.mention_usage': '- Usage: `botmux send --mention ou_xxx "message"` (repeat `--mention` for multiple bots). `--mention-back` @s back whoever (person or bot) triggered this turn — open_id is pulled from the session, no need to type it.',
   'ai.identity.mention_gate': '- **@ hard-gate**: every `botmux send` MUST explicitly pick one or it errors out — `--mention` (name someone) / `--mention-back` (@ the triggerer) / `--no-mention` (none). Choose by message VALUE: a substantive conclusion the other party should read/confirm/decide on → --mention-back (or --mention); pure record / low-priority progress / short ack → --no-mention; a contentless "got it" is better not sent at all. Do not let --no-mention become the default, and do not @ people for nothing.',
-  'ai.identity.mention_when_to': '- When to `--mention`: the user explicitly asks for the handoff, you\'re passing a sub-task to the other bot, or you need them to give the final result / take an independent action.',
+  'ai.identity.mention_when_to': '- When to `--mention`: you need to communicate or collaborate with the other bot, the user explicitly asks for a handoff, you\'re passing a sub-task to it, or you need them to give the final result / take an independent action.',
   'ai.identity.mention_when_not': '- When NOT to `--mention`: pure status updates / acknowledgements / thanks — fold them into the next message that has real content, to avoid mutual ping-spam.',
 
   // ─── AI hints (non-Claude CLIs: BOTMUX_SHELL_HINTS) ──────────────────────
   'ai.shell.intro': 'You are running inside a Lark (Feishu) topic group. The user reads on Lark and cannot see your terminal output.',
   'ai.shell.commands_are_shell': 'IMPORTANT: `botmux send` / `botmux history` / `botmux quoted` / `botmux bots` are SHELL commands (CLI programs installed in $PATH), NOT MCP tools. Run them via the Bash tool — don\'t look for them in the MCP tool list.',
-  'ai.shell.how_to_send': 'To send a message to the user (the only way): run `botmux send "your message"` via Bash. Attach images with `--images /path`, files with `--files /path`.',
+  'ai.shell.how_to_send': 'To send a message to the user (the only way): run `botmux send "your message"` via Bash. Attach images with `--images /path`, files with `--files /path`, video previews with `--videos /path.mp4 --video-covers /cover.png`.',
   'ai.shell.multiline_heredoc': 'Multi-line messages MUST use a heredoc — never `botmux send "line1\\nline2"`, since `\\n` may appear literally in Lark.',
   'ai.shell.heredoc_example': "Correct multi-line example:\n```bash\nbotmux send <<'EOF'\nline 1\nline 2\nEOF\n```",
   'ai.shell.helpers': 'Helpers: `botmux history` (read this session\'s history — thread/topic sessions are topic-scoped; regular-group chat-scope sessions are group-wide), `botmux quoted <message_id>` (fetch a quoted message — only use it when the prompt header shows `[user quoted message ...]`), `botmux bots list` (list other bots in the group).',
   'ai.shell.when_to_send': 'When to send: key conclusions, plans (wait for user approval before acting), final results, progress updates. A bare `print`/`echo` does NOT count as a reply.',
-  'ai.shell.mention_gate': '@ decision (mandatory): every `botmux send` MUST explicitly pick one or it errors — `--mention <open_id:name>` (name a person/bot; REQUIRED to hand work to another bot) / `--mention-back` (@ the sender of the message you are replying to) / `--no-mention` (none). Choose by VALUE: substantive conclusion the other party should read/confirm/decide → --mention-back; pure record / low-priority / short ack → --no-mention; a contentless "got it" is better not sent. Do not default to --no-mention, and do not @ people for nothing.',
+  'ai.shell.mention_gate': '@ decision (mandatory): every `botmux send` MUST explicitly pick one or it errors — `--mention <open_id:name>` (name a person/bot; REQUIRED to communicate or collaborate with another bot) / `--mention-back` (@ the sender of the message you are replying to) / `--no-mention` (none). Choose by VALUE: substantive conclusion the other party should read/confirm/decide → --mention-back; pure record / low-priority / short ack → --no-mention; a contentless "got it" is better not sent. Do not default to --no-mention, and do not @ people for nothing.',
 
   // ─── AI prompt blocks (session-manager) ──────────────────────────────────
   'ai.attach.hint': 'Read these with the Read tool. The index matches the [image N] / [file N] placeholders in the body.',
-  'ai.identity.short_routing': 'Reminder: handing work off to another bot REQUIRES `botmux send --mention <their open_id>` — without it, the other bot is not triggered.',
-  'ai.available_bots.hint': 'To hand work off to a bot listed here you MUST --mention its open_id (botmux send --mention ou_xxx ...). Without --mention the other bot receives nothing.',
+  'ai.identity.short_routing': 'Reminder: communicating or collaborating with another bot REQUIRES `botmux send --mention <their open_id>` — without it, the other bot is not triggered.',
+  'ai.available_bots.hint': 'To communicate or collaborate with a bot listed here you MUST --mention its open_id (botmux send --mention ou_xxx ...). Without --mention the other bot receives nothing.',
+  'ai.available_bots.hint_collapsed': 'To communicate or collaborate with another bot, first run `botmux bots list` to get its open_id, then --mention it. Without --mention the other bot receives nothing.',
+  'ai.available_bots.collapsed_line': 'There are {count} collaborator bots in this chat: {names}.',
   'ai.followup.reminder': 'Replies must go via `botmux send` — terminal output does not reach the user.',
   'ai.cursor.sender_note': 'The sender tag is metadata identifying the current speaker — never copy its open_id or name (e.g. ou_xxx:Alice) into your botmux send body or opening line; to @ the triggerer use botmux send --mention-back.',
   'ai.bridge.attachments_label': '[Attachments]',
@@ -705,6 +714,7 @@ export const messages: Record<string, string> = {
   'daemon.cmd_needs_active_cli': '{cmd} needs an active CLI process; no running session in this topic.',
   'daemon.enriched_mentions_label': '@mentions in this message:',
   'daemon.choose_repo_first': 'Pick a repo from the card above first — your message is queued and will be sent once a repo is chosen.',
+  'daemon.worktree_building_wait': 'Creating a worktree (includes a git fetch, may take a few seconds) — your message is queued and will be sent together once it is ready.',
 
   // ─── /dashboard command group (PR3 C1) ─────────────────────────────────
   'card.dashboard.owner_only': '🔒 The `/dashboard` command group is restricted to bot admins (allowedUsers).',

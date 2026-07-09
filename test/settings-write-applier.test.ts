@@ -19,6 +19,7 @@ function makeDeps(overrides: Partial<SettingsWriteApplierDeps> = {}): SettingsWr
     publicReadOnly: false,
     openTerminalInFeishu: false,
     chatBotDiscovery: true,
+    vcMeetingAgent: { enabled: true },
     maintenance: {},
     localDevInstall: false,
   };
@@ -43,6 +44,8 @@ function makeDeps(overrides: Partial<SettingsWriteApplierDeps> = {}): SettingsWr
     isLocalDevInstall: vi.fn(() => false),
     resolveDashboardSettings: vi.fn(() => settingsView),
     isLocale: ((v: unknown): v is 'zh' | 'en' => v === 'zh' || v === 'en'),
+    syncVcMeetingListenerBotConfig: vi.fn(async () => ({ ok: true as const })),
+    validateVcMeetingListenerBotAppId: vi.fn(async () => ({ ok: true as const })),
     ...overrides,
   };
 }
@@ -102,6 +105,37 @@ describe('applySettingsWrite happy paths', () => {
     expect(r.ok).toBe(true);
     expect(deps.mergeGlobalConfig).toHaveBeenCalledWith({ whiteboard: { enabled: true } });
   });
+
+  it('writes vcMeetingAgent.enabled toggle via mergeGlobalConfig', async () => {
+    const deps = makeDeps();
+    const r = await applySettingsWrite({ vcMeetingAgent: { enabled: false } }, deps);
+    expect(r.ok).toBe(true);
+    expect(deps.mergeGlobalConfig).toHaveBeenCalledWith({ vcMeetingAgent: { enabled: false } });
+  });
+
+  it('validates then syncs vcMeetingAgent.listenerBotAppId before writing the selected bot', async () => {
+    const deps = makeDeps({
+      readGlobalConfig: vi.fn(() => ({ vcMeetingAgent: { enabled: true, listenerBotAppId: 'cli_old' } })),
+    });
+    const r = await applySettingsWrite({ vcMeetingAgent: { listenerBotAppId: ' cli_listener ' } }, deps);
+    expect(r.ok).toBe(true);
+    expect(deps.validateVcMeetingListenerBotAppId).toHaveBeenCalledWith('cli_listener');
+    expect(deps.syncVcMeetingListenerBotConfig).toHaveBeenCalledWith('cli_listener', 'cli_old');
+    expect(vi.mocked(deps.validateVcMeetingListenerBotAppId).mock.invocationCallOrder[0])
+      .toBeLessThan(vi.mocked(deps.syncVcMeetingListenerBotConfig).mock.invocationCallOrder[0]);
+    expect(deps.mergeGlobalConfig).toHaveBeenCalledWith({ vcMeetingAgent: { enabled: true, listenerBotAppId: 'cli_listener' } });
+  });
+
+  it('clears vcMeetingAgent.listenerBotAppId without validating', async () => {
+    const deps = makeDeps({
+      readGlobalConfig: vi.fn(() => ({ vcMeetingAgent: { enabled: true, listenerBotAppId: 'cli_listener' } })),
+    });
+    const r = await applySettingsWrite({ vcMeetingAgent: { listenerBotAppId: null } }, deps);
+    expect(r.ok).toBe(true);
+    expect(deps.validateVcMeetingListenerBotAppId).not.toHaveBeenCalled();
+    expect(deps.syncVcMeetingListenerBotConfig).toHaveBeenCalledWith(null, 'cli_listener');
+    expect(deps.mergeGlobalConfig).toHaveBeenCalledWith({ vcMeetingAgent: { enabled: true } });
+  });
 });
 
 describe('applySettingsWrite — validation errors', () => {
@@ -136,6 +170,58 @@ describe('applySettingsWrite — validation errors', () => {
     expect(r.ok).toBe(false);
     if (r.ok) throw new Error('unreachable');
     expect(r.error).toBe('invalid_whiteboard');
+    expect(deps.mergeGlobalConfig).not.toHaveBeenCalled();
+  });
+
+  it('rejects non-object vcMeetingAgent → invalid_vcMeetingAgent', async () => {
+    const deps = makeDeps();
+    const r = await applySettingsWrite({ vcMeetingAgent: 'off' }, deps);
+    expect(r.ok).toBe(false);
+    if (r.ok) throw new Error('unreachable');
+    expect(r.error).toBe('invalid_vcMeetingAgent');
+    expect(deps.mergeGlobalConfig).not.toHaveBeenCalled();
+  });
+
+  it('rejects non-boolean vcMeetingAgent.enabled → invalid_vcMeetingAgent_enabled', async () => {
+    const deps = makeDeps();
+    const r = await applySettingsWrite({ vcMeetingAgent: { enabled: 'no' } }, deps);
+    expect(r.ok).toBe(false);
+    if (r.ok) throw new Error('unreachable');
+    expect(r.error).toBe('invalid_vcMeetingAgent_enabled');
+    expect(deps.mergeGlobalConfig).not.toHaveBeenCalled();
+  });
+
+  it('rejects invalid vcMeetingAgent.listenerBotAppId', async () => {
+    const deps = makeDeps();
+    const r = await applySettingsWrite({ vcMeetingAgent: { listenerBotAppId: 123 } }, deps);
+    expect(r.ok).toBe(false);
+    if (r.ok) throw new Error('unreachable');
+    expect(r.error).toBe('invalid_vcMeetingAgent_listenerBotAppId');
+    expect(deps.mergeGlobalConfig).not.toHaveBeenCalled();
+  });
+
+  it('rejects vcMeetingAgent.listenerBotAppId when validation fails', async () => {
+    const deps = makeDeps({
+      validateVcMeetingListenerBotAppId: vi.fn(async () => ({ ok: false as const, error: 'vcMeetingAgent_listenerBot_missing_scopes: vc:meeting.bot.join:write' })),
+    });
+    const r = await applySettingsWrite({ vcMeetingAgent: { listenerBotAppId: 'cli_bad' } }, deps);
+    expect(r.ok).toBe(false);
+    if (r.ok) throw new Error('unreachable');
+    expect(r.error).toBe('vcMeetingAgent_listenerBot_missing_scopes: vc:meeting.bot.join:write');
+    expect(deps.syncVcMeetingListenerBotConfig).not.toHaveBeenCalled();
+    expect(deps.mergeGlobalConfig).not.toHaveBeenCalled();
+  });
+
+  it('rejects vcMeetingAgent.listenerBotAppId when per-bot defaults cannot be written', async () => {
+    const deps = makeDeps({
+      syncVcMeetingListenerBotConfig: vi.fn(async () => ({ ok: false as const, error: 'vcMeetingAgent_listenerBot_config_write_failed: bot_not_in_config' })),
+    });
+    const r = await applySettingsWrite({ vcMeetingAgent: { listenerBotAppId: 'cli_missing' } }, deps);
+    expect(r.ok).toBe(false);
+    if (r.ok) throw new Error('unreachable');
+    expect(r.error).toBe('vcMeetingAgent_listenerBot_config_write_failed: bot_not_in_config');
+    expect(deps.validateVcMeetingListenerBotAppId).toHaveBeenCalledWith('cli_missing');
+    expect(deps.syncVcMeetingListenerBotConfig).toHaveBeenCalledWith('cli_missing', null);
     expect(deps.mergeGlobalConfig).not.toHaveBeenCalled();
   });
 
@@ -220,6 +306,53 @@ describe('applySettingsWrite — validation errors', () => {
     expect(await applySettingsWrite(undefined, deps)).toEqual({ ok: false, error: 'empty_patch' });
     expect(await applySettingsWrite('string', deps)).toEqual({ ok: false, error: 'empty_patch' });
     expect(await applySettingsWrite([1, 2], deps)).toEqual({ ok: false, error: 'empty_patch' });
+  });
+});
+
+describe('applySettingsWrite — scheduleTimeZone', () => {
+  it('persists a valid IANA zone via mergeGlobalConfig', async () => {
+    const deps = makeDeps();
+    const r = await applySettingsWrite({ scheduleTimeZone: 'Asia/Shanghai' }, deps);
+    expect(r.ok).toBe(true);
+    expect(deps.mergeGlobalConfig).toHaveBeenCalledWith({ scheduleTimeZone: 'Asia/Shanghai' });
+  });
+
+  it('trims surrounding whitespace before persisting', async () => {
+    const deps = makeDeps();
+    const r = await applySettingsWrite({ scheduleTimeZone: '  America/New_York  ' }, deps);
+    expect(r.ok).toBe(true);
+    expect(deps.mergeGlobalConfig).toHaveBeenCalledWith({ scheduleTimeZone: 'America/New_York' });
+  });
+
+  it('rejects an invalid zone → invalid_scheduleTimeZone (no write)', async () => {
+    const deps = makeDeps();
+    const r = await applySettingsWrite({ scheduleTimeZone: 'Mars/Phobos' }, deps);
+    expect(r.ok).toBe(false);
+    if (r.ok) throw new Error('unreachable');
+    expect(r.error).toBe('invalid_scheduleTimeZone');
+    expect(deps.mergeGlobalConfig).not.toHaveBeenCalled();
+  });
+
+  it('rejects a non-string zone → invalid_scheduleTimeZone', async () => {
+    const deps = makeDeps();
+    const r = await applySettingsWrite({ scheduleTimeZone: 42 }, deps);
+    expect(r.ok).toBe(false);
+    if (r.ok) throw new Error('unreachable');
+    expect(r.error).toBe('invalid_scheduleTimeZone');
+  });
+
+  it("clears the override on '' → mergeGlobalConfig({ scheduleTimeZone: null })", async () => {
+    const deps = makeDeps();
+    const r = await applySettingsWrite({ scheduleTimeZone: '' }, deps);
+    expect(r.ok).toBe(true);
+    expect(deps.mergeGlobalConfig).toHaveBeenCalledWith({ scheduleTimeZone: null });
+  });
+
+  it('clears the override on null → mergeGlobalConfig({ scheduleTimeZone: null })', async () => {
+    const deps = makeDeps();
+    const r = await applySettingsWrite({ scheduleTimeZone: null }, deps);
+    expect(r.ok).toBe(true);
+    expect(deps.mergeGlobalConfig).toHaveBeenCalledWith({ scheduleTimeZone: null });
   });
 });
 

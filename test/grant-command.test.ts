@@ -120,7 +120,7 @@ describe('parseGrantTargets (multi)', () => {
     expect(parseGrantTargets(barePost, 'ou_bot')).toEqual([]);
   });
 
-  // ── 位置过滤：命令词之前的 @ 是「点名操作 bot」，不是 grantee（申晗实测 bug 回归）─────────
+  // ── 位置过滤：命令词之前的 @ 是「点名操作 bot」，不是 grantee（实测 bug 回归）─────────
   // `@Claude @Codex /grant`（两 bot 都前导 @、命令后无目标）：每个 daemon 都不该把「另一个 bot」
   // 当成 grantee，否则两 bot 互相授权。
   it('text: co-addressed operator bot BEFORE /grant is NOT a target (no mutual grant)', () => {
@@ -429,7 +429,7 @@ describe('tryHandleGrantCommand bot-as-target (@operator /grant @thisBot)', () =
 });
 
 describe('tryHandleGrantCommand two bots co-addressed (@Claude @Codex /grant)', () => {
-  // 申晗实测 bug：`@Claude @Codex /grant`（两 bot 都在命令词之前、命令后无目标）。从本 bot=ou_bot
+  // 实测 bug：`@Claude @Codex /grant`（两 bot 都在命令词之前、命令后无目标）。从本 bot=ou_bot
   // 的 daemon 看，另一个 bot 在命令词之前 = 操作 bot 点名，不是 grantee → 绝不能弹「授权对方 bot」
   // 的卡（那会导致两 bot 互相授权 + 唤醒对方拉空会话）。命令后无目标 → 落进裸 /grant 整群分支。
   function coAddressedMsg() {

@@ -1249,7 +1249,7 @@ export function buildGrantCard(o: GrantCardOpts, locale?: Locale): string {
  *
  *  **真人 grantee 用 `<at>` 点名，bot grantee 只用纯文本名字**：卡片里的 `<at id=botOpenId>` 会被
  *  对方 bot 的 daemon 当成一次「被 @」消息，从而凭新授权/同伴 peer 关系在本群误拉起一个空会话
- *  （申晗实测 bug：手动 /grant 后面没有 prompt，不该触发自动会话）。纯文本名字不产生 mention 事件，
+ *  （实测 bug：手动 /grant 后面没有 prompt，不该触发自动会话）。纯文本名字不产生 mention 事件，
  *  既保留「谁被授权」的可读信息，又不会唤醒对方 bot。传 string/string[]（无 isBot 信息）时按真人
  *  处理（@ 全部），保持旧调用方/单测兼容。 */
 export function buildGrantNotifyCard(

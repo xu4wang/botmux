@@ -15,6 +15,12 @@ import { forkWorker, forkAdoptWorker, killStalePids, getCurrentCliVersion, resto
 import { createCliAdapterSync } from '../adapters/cli/registry.js';
 import { buildBotmuxShellHints } from '../adapters/cli/shared-hints.js';
 import { assertSafeAppId } from '../adapters/cli/read-isolation.js';
+import {
+  resolveSkillInjectionModeForApp,
+  builtinSkillEntries,
+  buildBuiltinSkillCatalogBlock,
+  builtinSkillHelpPointer,
+} from '../skills/injection-mode.js';
 import { getSessionPersistentBackendType, persistentSessionName, probePersistentSession, probePersistentBackendServer, killPersistentSession, type PersistentBackendType } from './persistent-backend.js';
 import { adoptTargetLabel, validateAdoptTargetState } from './session-discovery.js';
 import { getBot, getAllBots, getOwnerOpenId, findOncallChat, effectiveDefaultWorkingDir } from '../bot-registry.js';
@@ -40,10 +46,11 @@ import { scanMultipleProjects } from '../services/project-scanner.js';
 import { buildRepoSelectCard } from '../im/lark/card-builder.js';
 import { repoPickerScanOptions } from '../global-config.js';
 import { usageLimitStateKey } from '../utils/cli-usage-limit.js';
-import { t, localeForBot, type Locale } from '../i18n/index.js';
+import { t, localeForBot, getDefaultLocale, type Locale } from '../i18n/index.js';
 import { parseWorkingDirList } from '../utils/working-dir.js';
 import { resolveRoleInjection } from './role-resolver.js';
 import { ensureDefaultWhiteboard, getWhiteboard, whiteboardEnabled } from '../services/whiteboard-store.js';
+import { botAutoWorktreeEnabled } from '../services/default-worktree.js';
 
 function sessionCreatedAtMs(session: { createdAt?: string }): number {
   return session.createdAt ? (Date.parse(session.createdAt) || Date.now()) : Date.now();
@@ -393,14 +400,14 @@ function buildHermesBotmuxHints(locale?: Locale): string[] {
   if (locale === 'en') {
     return [
       'You are running in a Feishu/Lark chat through botmux. For ordinary text replies, write the user-facing answer as your final assistant message; botmux automatically forwards that final output to Feishu/Lark.',
-      'Do not call `botmux send` for normal text answers. Use `botmux send` only for special delivery needs: files/images, voice, cross-chat/top-level sends, or explicit mention routing to another person/bot.',
+      'Do not call `botmux send` for normal text answers. Use `botmux send` only for special delivery needs: files/images/videos, voice, cross-chat/top-level sends, or explicit mention routing to another person/bot.',
       '`botmux send` / `botmux history` / `botmux quoted` / `botmux bots` are shell commands installed in $PATH; run them via Bash/terminal tools when needed.',
       'If you already used `botmux send` for special delivery in this turn, do not put a second copy of the answer, messageId, or send-success receipt in the final assistant message.',
     ];
   }
   return [
     '你运行在飞书（Lark）聊天中。普通文字回复请直接写在 assistant final 里，botmux 会自动把 final_output 转发到飞书。',
-    '普通文本答案不要调用 `botmux send`。只有需要图片/文件/语音、跨群或顶层发送、显式 @ 某人/某 bot 等特殊投递能力时，才使用 `botmux send`。',
+    '普通文本答案不要调用 `botmux send`。只有需要图片/文件/视频/语音、跨群或顶层发送、显式 @ 某人/某 bot 等特殊投递能力时，才使用 `botmux send`。',
     '`botmux send` / `botmux history` / `botmux quoted` / `botmux bots` 是已安装在 $PATH 的 shell 命令；需要时通过 Bash/terminal 工具执行。',
     '如果本轮已经为了特殊投递调用过 `botmux send`，final 里不要再写第二份正文、messageId 或“发送成功/已处理”回执。',
   ];
@@ -408,10 +415,19 @@ function buildHermesBotmuxHints(locale?: Locale): string[] {
 
 function hermesFollowupReminder(locale?: Locale): string {
   if (locale === 'en') {
-    return 'For ordinary text replies, do not call `botmux send`; put the user-facing answer in final and botmux will forward it to Feishu/Lark. Use `botmux send` only for special delivery such as files/images, voice, cross-chat/top-level sends, or explicit mention routing. If already used, do not add a second answer or send-success receipt in final.';
+    return 'For ordinary text replies, do not call `botmux send`; put the user-facing answer in final and botmux will forward it to Feishu/Lark. Use `botmux send` only for special delivery such as files/images/videos, voice, cross-chat/top-level sends, or explicit mention routing. If already used, do not add a second answer or send-success receipt in final.';
   }
-  return '普通文字回复不要调用 `botmux send`；直接把给用户看的答案写在 final，botmux 会自动转发到飞书。只有图片/文件/语音、跨群/顶层发送、特殊 @ 路由等特殊投递才用 `botmux send`；如果本轮已经用过，不要在 final 里再写第二份答案或发送成功回执。';
+  return '普通文字回复不要调用 `botmux send`；直接把给用户看的答案写在 final，botmux 会自动转发到飞书。只有图片/文件/视频/语音、跨群/顶层发送、特殊 @ 路由等特殊投递才用 `botmux send`；如果本轮已经用过，不要在 final 里再写第二份答案或发送成功回执。';
 }
+
+/**
+ * Peer count at/below which the `<available_bots>` block inlines the full
+ * roster (name + open_id). Above it the block collapses to a one-line pointer
+ * that lists names only and defers open_ids to `botmux bots list`, so a
+ * many-bot group doesn't spend a long open_id list on the first message of a
+ * topic that never collaborates.
+ */
+const AVAILABLE_BOTS_INLINE_MAX = 3;
 
 export function buildNewTopicPrompt(
   userMessage: string,
@@ -437,6 +453,26 @@ export function buildNewTopicPrompt(
   const routingBlock = hints.length > 0
     ? `<botmux_routing>\n${hints.join('\n')}\n</botmux_routing>`
     : '';
+
+  // Built-in skill delivery for CLIs without a per-session skill channel
+  // (codex/gemini/opencode/… — those with a global `skillsDir`). In `prompt`
+  // mode we inline a compact skill catalog here instead of installing files
+  // into the CLI's shared global dir; in `off` mode we only point at the CLI
+  // help. `global` mode installs files (worker-pool ensureCliSkills) and adds
+  // nothing to the prompt. Claude-family (injectsSessionContext) inject skills
+  // via --plugin-dir, so they're excluded.
+  let skillBlock = '';
+  if (!adapter.injectsSessionContext && adapter.skillsDir) {
+    const mode = resolveSkillInjectionModeForApp(opts?.larkAppId);
+    if (mode === 'prompt') {
+      // excludeRoutingCovered: send/history/quoted/bots live in <botmux_routing>
+      // already, so the catalog carries only the additional task capabilities.
+      const entries = builtinSkillEntries({ asksViaHook: adapter.asksViaHook, whiteboardEnabled: whiteboardEnabled(), excludeRoutingCovered: true });
+      skillBlock = buildBuiltinSkillCatalogBlock(entries, locale);
+    } else if (mode === 'off') {
+      skillBlock = builtinSkillHelpPointer(locale);
+    }
+  }
 
   const unknown = t('ai.identity.unknown', undefined, locale);
   let identityBlock = '';
@@ -467,10 +503,27 @@ export function buildNewTopicPrompt(
     const mentionedOpenIds = new Set(mentions?.map(m => m.openId).filter(Boolean));
     const unmentionedBots = availableBots.filter(b => !mentionedOpenIds.has(b.openId));
     if (unmentionedBots.length > 0) {
-      const items = unmentionedBots.map(
-        b => `  <bot name="${xmlEscape(b.displayName)}" open_id="${xmlEscape(b.openId)}" />`,
-      );
-      botBlock = `<available_bots hint="${xmlEscape(t('ai.available_bots.hint', undefined, locale))}">\n${items.join('\n')}\n</available_bots>`;
+      // ≤ threshold peers: inline the full roster with open_ids so any
+      // cross-bot message (a question, collaboration, or full handoff) needs
+      // zero round-trip. Above it: collapse to a one-line pointer — names only
+      // for awareness, open_ids deferred to an on-demand `botmux bots list` —
+      // so a many-bot group doesn't pay a long open_id list on every solo
+      // topic. Either way this block is emitted once, on the first message.
+      if (unmentionedBots.length <= AVAILABLE_BOTS_INLINE_MAX) {
+        const items = unmentionedBots.map(
+          b => `  <bot name="${xmlEscape(b.displayName)}" open_id="${xmlEscape(b.openId)}" />`,
+        );
+        botBlock = `<available_bots hint="${xmlEscape(t('ai.available_bots.hint', undefined, locale))}">\n${items.join('\n')}\n</available_bots>`;
+      } else {
+        // Resolve the locale the same way t() does (explicit arg → process
+        // default) so the separator matches the rendered sentence's language —
+        // otherwise an undefined `locale` under an 'en' default would produce an
+        // English sentence joined with the Chinese enumeration comma.
+        const sep = (locale ?? getDefaultLocale()) === 'en' ? ', ' : '、';
+        const names = unmentionedBots.map(b => b.displayName).join(sep);
+        const line = t('ai.available_bots.collapsed_line', { count: unmentionedBots.length, names }, locale);
+        botBlock = `<available_bots hint="${xmlEscape(t('ai.available_bots.hint_collapsed', undefined, locale))}" count="${unmentionedBots.length}">\n${xmlEscape(line)}\n</available_bots>`;
+      }
     }
   }
 
@@ -494,6 +547,7 @@ export function buildNewTopicPrompt(
   // misread as part of the user's text.
   if (!adapter.injectsSessionContext) {
     if (routingBlock) parts.push(routingBlock);
+    if (skillBlock) parts.push(skillBlock);
     if (identityBlock) parts.push(identityBlock);
     parts.push(`<session_id>${xmlEscape(sessionId)}</session_id>`);
   }
@@ -1486,6 +1540,35 @@ async function forkOrShowRepoCard(ds: DaemonSession, userContent: string): Promi
   const larkAppId = ds.larkAppId;
   const bot = getBot(larkAppId);
   const locale = localeForBot(larkAppId);
+
+  // 仅默认目录 + auto-worktree：ds.workingDir 命中本 bot 自己的默认目录（且非本群 oncall 绑定）时，
+  // 走 pendingRepo 挂起 + 异步提交：把会话置 pendingRepo（入站路由 buffer 并发消息、不抢 fork），
+  // 在关键路径之外经 runAutoWorktreeCommit 建 worktree 并 commitRepoSelection 提交+fork（detach，
+  // 立即返回，不阻塞 dashboard 建会话 IPC 响应）。dashboard「建会话」立即开跑 / 待办池激活都走这里。
+  // 非 git 仓库 / 建失败 → 回退默认目录（提示经 notify 发）。registry 拿不到时兜底走原同步路径。
+  const registry = getActiveSessionsRegistry();
+  if (registry && ds.workingDir && !ds.worktreeCreating && botAutoWorktreeEnabled(larkAppId)) {
+    const isBotDefaultDir = !findOncallChat(larkAppId, ds.chatId)?.workingDir
+      && ds.workingDir === expandHome(effectiveDefaultWorkingDir(bot.config) ?? '');
+    if (isBotDefaultDir) {
+      const baseDir = ds.workingDir;
+      ds.pendingRepo = true;         // router buffers concurrent msgs; commit clears it
+      ds.pendingPrompt = userContent; // folded into the first turn by commitRepoSelection
+      // (The pending dashboard row is announced inside runAutoWorktreeCommit so all
+      // three spawn callers get it from one place — no publish needed here.)
+      const { runAutoWorktreeCommit } = await import('../im/lark/card-handler.js');
+      const { sendMessage } = await import('../im/lark/client.js');
+      void runAutoWorktreeCommit({
+        ds, anchor: ds.chatId, larkAppId, baseDir,
+        title: ds.session.title, prompt: userContent,
+        operatorOpenId: ds.session.ownerOpenId, activeSessions: registry,
+        notify: (m) => sendMessage(larkAppId, ds.chatId, m),
+      });
+      logger.info(`[createSession] session ${ds.session.sessionId.substring(0, 8)} → pending, building worktree off ${baseDir}`);
+      return;
+    }
+  }
+
   const buildPrompt = () => buildNewTopicPrompt(
     userContent, ds.session.sessionId, bot.config.cliId, bot.config.cliPathOverride,
     undefined, undefined, undefined, undefined,

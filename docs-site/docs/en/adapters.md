@@ -65,11 +65,11 @@ In many cases you don't run the native CLI directly but wrap it with a gateway /
 3. **`chmod +x` to add the executable bit (the easiest one to miss!)** — botmux uses node-pty to exec the script directly; without the executable bit you get `EACCES`, the CLI exits immediately on launch, and the bot crashes and restarts.
 4. **Verify by executing the script directly** (use `~/.botmux/bin/xxx --version`, don't test with `bash xxx` — running via bash doesn't need the executable bit and will mask the problem in step 3). Then configure `cliPathOverride` in `bots.json` (use an **absolute path**, not `~`), and run `botmux restart` to take effect.
 
-For the **specific wrapper scripts** of each gateway, see the corresponding config docs (these docs track upstream updates, so we only link to them here and don't copy the content):
+For the **specific wrapper scripts** of each gateway, use the docs published by the corresponding CLI / gateway team. This public repository intentionally does not include internal document links or copied internal content.
 
-- **aiden × claude / aiden × codex** — [config doc](https://bytedance.larkoffice.com/docx/T63VdOsCxoLnlSxCjARcd6ocnNf) (aiden×codex needs `script` to force a PTY)
-- **ttadk** — [config guide](https://bytedance.larkoffice.com/docx/SkG3dVFLsoRnNgxzE6NcvdeCnws) (includes an overview of wrapper scripts for each CLI)
-- **MTR** — [usage doc](https://bytedance.larkoffice.com/wiki/XjYKwXjlTivKoWksIVtcnmN6noH) (community-contributed, `npm i -g @metamove-code/mtr-cli@latest`)
+- **aiden × claude / aiden × codex** — aiden×codex needs `script` to force a PTY
+- **ttadk** — pay attention to wrapper argument forwarding and login state
+- **MTR** — community-contributed, `npm i -g @metamove-code/mtr-cli@latest`
 >
 > A general technique for troubleshooting wrapper issues: run `botmux logs`, find the `Spawning fresh CLI:` line, copy the full command, and run it manually locally to pinpoint the problem (permissions / argument blacklist / login state).
 

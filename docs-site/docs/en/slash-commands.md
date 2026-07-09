@@ -19,7 +19,7 @@ Just send these commands directly in a topic, and the daemon intercepts and hand
 
 ## 🔀 Passthrough to the Underlying CLI
 
-`/compact` `/model` `/clear` `/plugin` `/usage` `/context` `/cost` `/mcp` `/diff` `/code-review` `/security-review` `/review` `/btw` — delivered literally to the underlying CLI and handled by its built-in commands.
+`/compact` `/model` `/clear` `/plugin` `/usage` `/new` `/context` `/cost` `/mcp` `/diff` `/code-review` `/security-review` `/review` `/btw` — delivered literally to the underlying CLI and handled by its built-in commands.
 
 Some CLIs also declare adapter-default passthrough commands: Claude Code and Codex default-allow `/goal`, so a new topic whose first message is `/goal ...` will start/select the repository first and then send `/goal ...` to the CLI literally.
 
@@ -116,7 +116,7 @@ See [Workflow](/en/workflow) for details.
 
 ## 👥 Multi-Bot Collaboration
 
-`@botA @botB /t <prompt>` (each opens a new topic) · `@botA @botB /introduce` (register each other's open_id)
+`@botA @botB /t <prompt>` (each opens a new topic) · `botmux bots list` (show bots available in the current group) · `@botA @botB /introduce` (legacy / external-bot fallback; usually no longer needed)
 
 ## ⏰ Scheduling & ❓ Help
 

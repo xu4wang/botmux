@@ -19,7 +19,7 @@
 
 ## 🔀 透传给底层 CLI
 
-`/compact` `/model` `/clear` `/plugin` `/usage` `/context` `/cost` `/mcp` `/diff` `/code-review` `/security-review` `/review` `/btw` —— 字面送达底层 CLI，交给它的内置命令处理。
+`/compact` `/model` `/clear` `/plugin` `/usage` `/new` `/context` `/cost` `/mcp` `/diff` `/code-review` `/security-review` `/review` `/btw` —— 字面送达底层 CLI，交给它的内置命令处理。
 
 部分 CLI 还有 adapter 默认放行的命令：Claude Code / Codex 默认放行 `/goal`，因此新话题第一条发 `/goal ...` 也会先启动/选择仓库，再把 `/goal ...` 原样投给 CLI。
 
@@ -116,7 +116,7 @@
 
 ## 👥 多机器人协作
 
-`@botA @botB /t <prompt>`（各自开新话题）· `@botA @botB /introduce`（互相登记 open_id）
+`@botA @botB /t <prompt>`（各自开新话题）· `botmux bots list`（查看当前群可协作 bot）· `@botA @botB /introduce`（旧版 / 外部 bot 兜底登记，一般不再需要）
 
 ## ⏰ 定时 & ❓帮助
 

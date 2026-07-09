@@ -14,7 +14,7 @@ set -euo pipefail
 
 V="${1:?用法: ./deploy.sh <N>   N=资源 tag 版本号，例 3}"
 TAG="docs-assets-v${V}"
-APP_ID="app_4k9smq6rdxher"
+APP_ID="${BOTMUX_DOCS_APP_ID:?请先设置 BOTMUX_DOCS_APP_ID}"
 REPO="git@github.com:deepcoldy/botmux.git"
 HERE="$(cd "$(dirname "$0")" && pwd)"
 cd "$HERE"
@@ -40,4 +40,4 @@ cp -r doc_build/* "$HTMLDIR"/ && rm -rf "$HTMLDIR/static"
 ( cd "$HTMLDIR" && lark-cli apps +html-publish --app-id "$APP_ID" --path . )
 rm -rf "$HTMLDIR"
 
-echo "==> 完成：https://bytedance.aiforce.cloud/app/${APP_ID}/  （资源 @${TAG}）"
+echo "==> 完成：文档应用 ${APP_ID} 已更新（资源 @${TAG}）"

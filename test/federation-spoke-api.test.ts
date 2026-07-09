@@ -101,11 +101,11 @@ describe('handleFederationSpokeApi', () => {
     let res = makeRes();
     await handleFederationSpokeApi(makeReq('POST', '/api/team/identity/start'), res, url('/api/team/identity/start'), { dataDir });
     const { pairingId, code, browserToken } = json(res);
-    claimPairing(dataDir, code, { openId: 'ou_me', unionId: 'on_me', name: '申晗', larkAppId: 'cli_mine' });
+    claimPairing(dataDir, code, { openId: 'ou_me', unionId: 'on_me', name: '示例用户', larkAppId: 'cli_mine' });
     res = makeRes();
     await handleFederationSpokeApi(makeReq('POST', '/api/team/identity/consume', { pairingId, browserToken }), res, url('/api/team/identity/consume'), { dataDir });
     expect(res.statusCode).toBe(200);
-    expect(json(res).owner).toMatchObject({ unionId: 'on_me', name: '申晗' });
+    expect(json(res).owner).toMatchObject({ unionId: 'on_me', name: '示例用户' });
     // deployment owner bound
     expect(getDeploymentIdentity(dataDir).ownerUnionId).toBe('on_me');
     // unassigned bot now owned by me; pre-owned bot NOT stolen
@@ -125,7 +125,7 @@ describe('handleFederationSpokeApi', () => {
     let res = makeRes();
     await handleFederationSpokeApi(makeReq('POST', '/api/team/identity/start'), res, url('/api/team/identity/start'), { dataDir });
     const s = json(res);
-    claimPairing(dataDir, s.code, { openId: 'ou_me', unionId: 'on_me', name: '申晗', larkAppId: 'cli_mine' });
+    claimPairing(dataDir, s.code, { openId: 'ou_me', unionId: 'on_me', name: '示例用户', larkAppId: 'cli_mine' });
     res = makeRes();
     await handleFederationSpokeApi(makeReq('POST', '/api/team/identity/consume', { pairingId: s.pairingId, browserToken: s.browserToken }), res, url('/api/team/identity/consume'), { dataDir, fetcher: fetcher as any });
     expect(res.statusCode).toBe(200);
@@ -175,9 +175,9 @@ describe('handleFederationSpokeApi', () => {
     const fetcher = vi.fn(async (u: any, init: any) => { if (String(u).endsWith('/api/federation/sync')) synced = JSON.parse(init.body); return jsonResp(200, { ok: true }); });
     const res = makeRes();
     await handleFederationSpokeApi(makeReq('POST', '/api/team/identity/auto-bind', {}), res, url('/api/team/identity/auto-bind'),
-      { dataDir, fetcher: fetcher as any, ownerCandidates: async () => [{ unionId: 'on_me', name: '申晗' }] });
+      { dataDir, fetcher: fetcher as any, ownerCandidates: async () => [{ unionId: 'on_me', name: '示例用户' }] });
     expect(res.statusCode).toBe(200);
-    expect(json(res).owner).toMatchObject({ unionId: 'on_me', name: '申晗' });
+    expect(json(res).owner).toMatchObject({ unionId: 'on_me', name: '示例用户' });
     expect(getDeploymentIdentity(dataDir).ownerUnionId).toBe('on_me'); // bound, no /pair
     expect(getBotOwner(dataDir, 'cli_a')!.unionId).toBe('on_me');       // owns local bot
     expect(synced).toMatchObject({ ownerUnionId: 'on_me' });            // pushed to hub
@@ -207,15 +207,15 @@ describe('handleFederationSpokeApi', () => {
   // Headless startup auto-bind (dashboard boot path): same resolution, no HTTP.
   it('autoBindOwnerIfUnambiguous: single candidate binds owner + claims bots (no click)', async () => {
     writeBots([{ larkAppId: 'cli_a', botOpenId: null, botName: 'A', cliId: 'claude' }]);
-    const r = await autoBindOwnerIfUnambiguous(dataDir, { ownerCandidates: async () => [{ unionId: 'on_me', name: '申晗' }] });
+    const r = await autoBindOwnerIfUnambiguous(dataDir, { ownerCandidates: async () => [{ unionId: 'on_me', name: '示例用户' }] });
     expect(r.status).toBe('bound');
-    expect(r.owner).toMatchObject({ unionId: 'on_me', name: '申晗' });
+    expect(r.owner).toMatchObject({ unionId: 'on_me', name: '示例用户' });
     expect(getDeploymentIdentity(dataDir).ownerUnionId).toBe('on_me');
     expect(getBotOwner(dataDir, 'cli_a')!.unionId).toBe('on_me');
   });
 
   it('autoBindOwnerIfUnambiguous: already bound → no-op, does NOT re-resolve', async () => {
-    await autoBindOwnerIfUnambiguous(dataDir, { ownerCandidates: async () => [{ unionId: 'on_me', name: '申晗' }] });
+    await autoBindOwnerIfUnambiguous(dataDir, { ownerCandidates: async () => [{ unionId: 'on_me', name: '示例用户' }] });
     const spy = vi.fn(async () => [{ unionId: 'on_other', name: '别人' }]);
     const r = await autoBindOwnerIfUnambiguous(dataDir, { ownerCandidates: spy });
     expect(r.status).toBe('already_bound');
@@ -382,9 +382,9 @@ describe('handleFederationSpokeApi', () => {
     writeBots([]);
     const before = getDeploymentIdentity(dataDir);
     const res = makeRes();
-    await handleFederationSpokeApi(makeReq('POST', '/api/team/rename-deployment', { name: '申晗的部署' }), res, new URL('http://x/api/team/rename-deployment'), { dataDir });
+    await handleFederationSpokeApi(makeReq('POST', '/api/team/rename-deployment', { name: '示例用户的部署' }), res, new URL('http://x/api/team/rename-deployment'), { dataDir });
     expect(res.statusCode).toBe(200);
-    expect(json(res).deployment).toMatchObject({ deploymentId: before.deploymentId, name: '申晗的部署' });
+    expect(json(res).deployment).toMatchObject({ deploymentId: before.deploymentId, name: '示例用户的部署' });
   });
 
   it('federated-group: validates roster, delegates local+federated app_ids + pulls owners (union_id) into createTeamGroup', async () => {

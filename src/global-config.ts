@@ -12,7 +12,7 @@
  * touched; unknown keys in the on-disk file are preserved across writes so
  * a future client that adds a setting we don't know about doesn't lose it.
  */
-import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, renameSync, statSync, writeFileSync } from 'node:fs';
 import type { ProjectScanOptions } from './services/project-scanner.js';
 import { join, dirname } from 'node:path';
 import { homedir } from 'node:os';
@@ -24,6 +24,16 @@ export type RepoPickerMode = 'all' | 'repos';
 export interface WhiteboardConfig {
   /** Optional local project whiteboard. Off by default; enabling it must not create boards by itself. */
   enabled?: boolean;
+}
+
+export interface VcMeetingAgentGlobalConfig {
+  /** Machine-wide VC meeting listener kill-switch. Missing means enabled for
+   *  backwards compatibility; per-bot vcMeetingAgent.enabled still controls
+   *  whether a given bot responds to meetings. */
+  enabled?: boolean;
+  /** Optional bot app id that is allowed to own new VC meeting listeners. When
+   *  unset, legacy per-bot vcMeetingAgent.enabled routing is preserved. */
+  listenerBotAppId?: string;
 }
 
 export interface GlobalConfig {
@@ -45,6 +55,10 @@ export interface GlobalConfig {
   maintenance?: MaintenanceConfig;
   /** Optional local project whiteboard. Disabled unless explicitly enabled. */
   whiteboard?: WhiteboardConfig;
+  /** Machine-wide meeting listener kill-switch. Missing / enabled !== false
+   *  preserves legacy behavior; set false to stop accepting new VC meetings
+   *  and skip restore/readiness for this host. */
+  vcMeetingAgent?: VcMeetingAgentGlobalConfig;
   /** Optional HTTP(S) proxy for the daemon's own outbound downloads (e.g. the
    *  HD2D office assets). Node's global fetch ignores HTTP_PROXY/HTTPS_PROXY,
    *  so hosts behind a proxy must set this (or the env vars, which we read as a
@@ -59,11 +73,33 @@ export interface GlobalConfig {
    *  host:port URLs. Off by default — only local links are emitted. Gated in
    *  buildTerminalUrl / publicWebhookUrl via isRemoteAccessEnabled(). */
   remoteAccess?: boolean;
+  /** Machine-wide timezone for USER scheduled tasks (scheduler). An IANA name
+   *  (e.g. 'Asia/Shanghai'). Overrides the host's auto-detected local zone for
+   *  cron firing, one-shot「明天HH:MM」parsing, and all schedule displays —
+   *  see utils/timezone.ts `scheduleTimeZone()`. Absent ⇒ follow the host zone.
+   *  Stored lenient here; final IANA validity is enforced on write
+   *  (settings-write-applier) and re-checked at resolve time. */
+  scheduleTimeZone?: string;
 }
 
 export interface GlobalSkillConfig {
   trustProjectSkills?: 'off' | 'trusted' | 'all';
   delivery?: 'auto' | 'prompt' | 'native';
+  /** Machine-wide default for how botmux's **built-in bridge skills**
+   *  (botmux-send / botmux-schedule / …) reach CLIs that only support a GLOBAL
+   *  skills directory (codex/gemini/opencode/… — everything with `skillsDir`,
+   *  i.e. no per-session `--plugin-dir` injection like Claude Code):
+   *   - `global`: install the skill files into the CLI's shared global dir
+   *     (e.g. `~/.codex/skills`). Full native experience, but the user's own
+   *     standalone `codex`/`gemini` sees & can mis-fire them. Right for hosts
+   *     whose users NEVER run those CLIs by hand.
+   *   - `prompt` (default): don't touch the global dir; inject a compact skill
+   *     catalog into the session prompt and let the model pull full instructions
+   *     on demand via `botmux skill show <name>`. Session-scoped → no leak.
+   *   - `off`: inject neither files nor catalog — only the routing hints + a
+   *     pointer at `botmux --help`. Lightest; relies on CLI help completeness.
+   *  A per-bot `skillInjection` (bots.json) overrides this. Unset ⇒ `prompt`. */
+  builtinInjection?: 'global' | 'prompt' | 'off';
 }
 
 export interface MaintenanceConfig {
@@ -209,6 +245,9 @@ function readGlobalSkills(raw: unknown): GlobalSkillConfig | undefined {
   if (r.delivery === 'auto' || r.delivery === 'prompt' || r.delivery === 'native') {
     out.delivery = r.delivery;
   }
+  if (r.builtinInjection === 'global' || r.builtinInjection === 'prompt' || r.builtinInjection === 'off') {
+    out.builtinInjection = r.builtinInjection;
+  }
   return Object.keys(out).length > 0 ? out : undefined;
 }
 
@@ -217,6 +256,17 @@ function readWhiteboard(raw: unknown): WhiteboardConfig | undefined {
   const v = raw as Record<string, unknown>;
   const out: WhiteboardConfig = {};
   if (typeof v.enabled === 'boolean') out.enabled = v.enabled;
+  return Object.keys(out).length > 0 ? out : undefined;
+}
+
+function readVcMeetingAgent(raw: unknown): VcMeetingAgentGlobalConfig | undefined {
+  if (!raw || typeof raw !== 'object') return undefined;
+  const v = raw as Record<string, unknown>;
+  const out: VcMeetingAgentGlobalConfig = {};
+  if (typeof v.enabled === 'boolean') out.enabled = v.enabled;
+  if (typeof v.listenerBotAppId === 'string' && v.listenerBotAppId.trim()) {
+    out.listenerBotAppId = v.listenerBotAppId.trim();
+  }
   return Object.keys(out).length > 0 ? out : undefined;
 }
 
@@ -253,6 +303,7 @@ function readRawConfig(): Record<string, unknown> {
 // Keyed by path so tests that re-point HOME don't read a stale entry.
 const READ_CACHE_TTL_MS = 2_000;
 let readCache: { path: string; value: GlobalConfig; at: number } | null = null;
+let vcMeetingAgentLiveCache: { path: string; mtimeMs: number; config: VcMeetingAgentGlobalConfig } | null = null;
 
 /** Typed view of the global config. Validates `lang` so a malformed file
  *  can't propagate a bad value into the i18n module. */
@@ -274,10 +325,18 @@ export function readGlobalConfig(): GlobalConfig {
   if (maintenance) out.maintenance = maintenance;
   const whiteboard = readWhiteboard(raw.whiteboard);
   if (whiteboard) out.whiteboard = whiteboard;
+  const vcMeetingAgent = readVcMeetingAgent(raw.vcMeetingAgent);
+  if (vcMeetingAgent) out.vcMeetingAgent = vcMeetingAgent;
   if (typeof raw.httpProxy === 'string' && raw.httpProxy.trim()) out.httpProxy = raw.httpProxy.trim();
   const skills = readGlobalSkills(raw.skills);
   if (skills) out.skills = skills;
   if (typeof raw.remoteAccess === 'boolean') out.remoteAccess = raw.remoteAccess;
+  // Lenient: keep any non-empty string. IANA validity is enforced on write and
+  // re-checked in scheduleTimeZone() (invalid ⇒ falls back to the host zone),
+  // so a stale/hand-edited bad value degrades gracefully rather than crashing.
+  if (typeof raw.scheduleTimeZone === 'string' && raw.scheduleTimeZone.trim()) {
+    out.scheduleTimeZone = raw.scheduleTimeZone.trim();
+  }
   readCache = { path, value: out, at: Date.now() };
   return out;
 }
@@ -289,6 +348,48 @@ export function readGlobalConfig(): GlobalConfig {
  *  dashboard URL reflects the new value without waiting out the TTL. */
 export function invalidateGlobalConfigCache(): void {
   readCache = null;
+  vcMeetingAgentLiveCache = null;
+}
+
+/** Live VC meeting listener global config. Missing config means enabled.
+ *
+ * This path is checked at every VC event ingress. Use a file mtime cache
+ * instead of the general 2s readGlobalConfig TTL so dashboard flips take effect
+ * across all daemon processes without restart and without parsing the file on
+ * every event.
+ */
+export function globalVcMeetingAgentConfigLive(): VcMeetingAgentGlobalConfig {
+  const path = globalConfigPath();
+  if (!existsSync(path)) {
+    const config = { enabled: true };
+    vcMeetingAgentLiveCache = { path, mtimeMs: -1, config };
+    return config;
+  }
+  let mtimeMs = 0;
+  try {
+    mtimeMs = statSync(path).mtimeMs;
+  } catch {
+    return vcMeetingAgentLiveCache?.config ?? { enabled: true };
+  }
+  if (vcMeetingAgentLiveCache && vcMeetingAgentLiveCache.path === path && vcMeetingAgentLiveCache.mtimeMs === mtimeMs) {
+    return vcMeetingAgentLiveCache.config;
+  }
+  const raw = readRawConfig();
+  const parsed = readVcMeetingAgent(raw.vcMeetingAgent);
+  const config: VcMeetingAgentGlobalConfig = {
+    enabled: parsed?.enabled !== false,
+    ...(parsed?.listenerBotAppId ? { listenerBotAppId: parsed.listenerBotAppId } : {}),
+  };
+  vcMeetingAgentLiveCache = { path, mtimeMs, config };
+  return config;
+}
+
+export function isGlobalVcMeetingAgentEnabled(): boolean {
+  return globalVcMeetingAgentConfigLive().enabled !== false;
+}
+
+export function globalVcMeetingAgentListenerBotAppId(): string | undefined {
+  return globalVcMeetingAgentConfigLive().listenerBotAppId;
 }
 
 /** 远程访问 enabled? Reads the (short-TTL cached) global config — cheap enough to
@@ -331,6 +432,7 @@ export function mergeGlobalConfig(patch: Partial<Record<keyof GlobalConfig, Glob
   // Same-process read-after-write must see the new value immediately
   // (e.g. dashboard PUT /api/settings responds with the resolved config).
   readCache = null;
+  vcMeetingAgentLiveCache = null;
 }
 
 /** Merge only the dashboard sub-config, preserving unknown keys inside that

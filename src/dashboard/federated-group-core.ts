@@ -83,7 +83,7 @@ export async function orchestrateFederatedGroup(
   const unknown = larkAppIds.filter(id => !byId.has(id));
   if (unknown.length) return { status: 400, body: { ok: false, error: 'unknown_bot', unknown } };
 
-  // Owner-in-group policy (申晗): a bot should only join if its owner is in the
+  // Owner-in-group policy (示例用户): a bot should only join if its owner is in the
   // group too (else it's "打黑工" — in a group its owner can't see). A REMOTE bot
   // whose owner is unbound has no owner to pull → skip it. (LOCAL bots are covered
   // by the operator, who is always pulled in.)

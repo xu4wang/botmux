@@ -111,6 +111,12 @@ vi.mock('@larksuiteoapi/node-sdk', () => {
 
 import { __resetAnchorQueues } from '../src/utils/anchor-serializer.js';
 import { __resetEventClaimsForTest, canOperate, canTalk, decideRouting, ensureBotOpenId, isBotMentioned, mentionsAnotherMember, startLarkEventDispatcher, writeBotInfoFile, type EventHandlers } from '../src/im/lark/event-dispatcher.js';
+import {
+  VC_BOT_MEETING_ACTIVITY_EVENT,
+  VC_BOT_MEETING_ENDED_EVENT,
+  VC_BOT_MEETING_INVITED_EVENT,
+  VC_PARTICIPANT_MEETING_JOINED_EVENT,
+} from '../src/vc-agent/push-source.js';
 // grant-pending is a real (unmocked) module-level table; reset it per test so the
 // grant-card throttle state never leaks across cases (it backs the @blocked card path).
 import { _resetForTest as _resetGrantPending } from '../src/im/lark/grant-pending.js';
@@ -120,6 +126,7 @@ import { _resetForTest as _resetGrantPending } from '../src/im/lark/grant-pendin
 const MY_APP_ID = 'app-bot-a';
 const MY_OPEN_ID = 'ou_bot_a_open_id';
 const OTHER_BOT_OPEN_ID = 'ou_bot_b_open_id';
+const OTHER_BOT_APP_ID = 'app-bot-b';
 const USER_OPEN_ID = 'ou_user_123';
 
 beforeEach(() => {
@@ -150,7 +157,7 @@ function setupBotState(opts?: {
   configAllowedUsers?: string[];
   restrictGrantCommands?: boolean;
   regularGroupReplyMode?: 'chat' | 'new-topic' | 'shared' | 'chat-topic';
-	  regularGroupMentionMode?: 'always' | 'topic' | 'never';
+	  regularGroupMentionMode?: 'always' | 'topic' | 'never' | 'ambient';
 	  autoStartOnNewTopic?: boolean;
 	  autoGrantRequestCards?: boolean;
 	  chatReplyModes?: Record<string, 'chat' | 'new-topic' | 'shared' | 'chat-topic'>;
@@ -188,11 +195,13 @@ function setupBotState(opts?: {
   isSessionOwner: ReturnType<typeof vi.fn>;
   onChatModeConverted: ReturnType<typeof vi.fn>;
   resolveReplyThreadAlias: ReturnType<typeof vi.fn>;
+  handleVcMeetingPush: ReturnType<typeof vi.fn>;
 } {
   return {
     handleCardAction: vi.fn(async () => undefined),
     handleNewTopic: vi.fn(async () => {}),
     handleThreadReply: vi.fn(async () => {}),
+    handleVcMeetingPush: vi.fn(async () => {}),
     isSessionOwner: vi.fn(() => false),
     resolveReplyThreadAlias: vi.fn(() => null),
     onChatModeConverted: vi.fn(),
@@ -267,6 +276,134 @@ function makeUserMessageEvent(opts: {
     },
   };
 }
+
+describe('startLarkEventDispatcher — VC bot meeting push events', () => {
+  beforeEach(() => {
+    capturedHandlers = {};
+    __resetEventClaimsForTest();
+  });
+
+  it('registers invited/activity/ended handlers and dispatches activity ACK-safe', async () => {
+    const handlers = makeHandlers();
+    startLarkEventDispatcher(MY_APP_ID, 'secret', handlers);
+
+    expect(capturedHandlers[VC_BOT_MEETING_INVITED_EVENT]).toBeTypeOf('function');
+    expect(capturedHandlers[VC_BOT_MEETING_ACTIVITY_EVENT]).toBeTypeOf('function');
+    expect(capturedHandlers[VC_BOT_MEETING_ENDED_EVENT]).toBeTypeOf('function');
+    expect(capturedHandlers[VC_PARTICIPANT_MEETING_JOINED_EVENT]).toBeTypeOf('function');
+
+    capturedHandlers[VC_BOT_MEETING_ACTIVITY_EVENT]?.({
+      header: { event_id: 'evt_vc_1', event_type: VC_BOT_MEETING_ACTIVITY_EVENT },
+      event: {
+        meeting_actitivty_items: [
+          {
+            activity_event_type: 'transcript_received',
+            meeting: { id: 'm_1', topic: 'Design review' },
+            transcript_received_items: [
+              { sentence_id: 'sent_1', speaker: { open_id: 'ou_a' }, text: 'hello' },
+            ],
+          },
+        ],
+      },
+    });
+    await flushEventWork();
+
+    expect(handlers.handleVcMeetingPush).toHaveBeenCalledTimes(1);
+    expect(handlers.handleVcMeetingPush).toHaveBeenCalledWith(expect.objectContaining({
+      larkAppId: MY_APP_ID,
+      kind: 'meeting_activity',
+      eventType: VC_BOT_MEETING_ACTIVITY_EVENT,
+      eventId: 'evt_vc_1',
+      meeting: expect.objectContaining({ id: 'm_1', topic: 'Design review' }),
+    }));
+  });
+
+  it('dispatches participant meeting joined lifecycle events to the VC handler', async () => {
+    const handlers = makeHandlers();
+    startLarkEventDispatcher(MY_APP_ID, 'secret', handlers);
+
+    capturedHandlers[VC_PARTICIPANT_MEETING_JOINED_EVENT]?.({
+      header: { event_id: 'evt_user_joined', event_type: VC_PARTICIPANT_MEETING_JOINED_EVENT },
+      event: {
+        meeting_id: 'm_user_joined',
+        meeting_no: '123456789',
+        topic: 'User joined review',
+        timestamp: '2026-07-01T17:00:00+08:00',
+      },
+    });
+    await flushEventWork();
+
+    expect(handlers.handleVcMeetingPush).toHaveBeenCalledTimes(1);
+    expect(handlers.handleVcMeetingPush).toHaveBeenCalledWith(expect.objectContaining({
+      larkAppId: MY_APP_ID,
+      kind: 'participant_meeting_joined',
+      eventType: VC_PARTICIPANT_MEETING_JOINED_EVENT,
+      eventId: 'evt_user_joined',
+      meeting: expect.objectContaining({
+        id: 'm_user_joined',
+        meetingNo: '123456789',
+        topic: 'User joined review',
+      }),
+      occurredAtMs: Date.parse('2026-07-01T17:00:00+08:00'),
+    }));
+  });
+
+  it('dedupes VC meeting push redelivery by event id', async () => {
+    const handlers = makeHandlers();
+    startLarkEventDispatcher(MY_APP_ID, 'secret', handlers);
+    const payload = {
+      header: { event_id: 'evt_vc_dup', event_type: VC_BOT_MEETING_ENDED_EVENT },
+      event: { meeting: { id: 'm_1' } },
+    };
+
+    capturedHandlers[VC_BOT_MEETING_ENDED_EVENT]?.(payload);
+    capturedHandlers[VC_BOT_MEETING_ENDED_EVENT]?.(payload);
+    await flushEventWork();
+
+    expect(handlers.handleVcMeetingPush).toHaveBeenCalledTimes(1);
+    expect(handlers.handleVcMeetingPush).toHaveBeenCalledWith(expect.objectContaining({
+      kind: 'meeting_ended',
+      meeting: expect.objectContaining({ id: 'm_1' }),
+    }));
+  });
+
+  it('does not dedupe unkeyed VC activity batches by meeting id', async () => {
+    const handlers = makeHandlers();
+    startLarkEventDispatcher(MY_APP_ID, 'secret', handlers);
+
+    capturedHandlers[VC_BOT_MEETING_ACTIVITY_EVENT]?.({
+      header: { event_type: VC_BOT_MEETING_ACTIVITY_EVENT },
+      event: {
+        meeting_actitivty_items: [
+          {
+            activity_event_type: 'transcript_received',
+            meeting: { id: 'm_1', topic: 'Design review' },
+            transcript_received_items: [
+              { sentence_id: 'sent_1', speaker: { open_id: 'ou_a' }, text: 'first batch' },
+            ],
+          },
+        ],
+      },
+    });
+    capturedHandlers[VC_BOT_MEETING_ACTIVITY_EVENT]?.({
+      header: { event_type: VC_BOT_MEETING_ACTIVITY_EVENT },
+      event: {
+        meeting_actitivty_items: [
+          {
+            activity_event_type: 'transcript_received',
+            meeting: { id: 'm_1', topic: 'Design review' },
+            transcript_received_items: [
+              { sentence_id: 'sent_2', speaker: { open_id: 'ou_b' }, text: 'second batch' },
+            ],
+          },
+        ],
+      },
+    });
+    await flushEventWork();
+
+    expect(handlers.handleVcMeetingPush).toHaveBeenCalledTimes(2);
+  });
+});
 
 // ─── Tests ──────────────────────────────────────────────────────────────────
 
@@ -365,6 +502,14 @@ describe('isBotMentioned', () => {
     expect(isBotMentioned(MY_APP_ID, message, undefined)).toBe(false);
   });
 
+  it('does not treat another app_id object as this bot mention', () => {
+    const message = {
+      mentions: [{ key: '@_other', name: 'Other', id: { app_id: 'app-other' } }],
+      content: JSON.stringify({ text: '@Other hello' }),
+    };
+    expect(isBotMentioned(MY_APP_ID, message, undefined)).toBe(false);
+  });
+
   it('detects @mention in post content at tags (bot-sent messages)', () => {
     // Bot-sent post messages embed @mentions as inline `at` nodes in content,
     // NOT in the message.mentions array
@@ -432,6 +577,30 @@ describe('mentionsAnotherMember (ambient redirect carve-out)', () => {
       content: JSON.stringify({ text: '@Other 你看下' }),
     };
     expect(mentionsAnotherMember(MY_APP_ID, message)).toBe(true);
+  });
+
+  it('returns true when another bot is @mentioned via app_id string form', () => {
+    const message = {
+      mentions: [{ key: '@_other', name: 'OtherBot', id: 'app-other-bot', id_type: 'app_id' }],
+      content: JSON.stringify({ text: '@OtherBot 你来答' }),
+    };
+    expect(mentionsAnotherMember(MY_APP_ID, message)).toBe(true);
+  });
+
+  it('returns true when another bot is @mentioned via app_id object form', () => {
+    const message = {
+      mentions: [{ key: '@_other', name: 'OtherBot', id: { app_id: 'app-other-bot' } }],
+      content: JSON.stringify({ text: '@OtherBot 你来答' }),
+    };
+    expect(mentionsAnotherMember(MY_APP_ID, message)).toBe(true);
+  });
+
+  it('returns false when only THIS bot is @mentioned via app_id string form', () => {
+    const message = {
+      mentions: [{ key: '@_bot', name: 'BotA', id: MY_APP_ID, id_type: 'app_id' }],
+      content: JSON.stringify({ text: '@BotA hello' }),
+    };
+    expect(mentionsAnotherMember(MY_APP_ID, message)).toBe(false);
   });
 
   it('returns false when only THIS bot is @mentioned via string-form id (no false redirect)', () => {
@@ -1863,6 +2032,31 @@ describe('im.message.receive_v1 — bot-to-bot @mention routing', () => {
     expect(handlers.handleNewTopic).not.toHaveBeenCalled();
   });
 
+  it('shared follow-up with mention mode topic yields when the reply @mentions ANOTHER bot', async () => {
+    setupBotState({ allowedUsers: [USER_OPEN_ID], regularGroupMentionMode: 'topic' });
+    mockGetChatMode.mockResolvedValue('group');
+    mockGetChatInfo.mockResolvedValue({ userCount: 3, botCount: 2 });
+    handlers.resolveReplyThreadAlias.mockReturnValue({ chatId: 'chat-reply-mode', sessionId: 'sess-chat' });
+    handlers.isSessionOwner.mockImplementation((anchor: string) => anchor === 'chat-reply-mode');
+    const event = makeUserMessageEvent({
+      senderOpenId: USER_OPEN_ID,
+      content: JSON.stringify({ text: '@BotB 这个交给你' }),
+      mentions: [{ key: '@_bot_b', name: 'BotB', id: OTHER_BOT_APP_ID, id_type: 'app_id' }],
+      rootId: 'msg-topic-alias-1',
+      threadId: 'msg-topic-alias-1',
+      messageId: 'msg-topic-alias-other-bot',
+      chatId: 'chat-reply-mode',
+      chatType: 'group',
+    });
+
+    await capturedHandlers['im.message.receive_v1'](event);
+    await flushEventWork();
+
+    expect(handlers.handleThreadReply).not.toHaveBeenCalled();
+    expect(handlers.handleNewTopic).not.toHaveBeenCalled();
+    expect(handlers.resolveReplyThreadAlias).not.toHaveBeenCalled();
+  });
+
   it('shared follow-up thread reply WITHOUT @ is ignored by default (mention mode always → @ required even in topics)', async () => {
     setupBotState({ allowedUsers: [USER_OPEN_ID] }); // default = always
     mockGetChatMode.mockResolvedValue('group');
@@ -1936,6 +2130,30 @@ describe('im.message.receive_v1 — bot-to-bot @mention routing', () => {
       anchor: 'owned-topic-root',
       larkAppId: MY_APP_ID,
     }));
+    expect(handlers.handleNewTopic).not.toHaveBeenCalled();
+  });
+
+  it('mention mode topic: a reply inside an owned thread that @mentions ANOTHER bot is ignored — yields the turn', async () => {
+    setupBotState({ allowedUsers: [USER_OPEN_ID], regularGroupMentionMode: 'topic' });
+    mockGetChatMode.mockResolvedValue('group');
+    mockGetChatInfo.mockResolvedValue({ userCount: 3, botCount: 2 });
+    handlers.resolveReplyThreadAlias.mockReturnValue(null);
+    handlers.isSessionOwner.mockImplementation((anchor: string) => anchor === 'owned-topic-root');
+    const event = makeUserMessageEvent({
+      senderOpenId: USER_OPEN_ID,
+      content: JSON.stringify({ text: '@BotB 你来看这个' }),
+      mentions: [{ key: '@_bot_b', name: 'BotB', id: { app_id: OTHER_BOT_APP_ID } }],
+      rootId: 'owned-topic-root',
+      threadId: 'owned-topic-root',
+      messageId: 'msg-topic-tier-other-bot',
+      chatId: 'chat-topic-tier-other-bot',
+      chatType: 'group',
+    });
+
+    await capturedHandlers['im.message.receive_v1'](event);
+    await flushEventWork();
+
+    expect(handlers.handleThreadReply).not.toHaveBeenCalled();
     expect(handlers.handleNewTopic).not.toHaveBeenCalled();
   });
 

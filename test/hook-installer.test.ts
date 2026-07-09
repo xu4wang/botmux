@@ -144,7 +144,7 @@ describe('installHook — claude-settings', () => {
   it('(c3) 不同安装路径的旧 botmux hook 在重装时被去重（避免双卡）', () => {
     // 模拟 dev 源码安装残留的 hook，命令路径与本次 npm-global 安装不同
     const devCommand =
-      '"/root/.local/share/fnm/.../bin/node" "/root/claude-code-workspace/botmux/dist/cli.js" hook claude-code';
+      '"/home/user/.local/share/fnm/.../bin/node" "/workspace/botmux/dist/cli.js" hook claude-code';
     const existing = {
       hooks: {
         PreToolUse: [

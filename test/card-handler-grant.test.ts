@@ -237,7 +237,7 @@ describe('card-handler grant actions', () => {
     expect(entries).toEqual([{ openId: 'ou_a', name: '张三' }, { openId: 'ou_bot2', name: 'Codex' }]);
   });
 
-  // 申晗实测 bug：手动 /grant 一个 bot 后，通知卡若 <at> 对方 bot 会唤醒其 daemon 误拉空会话。
+  // 实测 bug：手动 /grant 一个 bot 后，通知卡若 <at> 对方 bot 会唤醒其 daemon 误拉空会话。
   // 修复后通知卡对 bot grantee 只用纯文本名字（无 <at>），对真人仍 @。
   it('通知卡：bot grantee 用纯文本名字（无 <at>），不唤醒对方 bot', async () => {
     const { pending, handler } = await fresh();
