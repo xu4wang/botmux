@@ -35,7 +35,7 @@ import {
   loopExhaustedInfoFor,
   reconcileV3PendingGates,
 } from '../src/workflows/v3/daemon-run.js';
-import { birthRun } from '../src/workflows/v3/grill-state.js';
+import { birthRun, readGrillState, writeGrillState } from '../src/workflows/v3/grill-state.js';
 import { projectRun } from '../src/workflows/v3/ops-projection.js';
 import { readAndValidateManifest, ManifestValidationError } from '../src/workflows/v3/manifest.js';
 import {
@@ -606,6 +606,10 @@ describe('requestV3LoopGrant + retry loop guard', () => {
         ? { chatBinding: { larkAppId: 'cli_test', chatId: 'oc_chat', rootMessageId: 'om_root' } }
         : {}),
     });
+    const dagPath = join(runDir, 'dag.json');
+    writeFileSync(dagPath, JSON.stringify({ ...loopDagRaw(), runId }));
+    const grill = readGrillState(runDir)!;
+    writeGrillState(runDir, { ...grill, status: 'dag_approved', dagPath });
     const journalPath = join(runDir, 'journal.ndjson');
     appendEvent(journalPath, { type: 'runStarted', runId });
     appendEvent(journalPath, { type: 'loopStarted', loopId: 'fix' });
@@ -768,6 +772,10 @@ describe('requestV3LoopGrant + retry loop guard', () => {
           goal: 'g', baseDir: base, runId,
           chatBinding: { larkAppId: 'cli_test', chatId: 'oc_chat', rootMessageId: 'om_root' },
         });
+        const dagPath = join(runDir, 'dag.json');
+        writeFileSync(dagPath, JSON.stringify({ ...loopDagRaw(), runId }));
+        const grill = readGrillState(runDir)!;
+        writeGrillState(runDir, { ...grill, status: 'dag_approved', dagPath });
         const journalPath = join(runDir, 'journal.ndjson');
         appendEvent(journalPath, { type: 'runStarted', runId });
         for (const e of extra) appendEvent(journalPath, e);

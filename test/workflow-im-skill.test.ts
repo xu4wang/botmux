@@ -91,13 +91,9 @@ describe('/template (v2 模板) command parsing', () => {
   });
 });
 
-describe('/workflow run|cancel legacy（软降级：仍解析为 v2，与 /template 同构）', () => {
-  it('legacy /workflow run still parses as v2 run (改名提示由 daemon 从原始 content 判定)', () => {
-    expect(parseWorkflowCommand('/workflow run hello name=SF')).toEqual({
-      kind: 'run',
-      workflowId: 'hello',
-      rawParams: { name: 'SF' },
-    });
+describe('/workflow legacy compatibility boundary', () => {
+  it('/workflow run is reserved for v3 Saved Workflow, never parsed as v2', () => {
+    expect(parseWorkflowCommand('/workflow run hello name=SF')).toBeNull();
   });
 
   it('legacy /workflow cancel still parses as v2 cancel', () => {
@@ -174,7 +170,7 @@ describe('executeWorkflowCommand', () => {
 
     const result = await executeWorkflowCommand(
       {
-        content: '/workflow run hello name=alice dryRun=true',
+        content: '/template run hello name=alice dryRun=true',
         chatId: 'oc_chat',
         larkAppId: 'cli_codex',
         initiator: 'ou_user',
@@ -204,7 +200,7 @@ describe('executeWorkflowCommand', () => {
   it('returns a user-facing error when workflow loading fails', async () => {
     const result = await executeWorkflowCommand(
       {
-        content: '/workflow run missing name=alice',
+        content: '/template run missing name=alice',
         chatId: 'oc_chat',
         larkAppId: 'cli_codex',
         initiator: 'ou_user',

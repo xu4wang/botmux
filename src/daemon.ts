@@ -128,14 +128,34 @@ import {
   WORKFLOW_V2_RENAME_NOTICE,
   type WorkflowCommandResult,
 } from './im/lark/workflow-slash-command.js';
+import {
+  parseV3SavedWorkflowCommand,
+  v3SavedWorkflowUsage,
+} from './im/lark/v3-saved-workflow-command.js';
+import {
+  authorizeV3SavedWorkflowInvocation,
+  defaultV3SavedWorkflowExecutionServices,
+  deliverV3SavedWorkflowNotification,
+  executeV3SavedWorkflowCommand,
+  resolveV3SavedWorkflowMessageTargets,
+  type V3SavedWorkflowExecutionEffect,
+} from './im/lark/v3-saved-workflow-handler.js';
 import { workflowRunDetailUrl } from './im/lark/workflow-cards.js';
-import { createV3GateRunner, requestV3Retry, requestV3LoopGrant } from './workflows/v3/daemon-run.js';
+import {
+  createV3GateRunner,
+  preflightV3RunStart,
+  readV3RunChatBinding,
+  requestV3Retry,
+  requestV3LoopGrant,
+} from './workflows/v3/daemon-run.js';
 import { buildV3GateCard } from './im/lark/v3-gate-card.js';
 import { buildV3BlockedCard } from './im/lark/v3-blocked-card.js';
 import { buildV3LoopGrantCard } from './im/lark/v3-loop-grant-card.js';
 import { buildV3RevisitGrantCard } from './im/lark/v3-revisit-grant-card.js';
 import { isValidRunId as isValidV3RunId } from './workflows/v3/ops-projection.js';
-import { readRunChatBinding as readV3RunChatBinding, defaultBaseDir as v3DefaultBaseDir } from './workflows/v3/grill-state.js';
+import { defaultBaseDir as v3DefaultBaseDir } from './workflows/v3/grill-state.js';
+import { persistV3StartIntent } from './workflows/v3/start-intent.js';
+import type { SavedWorkflowActorContext } from './workflows/v3/library-service.js';
 
 /** This daemon process's bot larkAppId (set in startDaemon).  Used to scope v3
  *  humanGate cold-attach + start to runs this bot owns (codex blocker #1). */
@@ -2121,11 +2141,11 @@ async function handleWorkflowCommandIfAny(
   larkAppId: string,
   initiator: string | undefined,
 ): Promise<boolean> {
-  // 旧 `/workflow run|cancel` 软降级：在执行前**先**发改名提示，让迁移指引第一时间
+  // 旧 `/workflow cancel` 软降级：在执行前**先**发改名提示，让迁移指引第一时间
   // 到达用户（codex review：先发优于后发）。从原始 content 判定而非 parse 结果，
-  // 这样连 `/workflow run`（缺 id）这类 invalid legacy 也能收到提示（codex review）。
-  // 仅匹配 legacy 的 run|cancel（executeWorkflowCommand 必然 handle），不误伤 /template。
-  if (/^\/workflow\s+(run|cancel)\b/.test(content.trim())) {
+  // 这样连缺 runId 的 invalid legacy 也能收到提示。`/workflow run`
+  // 已被 v3 Saved Workflow 回收，v2 run 只保留 `/template run`。
+  if (/^\/workflow\s+cancel\b/.test(content.trim())) {
     await sessionReply(anchor, WORKFLOW_V2_RENAME_NOTICE, 'text', larkAppId);
   }
   // Captured by the `onRunCreated` closure so the trailing text reply can be
@@ -2211,6 +2231,119 @@ async function handleWorkflowCommandIfAny(
   }
 
   await sessionReply(anchor, formatWorkflowCommandResult(result), 'text', larkAppId);
+  return true;
+}
+
+interface V3SavedWorkflowImInvocation {
+  content: string;
+  anchor: string;
+  replyRootId?: string;
+  messageId: string;
+  chatId: string;
+  larkAppId: string;
+  initiatorOpenId: string | undefined;
+  /** union_id may grant teamBot trust only when the event was bot-authored. */
+  teamTrustUnionId?: string;
+  /** Raw sender union_id may independently grant the configured teamMember leg. */
+  memberUnionId?: string;
+}
+
+async function handleV3SavedWorkflowCommandIfAny(
+  invocation: V3SavedWorkflowImInvocation,
+): Promise<boolean> {
+  const {
+    content,
+    anchor,
+    replyRootId,
+    messageId,
+    chatId,
+    larkAppId,
+    initiatorOpenId,
+    teamTrustUnionId,
+    memberUnionId,
+  } = invocation;
+  const command = parseV3SavedWorkflowCommand(content);
+  if (!command) return false;
+
+  const targets = resolveV3SavedWorkflowMessageTargets({ anchor, replyRootId, messageId });
+  const notify = async (
+    message: string,
+    effect: V3SavedWorkflowExecutionEffect | 'validation' | 'authorization',
+  ): Promise<void> => {
+    try {
+      await sessionReply(targets.replyAnchor, message, 'text', larkAppId);
+    } catch (err) {
+      // Notification is downstream of any domain action. Never let a Lark
+      // transport failure turn an already-saved/started workflow into a false
+      // business failure (which previously prompted users to retry and fork
+      // duplicate definitions/runs).
+      logger.warn(
+        `[v3-saved-workflow] notification failed after ${effect}: ` +
+        `${err instanceof Error ? err.message : String(err)}`,
+      );
+    }
+  };
+
+  if (command.kind === 'invalid') {
+    await notify(`❌ ${command.error}\n\n${v3SavedWorkflowUsage()}`, 'validation');
+    return true;
+  }
+  if (!initiatorOpenId) {
+    await notify('❌ Saved Workflow 需要可验证的飞书用户身份。', 'authorization');
+    return true;
+  }
+  if (
+    (command.kind === 'save' || command.kind === 'run') &&
+    await replyGrantRestrictionIfNeeded(larkAppId, chatId, initiatorOpenId, targets.replyAnchor, '/workflow')
+  ) {
+    return true;
+  }
+
+  const policy = await authorizeV3SavedWorkflowInvocation(command, {
+    canPublishGlobal: () => canOperate(larkAppId, chatId, initiatorOpenId, teamTrustUnionId),
+    consumeMessageQuotaOnce: () => enforceMessageQuotaForCliInput(
+      larkAppId,
+      chatId,
+      initiatorOpenId,
+      targets.quotaMessageId,
+      targets.replyAnchor,
+      teamTrustUnionId,
+      memberUnionId,
+    ),
+  });
+  if (!policy.ok) {
+    if (policy.reason === 'global_requires_operate') {
+      await notify('❌ 只有本群可操作成员才能使用 `--global` 发布全局 Saved Workflow。', 'authorization');
+    }
+    // Quota denial owns its exhausted-card notification in the shared quota
+    // gate; avoid a second reply here.
+    return true;
+  }
+
+  const context: SavedWorkflowActorContext = {
+    actor: { openId: initiatorOpenId, larkAppId },
+    chatId,
+    rootMessageId: targets.runRootMessageId,
+  };
+  const dataDir = dirname(v3DefaultBaseDir());
+  const baseDir = v3DefaultBaseDir();
+  const result = await executeV3SavedWorkflowCommand(
+    { command, dataDir, baseDir, context },
+    {
+      ...defaultV3SavedWorkflowExecutionServices,
+      loadBots: loadBotConfigs,
+      persistStartIntent: persistV3StartIntent,
+      driveDetached: (runId) => v3GateRunner.driveDetached(runId),
+    },
+  );
+  await deliverV3SavedWorkflowNotification(
+    result,
+    (message) => sessionReply(targets.replyAnchor, message, 'text', larkAppId).then(() => undefined),
+    (err, effect) => logger.warn(
+      `[v3-saved-workflow] notification failed after ${effect}: ` +
+      `${err instanceof Error ? err.message : String(err)}`,
+    ),
+  );
   return true;
 }
 
@@ -2569,12 +2702,37 @@ for (const [path, resolution] of [
 ipcRoute('POST', '/api/v3/runs/:runId/start', async (_req, res, params) => {
   const runId = params.runId;
   if (!isValidV3RunId(runId)) return jsonRes(res, 400, { ok: false, error: 'bad_run_id' });
+  const runDir = join(v3DefaultBaseDir(), runId);
+  const preflight = preflightV3RunStart(runDir);
+  if (!preflight.ok) {
+    if (preflight.error === 'no_grill_state') {
+      return jsonRes(res, 404, { ok: false, error: 'unknown_run' });
+    }
+    return jsonRes(res, 409, {
+      ok: false,
+      error: preflight.error,
+      ...(preflight.status ? { status: preflight.status } : {}),
+      ...(preflight.detail ? { detail: preflight.detail } : {}),
+    });
+  }
   // Owner check (codex blocker #1): only the daemon owning this run's bot may
   // start it — otherwise the wrong daemon drives + posts cards with its client.
-  const binding = readV3RunChatBinding(join(v3DefaultBaseDir(), runId));
+  const binding = preflight.context.binding;
   if (!binding) return jsonRes(res, 404, { ok: false, error: 'unknown_run_or_no_binding' });
   if (selfV3LarkAppId && binding.larkAppId !== selfV3LarkAppId) {
     return jsonRes(res, 409, { ok: false, error: 'wrong_daemon', ownerLarkAppId: binding.larkAppId });
+  }
+  // A 202 means the start intent is recoverable after an immediate daemon
+  // crash. Persist the journal boundary before scheduling detached work; cold
+  // attach will re-drive a run that has runStarted but no active attempt.
+  try {
+    persistV3StartIntent(runId, runDir);
+  } catch (err) {
+    return jsonRes(res, 409, {
+      ok: false,
+      error: 'run_journal_invalid',
+      detail: err instanceof Error ? err.message : String(err),
+    });
   }
   v3GateRunner.driveDetached(runId);
   return jsonRes(res, 202, { ok: true, runId });
@@ -6622,10 +6780,26 @@ async function handleNewTopic(data: any, ctx: RoutingContext): Promise<void> {
     content,
   });
 
+  // Saved Workflow 保留动词必须先于即兴 grill，避免 `run/save/list/show`
+  // 被当成自由文本目标或落回 v2 runtime。
+  if (await handleV3SavedWorkflowCommandIfAny({
+    content: cmdContent,
+    anchor,
+    replyRootId,
+    messageId: parsed.messageId,
+    chatId,
+    larkAppId,
+    initiatorOpenId: senderOpenId,
+    teamTrustUnionId,
+    memberUnionId: senderUnionId,
+  })) {
+    return;
+  }
+
   // v3 即兴 grill：`/workflow [new] <目标>`。daemon 不拷问——把目标包成触发
   // botmux-workflow skill 的 prompt（改写 content，promptContent 随后从 content
   // 构造），fall-through 到正常 session 创建，让本话题 agent 接管整条链路。
-  // run|cancel 不在此命中（归 v2 legacy，由下面 handleWorkflowCommandIfAny 处理）。
+  // Saved Workflow 动词已在上方处理；只有 cancel 保留 v2 legacy。
   const newTopicGrill = parseWorkflowGrillTrigger(cmdContent);
   if (newTopicGrill) {
     if (await replyGrantRestrictionIfNeeded(larkAppId, chatId, senderOpenId, anchor, '/workflow')) {
@@ -7352,9 +7526,25 @@ async function handleThreadReply(data: any, ctx: RoutingContext): Promise<void> 
     }
   }
 
+  // Saved Workflow 命令在 thread 内同样由 host 直接处理，不转发给 CLI。
+  if (await handleV3SavedWorkflowCommandIfAny({
+    content: cmdContent,
+    anchor,
+    replyRootId,
+    messageId: parsed.messageId,
+    chatId: threadChatId,
+    larkAppId,
+    initiatorOpenId: threadSenderOpenId,
+    teamTrustUnionId: threadTeamTrustUnionId,
+    memberUnionId: threadSenderUnionId,
+  })) {
+    return;
+  }
+
   // v3 即兴 grill（thread 内）：`/workflow [new] <目标>` → 把目标包成触发
   // botmux-workflow skill 的 prompt 覆盖 promptContent，fall-through 到下面正常
-  // 转发逻辑，让现有/新建的 agent 接管。run|cancel 归 v2 legacy（走 else）。
+  // 转发逻辑，让现有/新建的 agent 接管。Saved Workflow 动词已在上方处理，
+  // 只有 cancel 保留 v2 legacy 兼容入口。
   const threadGrill = parseWorkflowGrillTrigger(cmdContent);
   if (threadGrill) {
     if (await replyGrantRestrictionIfNeeded(larkAppId, threadChatId, threadSenderOpenId, anchor, '/workflow')) {

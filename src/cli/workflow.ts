@@ -83,6 +83,29 @@ export async function cmdWorkflow(sub: string, rest: string[]): Promise<void> {
     await cmdWorkflowHost(sub, rest);
     return;
   }
+  if (['save', 'run', 'list', 'show'].includes(sub)) {
+    const { cmdSavedWorkflow } = await import('./saved-workflow.js');
+    await cmdSavedWorkflow(sub, rest);
+    return;
+  }
+  // One-version CLI compatibility for non-conflicting legacy ops. The v2
+  // engine's canonical namespace is now `botmux template ...`.
+  if (['resume', 'cancel', 'ls', 'tail', 'validate'].includes(sub)) {
+    console.warn(`⚠️  v2 命令已迁到 \`botmux template ${sub}\`；本次兼容执行。`);
+    await cmdTemplate(sub, rest);
+    return;
+  }
+  if (sub === 'help' || sub === '' || sub === undefined) {
+    printWorkflowHelp();
+    return;
+  }
+  console.error(`未知子命令: workflow ${sub}`);
+  printWorkflowHelp();
+  process.exit(1);
+}
+
+/** Legacy v2 runtime kept under the migration namespace for one version. */
+export async function cmdTemplate(sub: string, rest: string[]): Promise<void> {
   switch (sub) {
     case 'run':
       await cmdWorkflowRun(rest);
@@ -109,17 +132,34 @@ export async function cmdWorkflow(sub: string, rest: string[]): Promise<void> {
     case 'help':
     case '':
     case undefined:
-      printHelp();
+      printTemplateHelp();
       return;
     default:
-      console.error(`未知子命令: workflow ${sub}`);
-      printHelp();
+      console.error(`未知子命令: template ${sub}`);
+      printTemplateHelp();
       process.exit(1);
   }
 }
 
-function printHelp(): void {
-  console.log(`用法: botmux workflow <run|resume|cancel|ls|tail|validate|show> [...]
+function printWorkflowHelp(): void {
+  console.log(`用法: botmux workflow <目标控制|save|run|list|show|start|retry|grant> [...]
+
+Saved Workflow:
+  save [last|runId] [名称] [--workflow-id <chat-scope-id>]
+      agent-facing CLI 固定 chat scope；global / --ack-unsafe 需用户在飞书显式发送 /workflow save
+  run <名称|workflowId> [--param key=value ...] [--param-json key=<json> ...]
+  list [--json]
+  show <名称|workflowId>
+
+即兴 Workflow:
+  new / spec-finalize / approve-spec / architect / approve-dag / start
+
+v2 模板迁移期入口: botmux template <run|resume|cancel|ls|tail|validate|show>
+`);
+}
+
+function printTemplateHelp(): void {
+  console.log(`用法: botmux template <run|resume|cancel|ls|tail|validate|show> [...]
 
 子命令:
   run <id> [--param key=value ...] [--param-json key=<json> ...] [--run-id <id>] [--bot-resolver echo]

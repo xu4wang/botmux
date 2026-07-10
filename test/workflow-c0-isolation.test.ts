@@ -53,6 +53,21 @@ describe('Slice C0 — chat side-effect isolation', () => {
     expect(out.stderr).toMatch(/refused inside workflow/);
   });
 
+  it.each([
+    ['dispatch', '--bot', 'peer', 'task'],
+    ['report', 'done'],
+    ['restart'],
+    ['setup', 'list'],
+    ['preset', 'export'],
+    ['whiteboard', 'status'],
+    ['vc-agent', 'join'],
+  ])('botmux %s is denied by the workflow root-command allowlist', (...args) => {
+    const out = runCli(args, { BOTMUX_WORKFLOW: '1' });
+    expect(out.status).toBe(2);
+    expect(out.stderr).toMatch(/refused inside workflow/);
+    expect(out.stderr).toMatch(/read-only allowlist/);
+  });
+
   it('botmux schedule add refuses when BOTMUX_WORKFLOW=1', () => {
     const out = runCli(['schedule', 'add', '@every', '1h', 'task'], {
       BOTMUX_WORKFLOW: '1',
@@ -75,6 +90,53 @@ describe('Slice C0 — chat side-effect isolation', () => {
     const out = runCli(['history', '--limit', '5'], {
       BOTMUX_WORKFLOW: '1',
     });
+    expect(out.stderr).not.toMatch(/refused inside workflow/);
+  });
+
+  it.each([
+    'new',
+    'spec-finalize',
+    'approve-spec',
+    'revise-spec',
+    'architect',
+    'revise-dag',
+    'approve-dag',
+    'save',
+    'run',
+    'start',
+    'retry',
+    'grant',
+    'resume',
+    'cancel',
+  ])('botmux workflow %s refuses workflow mutations from a subagent', (sub) => {
+    const out = runCli(['workflow', sub, 'target'], {
+      BOTMUX_WORKFLOW: '1',
+      BOTMUX_WORKFLOW_RUN_ID: 'run-parent',
+      BOTMUX_WORKFLOW_NODE_ID: 'node-child',
+    });
+    expect(out.status).toBe(2);
+    expect(out.stderr).toContain(`botmux workflow ${sub} refused inside workflow`);
+    expect(out.stderr).toContain('host/user');
+  });
+
+  it.each([
+    ['template', 'run'],
+    ['template', 'resume'],
+    ['template', 'cancel'],
+    ['v3', 'run'],
+  ])('botmux %s %s refuses recursive/legacy workflow execution', (root, sub) => {
+    const out = runCli([root, sub, 'target'], { BOTMUX_WORKFLOW: '1' });
+    expect(out.status).toBe(2);
+    expect(out.stderr).toContain(`botmux ${root} ${sub} refused inside workflow`);
+  });
+
+  it.each([
+    ['workflow', 'list'],
+    ['workflow', 'show'],
+    ['workflow', 'tail'],
+    ['workflow', 'validate'],
+  ])('botmux %s %s remains outside the mutation fence', (root, sub) => {
+    const out = runCli([root, sub, 'target'], { BOTMUX_WORKFLOW: '1' });
     expect(out.stderr).not.toMatch(/refused inside workflow/);
   });
 

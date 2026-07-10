@@ -70,9 +70,9 @@ function runCli(args: string[]): { stdout: string; status: number } {
   }
 }
 
-describe('botmux workflow CLI', () => {
+describe('botmux template CLI (v2 migration namespace)', () => {
   it('run <id> drives loop to awaiting-wait and creates events/run dir', () => {
-    const out = runCli(['workflow', 'run', 'cli-hello', '--param', 'name=Tester']);
+    const out = runCli(['template', 'run', 'cli-hello', '--param', 'name=Tester']);
     expect(out.status).toBe(0);
     expect(out.stdout).toContain('runCreated, runStarted');
     expect(out.stdout).toContain('loop stopped: awaiting-wait');
@@ -87,14 +87,14 @@ describe('botmux workflow CLI', () => {
   });
 
   it('run <id> with missing required param exits non-zero', () => {
-    const out = runCli(['workflow', 'run', 'cli-hello']);
+    const out = runCli(['template', 'run', 'cli-hello']);
     expect(out.status).not.toBe(0);
     expect(out.stdout).toMatch(/缺少必填参数：name/);
   });
 
   it('run <id> rejects unknown param keys (typo guard)', () => {
     const out = runCli([
-      'workflow', 'run', 'cli-hello',
+      'template', 'run', 'cli-hello',
       '--param', 'name=Tester',
       '--param', 'misspelled=oops',
     ]);
@@ -119,7 +119,7 @@ describe('botmux workflow CLI', () => {
       'utf-8',
     );
     const out = runCli([
-      'workflow', 'run', 'cli-numeric',
+      'template', 'run', 'cli-numeric',
       '--param', 'retries=not-a-number',
     ]);
     expect(out.status).not.toBe(0);
@@ -140,7 +140,7 @@ describe('botmux workflow CLI', () => {
       'utf-8',
     );
     const out = runCli([
-      'workflow', 'run', 'cli-json',
+      'template', 'run', 'cli-json',
       '--param-json', 'tags=["x","y","z"]',
     ]);
     expect(out.status).toBe(0);
@@ -148,13 +148,13 @@ describe('botmux workflow CLI', () => {
     expect(runId).toBeDefined();
     // run-init wrote the params blob with our resolved values; replay reads
     // it back as part of `runCreated.inputRef`.
-    const showOut = runCli(['workflow', 'show', runId!]);
+    const showOut = runCli(['template', 'show', runId!]);
     expect(showOut.stdout).toContain('cli-json');
   });
 
   it('run <id> --param-json rejects malformed JSON', () => {
     const out = runCli([
-      'workflow', 'run', 'cli-hello',
+      'template', 'run', 'cli-hello',
       '--param', 'name=t',
       '--param-json', 'extra={not valid json',
     ]);
@@ -163,15 +163,15 @@ describe('botmux workflow CLI', () => {
   });
 
   it('run <unknown-id> exits non-zero with search-path hint', () => {
-    const out = runCli(['workflow', 'run', 'does-not-exist', '--param', 'name=x']);
+    const out = runCli(['template', 'run', 'does-not-exist', '--param', 'name=x']);
     expect(out.status).not.toBe(0);
     expect(out.stdout).toMatch(/not found/);
   });
 
   it('show <runId> prints replayed snapshot summary', () => {
-    const runOut = runCli(['workflow', 'run', 'cli-hello', '--param', 'name=Show']);
+    const runOut = runCli(['template', 'run', 'cli-hello', '--param', 'name=Show']);
     const runId = runOut.stdout.match(/runId=(\S+)/)?.[1];
-    const showOut = runCli(['workflow', 'show', runId!]);
+    const showOut = runCli(['template', 'show', runId!]);
     expect(showOut.status).toBe(0);
     expect(showOut.stdout).toContain('"workflowId": "cli-hello"');
     expect(showOut.stdout).toContain('"status": "running"');
@@ -179,12 +179,12 @@ describe('botmux workflow CLI', () => {
   });
 
   it('cancel <runId> cancels an awaiting humanGate run', () => {
-    const runOut = runCli(['workflow', 'run', 'cli-hello', '--param', 'name=Cancel']);
+    const runOut = runCli(['template', 'run', 'cli-hello', '--param', 'name=Cancel']);
     expect(runOut.status).toBe(0);
     const runId = runOut.stdout.match(/runId=(\S+)/)?.[1];
     expect(runId).toBeDefined();
 
-    const cancelOut = runCli(['workflow', 'cancel', runId!, '--reason', 'stop-test']);
+    const cancelOut = runCli(['template', 'cancel', runId!, '--reason', 'stop-test']);
     expect(cancelOut.status).toBe(0);
     expect(cancelOut.stdout).toContain('run.status=cancelled');
 
@@ -198,18 +198,18 @@ describe('botmux workflow CLI', () => {
     expect(types).toContain('nodeCanceled');
     expect(types).toContain('runCanceled');
 
-    const showOut = runCli(['workflow', 'show', runId!]);
+    const showOut = runCli(['template', 'show', runId!]);
     expect(showOut.status).toBe(0);
     expect(showOut.stdout).toContain('"status": "cancelled"');
 
-    const cancelAgain = runCli(['workflow', 'cancel', runId!, '--reason', 'already-done']);
+    const cancelAgain = runCli(['template', 'cancel', runId!, '--reason', 'already-done']);
     expect(cancelAgain.status).toBe(0);
     expect(cancelAgain.stdout).toContain('terminal');
     expect(readFileSync(join(runsDir, runId!, 'events.ndjson'), 'utf-8')).toBe(raw);
   });
 
   it('validate <path> accepts workflow json files', () => {
-    const out = runCli(['workflow', 'validate', join(tempDir, 'workflows', 'cli-hello.workflow.json')]);
+    const out = runCli(['template', 'validate', join(tempDir, 'workflows', 'cli-hello.workflow.json')]);
     expect(out.status).toBe(0);
     expect(out.stdout).toContain('workflow valid: cli-hello');
     expect(out.stdout).toContain('nodes=2');
@@ -229,7 +229,7 @@ describe('botmux workflow CLI', () => {
       'utf-8',
     );
 
-    const out = runCli(['workflow', 'validate', invalidPath]);
+    const out = runCli(['template', 'validate', invalidPath]);
     expect(out.status).not.toBe(0);
     expect(out.stdout).toContain('workflow invalid');
     expect(out.stdout).toContain('nodes.only.bot');

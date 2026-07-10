@@ -33,6 +33,7 @@ import {
   type V2IsolationContext,
 } from './adapters/cli/read-isolation.js';
 import { killPersistentSession, type PersistentBackendType } from './core/persistent-backend.js';
+import { readProcessStartIdentity } from './core/session-marker.js';
 import { drainTranscript, joinAssistantText, trailingAssistantText, findJsonlContainingFingerprint, findJsonlsContainingExactContent, findLatestJsonl, extractLastAssistantTurn, stringifyUserContent, extractTurnStartText, splitTranscriptEventsByCutoff, type TranscriptEvent } from './services/claude-transcript.js';
 import { BridgeTurnQueue, makeFingerprint, normaliseForFingerprint } from './services/bridge-turn-queue.js';
 import { shouldSuppressBridgeEmit, type BridgeSendMarker } from './services/bridge-fallback-gate.js';
@@ -745,24 +746,14 @@ const inflightInputs = new InflightInputTracker();
  *  start work before their history/transcript submit marker is observable. */
 let lastPtyActivityAtMs = 0;
 let currentBotmuxTurnId: string | undefined;
-function readProcStarttime(pid: number): string | undefined {
-  try {
-    const raw = readFileSync(`/proc/${pid}/stat`, 'utf8');
-    const closeParen = raw.lastIndexOf(')');
-    if (closeParen < 0) return undefined;
-    const fields = raw.slice(closeParen + 2).trim().split(/\s+/);
-    return fields[19] || undefined;
-  } catch {
-    return undefined;
-  }
-}
-
 function writeCliPidMarker(): void {
   if (!cliPidMarker || !sessionId) return;
   try {
     // 原子写：daemon 侧（killStalePids 等）随时读这个 marker JSON。
     const markerPid = Number(basename(cliPidMarker));
-    const procStart = Number.isInteger(markerPid) && markerPid > 0 ? readProcStarttime(markerPid) : undefined;
+    const procStart = Number.isInteger(markerPid) && markerPid > 0
+      ? readProcessStartIdentity(markerPid)
+      : undefined;
     atomicWriteFileSync(cliPidMarker, JSON.stringify({
       sessionId,
       turnId: currentBotmuxTurnId ?? null,

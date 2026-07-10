@@ -16,9 +16,8 @@ import {
   v3GateCardNonce,
   type V3GateActionValue,
 } from './v3-gate-card.js';
-import { resolveV3GateClick } from '../../workflows/v3/daemon-run.js';
+import { readV3RunChatBinding, resolveV3GateClick } from '../../workflows/v3/daemon-run.js';
 import {
-  readGrillState,
   defaultBaseDir,
   type RunChatBinding,
 } from '../../workflows/v3/grill-state.js';
@@ -67,8 +66,7 @@ export async function handleV3GateAction(
     return { toast: { type: 'warning', content: 'gate 卡已失效（nonce 不匹配）' } };
   }
   const runDir = join(baseDir, value.runId);
-  const grill = readGrillState(runDir);
-  const binding = grill?.chatBinding;
+  const binding = readV3RunChatBinding(runDir);
 
   if (deps.canResolve && !deps.canResolve(binding, operatorOpenId)) {
     return { toast: { type: 'warning', content: '你没有权限审批这个 gate' } };

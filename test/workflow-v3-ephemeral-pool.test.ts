@@ -199,6 +199,37 @@ describe('v3 ephemeral pool', () => {
     await promise;
   });
 
+  it.each(['traex', 'relay'] as const)('forwards %s through the same goal env + raw /goal path', async (cliId) => {
+    const worker = new ScriptedWorker();
+    const factory = factoryFor(worker);
+    const base = request();
+    const req: RunNodeRequest = {
+      ...base,
+      botSnapshot: { ...base.botSnapshot, cliId },
+    };
+    const pool = createEphemeralPool({
+      factory,
+      workerPath: '/tmp/worker.js',
+      resolveLarkAppSecret: () => 'secret',
+    });
+
+    const promise = pool.runNode(req);
+    await waitFor(() => factory.lastOpts !== undefined);
+    await worker.waitForInit();
+    worker.emitMessage({ type: 'ready', port: 3001, token: 'tok' });
+    worker.emitMessage({ type: 'prompt_ready' });
+
+    expect(worker.init?.cliId).toBe(cliId);
+    expect(worker.init?.disableCliBypass).toBe(false);
+    expect(factory.lastOpts?.env[GOAL_ENV.V3_MARKER]).toBe('1');
+    expect(factory.lastOpts?.env[GOAL_ENV.MANIFEST_PATH]).toBe(req.env[GOAL_ENV.MANIFEST_PATH]);
+    expect(worker.rawInputs).toEqual([buildGoalCommand(req)]);
+    expect(worker.rawInputs[0]).toMatch(/^\/goal /);
+
+    worker.emitExit(0);
+    await promise;
+  });
+
   it('eagerly sends init so real workers can emit ready from their init handler', async () => {
     const worker = new ScriptedWorker({ autoReadyAfterInit: true });
     const factory = factoryFor(worker);

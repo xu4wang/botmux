@@ -20,7 +20,7 @@
 
 import { resolve, join } from 'node:path';
 import { homedir } from 'node:os';
-import { existsSync, readFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync } from 'node:fs';
 import { createInterface } from 'node:readline';
 
 import { loadDag, type V3Dag } from './dag.js';
@@ -34,7 +34,24 @@ import {
   type ValidateManifest,
 } from './contract.js';
 import { readJournal } from './journal.js';
-import { loadBotConfigs, effectiveDefaultWorkingDir, type BotConfig } from '../../bot-registry.js';
+import { loadBotConfigs, type BotConfig } from '../../bot-registry.js';
+import {
+  botToSnapshot,
+  freezeDagBotSnapshots,
+  parseFrozenBotSnapshots,
+  serializeFrozenBotSnapshots,
+} from './bot-resolve.js';
+import { atomicWriteFileSync } from '../../utils/atomic-write.js';
+import { withFileLockSync } from '../../utils/file-lock.js';
+import {
+  artifactRef,
+  loadAuthorizedV3Run,
+  makeManualCliRunEnvelope,
+  publishRunEnvelopeOnce,
+  readRunEnvelope,
+  type PublishRunEnvelopeResult,
+  type V3ManualCliRunEnvelope,
+} from './run-envelope.js';
 
 interface V3RunArgs {
   dagPath: string;
@@ -79,22 +96,13 @@ function resolveBotConfig(selector: string | undefined, bots: BotConfig[]): BotC
     if (bots.length === 0) throw new Error('v3: bots.json has no bots — run `botmux setup` first');
     return bots[0]!;
   }
-  const match = bots.find((b) => b.larkAppId === selector || b.name === selector);
+  const match = bots.find((b) => b.larkAppId === selector)
+    ?? bots.find((b) => b.name === selector);
   if (!match) {
     const known = bots.map((b) => b.name ?? b.larkAppId).join(', ') || '(none)';
     throw new Error(`v3: no bot matches "${selector}" (known: ${known})`);
   }
   return match;
-}
-
-/** The configured working dir for a bot, before `~` expansion (the pool
- *  expands).  CLI `--working-dir` overrides the bot's configured value. */
-function botWorkingDir(bot: BotConfig, override: string | undefined): string {
-  return override
-    ?? effectiveDefaultWorkingDir(bot)
-    ?? bot.workingDir
-    ?? bot.workingDirs?.[0]
-    ?? '~';
 }
 
 /** Terminal gate decision: prompt y/N on stdin, or auto-approve with `--yes`.
@@ -169,6 +177,86 @@ function printOutcome(runDir: string): void {
   }
 }
 
+export interface AuthorizeManualCliRunOptions {
+  runDir: string;
+  dag: V3Dag;
+  bots: BotConfig[];
+  defaultBotSelector?: string;
+  workingDirOverride?: string;
+  now?: Date;
+}
+
+export interface AuthorizeManualCliRunResult {
+  dag: V3Dag;
+  frozenBotSnapshots: Map<string, BotSnapshot>;
+  envelope: V3ManualCliRunEnvelope;
+  publication: PublishRunEnvelopeResult;
+}
+
+/**
+ * Create/reuse a manual CLI run's immutable execution authorization.
+ *
+ * The lock deliberately spans the missing-envelope check, all shared artifact
+ * writes, digest construction, and run.json publication. link(2) alone keeps
+ * run.json create-once, but cannot stop two manual launchers from overwriting
+ * dag.json/bots.snapshot.json between one another's digest and publication.
+ */
+export function authorizeManualCliRun(opts: AuthorizeManualCliRunOptions): AuthorizeManualCliRunResult {
+  mkdirSync(opts.runDir, { recursive: true, mode: 0o700 });
+  return withFileLockSync(join(opts.runDir, 'run.json'), () => {
+    // Re-read only after the cross-process lock is held. A completed winner is
+    // always reused byte-for-byte; never rebuild snapshots from live bots.json.
+    const existing = readRunEnvelope(opts.runDir, opts.dag.runId);
+    if (existing.kind === 'invalid') {
+      throw new Error(`run.json 已损坏，拒绝回退/覆盖: ${existing.problems.join('; ')}`);
+    }
+    if (existing.kind === 'ok') {
+      const loaded = loadAuthorizedV3Run(opts.runDir, {
+        expectedRunId: opts.dag.runId,
+        allowedSources: ['manual_cli'],
+      });
+      const envelope = loaded.envelope as V3ManualCliRunEnvelope;
+      return {
+        dag: loaded.dag,
+        frozenBotSnapshots: parseFrozenBotSnapshots(loaded.botSnapshots, loaded.dag),
+        envelope,
+        publication: {
+          created: false,
+          path: join(opts.runDir, 'run.json'),
+          envelope,
+        },
+      };
+    }
+
+    if (existsSync(join(opts.runDir, 'journal.ndjson'))) {
+      throw new Error('发现无 run.json 的历史 manual run；为避免用新 DAG 覆盖旧 journal，请迁移或换 runId');
+    }
+
+    const frozenBotSnapshots = freezeDagBotSnapshots(opts.dag, opts.bots, {
+      defaultSelector: opts.defaultBotSelector,
+      workingDirOverride: opts.workingDirOverride,
+    });
+    atomicWriteFileSync(join(opts.runDir, 'dag.json'), `${JSON.stringify(opts.dag, null, 2)}\n`, { mode: 0o600 });
+    atomicWriteFileSync(
+      join(opts.runDir, 'bots.snapshot.json'),
+      `${JSON.stringify(serializeFrozenBotSnapshots(frozenBotSnapshots), null, 2)}\n`,
+      { mode: 0o600 },
+    );
+    const now = (opts.now ?? new Date()).toISOString();
+    const envelope = makeManualCliRunEnvelope({
+      runId: opts.dag.runId,
+      createdAt: now,
+      authorizedAt: now,
+      artifacts: {
+        dag: artifactRef(opts.runDir, 'dag.json'),
+        botSnapshots: artifactRef(opts.runDir, 'bots.snapshot.json'),
+      },
+    });
+    const publication = publishRunEnvelopeOnce(opts.runDir, envelope);
+    return { dag: opts.dag, frozenBotSnapshots, envelope, publication };
+  });
+}
+
 /**
  * `botmux v3 <sub> ...` dispatcher.  MVP exposes only `run`.
  */
@@ -219,19 +307,7 @@ export async function cmdV3(sub: string, rest: string[]): Promise<void> {
 
   const resolveBotSnapshot = (botId: string | undefined): BotSnapshot => {
     const bot = resolveBotConfig(botId ?? args.botSelector, bots);
-    return {
-      larkAppId: bot.larkAppId,
-      cliId: bot.cliId,
-      ...(bot.cliPathOverride ? { cliPathOverride: bot.cliPathOverride } : {}),
-      ...(bot.model ? { model: bot.model } : {}),
-      // 受限 bot 的全部节点保持受限（P2 不可提权红线的 bot 侧入口）。
-      ...(bot.disableCliBypass === true ? { disableCliBypass: true } : {}),
-      ...(bot.sandbox === true ? { sandbox: true } : {}),
-      ...(bot.sandboxHidePaths?.length ? { sandboxHidePaths: [...bot.sandboxHidePaths] } : {}),
-      ...(bot.sandboxReadonlyPaths?.length ? { sandboxReadonlyPaths: [...bot.sandboxReadonlyPaths] } : {}),
-      ...(bot.sandboxNetwork === false ? { sandboxNetwork: false } : {}),
-      workingDir: botWorkingDir(bot, args.workingDir),
-    };
+    return botToSnapshot(bot, args.workingDir);
   };
 
   const { runNode } = createEphemeralPool({ resolveLarkAppSecret });
@@ -245,9 +321,28 @@ export async function cmdV3(sub: string, rest: string[]): Promise<void> {
     process.exit(1);
   }
 
+  const runDir = join(args.baseDir, dag.runId);
+  let frozenBotSnapshots: Map<string, BotSnapshot>;
+  try {
+    const authorization = authorizeManualCliRun({
+      runDir,
+      dag,
+      bots,
+      defaultBotSelector: args.botSelector,
+      workingDirOverride: args.workingDir,
+    });
+    dag = authorization.dag;
+    frozenBotSnapshots = authorization.frozenBotSnapshots;
+  } catch (err) {
+    console.error(`❌ manual run 物化/授权失败: ${err instanceof Error ? err.message : String(err)}`);
+    process.exit(1);
+  }
+
   const deps: V3RuntimeDeps = { runNode, validateManifest, resolveBotSnapshot, resolveGate };
   const opts: V3RuntimeOptions = {
     baseDir: args.baseDir,
+    authorizedArtifacts: true,
+    frozenBotSnapshots,
     ...(args.maxParallel ? { globalConcurrency: args.maxParallel } : {}),
   };
 

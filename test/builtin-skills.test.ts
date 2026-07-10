@@ -59,10 +59,16 @@ describe('built-in botmux-quoted skill', () => {
 });
 
 describe('built-in botmux-workflow-create skill', () => {
-  it('exists and teaches validate + current workflow binding constraints', () => {
+  it('is retained only for v2 migration and teaches legacy validation constraints', () => {
     const skill = BUILTIN_SKILLS.find(s => s.name === 'botmux-workflow-create');
     expect(skill).toBeDefined();
-    expect(skill!.content).toContain('botmux workflow validate');
+    const frontmatter = skill!.content.split('---')[1] ?? '';
+    expect(frontmatter).toContain('v2 已弃用');
+    expect(frontmatter).toContain('仅迁移维护');
+    expect(frontmatter).toContain('不要为新需求创建 v2 模板');
+    expect(skill!.content).toContain('新需求统一使用 **botmux-workflow**');
+    expect(skill!.content).toContain('botmux template');
+    expect(skill!.content).toContain('botmux template validate');
     expect(skill!.content).toContain('botmux bots list');
     expect(skill!.content).toContain('description');
     expect(skill!.content).toContain('feishu-send');
@@ -97,10 +103,17 @@ describe('built-in botmux-workflow-create skill', () => {
   });
 });
 
-describe('built-in botmux-workflow skill (v3 grill → 编排 → 跑)', () => {
-  it('注册了，且教全套 host 命令序 + spec 契约 + 防误触发确认', () => {
+describe('built-in botmux-workflow skill (v3 ad-hoc + Saved Workflow)', () => {
+  it('统一即兴和复用入口，并教全套 host 命令序 + spec 契约', () => {
     const skill = BUILTIN_SKILLS.find(s => s.name === 'botmux-workflow');
     expect(skill).toBeDefined();
+    // Saved Workflow 与自然语言等价入口
+    expect(skill!.content).toContain('botmux workflow save last');
+    expect(skill!.content).toContain('botmux workflow run 周报');
+    expect(skill!.content).toContain('botmux workflow list');
+    expect(skill!.content).toContain('botmux workflow show 周报');
+    expect(skill!.content).toContain('把刚才那个流程存下来');
+    expect(skill!.content).toContain('运行已保存的周报流程');
     // 全套 host 命令序
     expect(skill!.content).toContain('botmux workflow new');
     expect(skill!.content).toContain('botmux workflow spec-finalize');
@@ -116,11 +129,24 @@ describe('built-in botmux-workflow skill (v3 grill → 编排 → 跑)', () => {
     // 防误触发 + 两道 gate
     expect(skill!.content).toContain('Gate-1');
     expect(skill!.content).toContain('Gate-2');
-    // 跟 v0.2 / workflow-create 区分（v2 模板入口已改名 /template）
-    expect(skill!.content).toContain('/template run <id>');
-    expect(skill!.content).toContain('botmux-workflow-create');
+    expect(skill!.content).toContain('只有消息以 `/workflow` 显式发起时才跳过');
+    expect(skill!.content).toContain('普通改代码');
+    // 新工作不再分流到 v2；旧 namespace 只作为迁移提示存在。
+    expect(skill!.content).toContain('v2 存量迁移');
+    expect(skill!.content).toContain('botmux template');
     // 转义没出 bug：description 里不该出现裸反斜杠-反引号
     expect(skill!.content).not.toContain('\\`');
+  });
+
+  it('与 orchestrate 双向写明结构化边界', () => {
+    const workflow = BUILTIN_SKILLS.find(s => s.name === 'botmux-workflow')!.content;
+    const orchestrate = BUILTIN_SKILLS.find(s => s.name === 'botmux-orchestrate')!.content;
+    for (const phrase of ['有界 DAG', '跑完即散', '一个交付物']) {
+      expect(workflow).toContain(phrase);
+    }
+    for (const phrase of ['多个 bot 分工', 'goal 群/多话题协调', '验收', 'botmux-workflow']) {
+      expect(orchestrate).toContain(phrase);
+    }
   });
 });
 

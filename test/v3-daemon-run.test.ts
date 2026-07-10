@@ -1,13 +1,30 @@
 import { describe, it, expect, vi } from 'vitest';
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 
-import { driveV3Run, resolveV3GateClick, reconcileV3PendingGates, createV3GateRunner, type V3DaemonRunDeps } from '../src/workflows/v3/daemon-run.js';
+import {
+  createV3GateRunner,
+  driveV3Run,
+  preflightV3RunStart,
+  reconcileV3PendingGates,
+  requestRevisitGrant,
+  requestV3LoopGrant,
+  requestV3Retry,
+  resolveV3GateClick,
+  type V3DaemonRunDeps,
+} from '../src/workflows/v3/daemon-run.js';
 import { birthRun, writeGrillState, readGrillState } from '../src/workflows/v3/grill-state.js';
-import { resolveWait, readWait, writePendingWait } from '../src/workflows/v3/human-gate.js';
+import { resolveWait, readWait, waitPath, writePendingWait } from '../src/workflows/v3/human-gate.js';
 import { appendEvent, readJournal } from '../src/workflows/v3/journal.js';
 import type { RunNode } from '../src/workflows/v3/contract.js';
+import {
+  artifactRef,
+  loadAuthorizedV3Run,
+  makeSavedDefinitionRunEnvelope,
+  publishRunEnvelopeOnce,
+  readRunEnvelope,
+} from '../src/workflows/v3/run-envelope.js';
 
 function freshBase(): string {
   return mkdtempSync(join(tmpdir(), 'v3-daemon-run-'));
@@ -32,6 +49,55 @@ function seedApprovedRun(base: string, runId: string, opts: { binding?: typeof B
   writeFileSync(dagPath, JSON.stringify(gateDag(runId)));
   const state = readGrillState(runDir)!;
   writeGrillState(runDir, { ...state, status: 'dag_approved', dagPath });
+  return runDir;
+}
+
+function seedSavedDefinitionRun(base: string, runId: string): string {
+  const runDir = join(base, runId);
+  mkdirSync(runDir, { recursive: true });
+  writeFileSync(join(runDir, 'dag.json'), `${JSON.stringify(gateDag(runId))}\n`);
+  writeFileSync(join(runDir, 'spec.json'), `${JSON.stringify({
+    schemaVersion: 1,
+    runId,
+    title: 'saved gate',
+    requirement: 'deploy safely',
+    nodes: [{
+      sketchId: 'deploy',
+      goal: '部署',
+      input_needs: [],
+      expected_outputs: ['result'],
+      acceptance: 'done',
+      risk_gate: true,
+      unknowns: [],
+    }],
+  })}\n`);
+  writeFileSync(join(runDir, 'bots.snapshot.json'), `${JSON.stringify({
+    '': { larkAppId: 'cli_test', cliId: 'claude-code', workingDir: '/frozen/work' },
+  })}\n`);
+  writeFileSync(join(runDir, 'params.resolved.json'), '{"params":{},"context":{}}\n');
+  writeFileSync(join(runDir, 'definition.snapshot.json'), `${JSON.stringify({
+    schemaVersion: 1,
+    workflowId: 'wf_0123456789abcdef0123456789abcdef',
+    revisionId: `rev_${'a'.repeat(64)}`,
+    humanVersion: 1,
+  })}\n`);
+  const artifacts = {
+    dag: artifactRef(runDir, 'dag.json'),
+    spec: artifactRef(runDir, 'spec.json'),
+    botSnapshots: artifactRef(runDir, 'bots.snapshot.json'),
+    resolvedParams: artifactRef(runDir, 'params.resolved.json'),
+    definitionSnapshot: artifactRef(runDir, 'definition.snapshot.json'),
+  };
+  publishRunEnvelopeOnce(runDir, makeSavedDefinitionRunEnvelope({
+    runId,
+    workflowId: 'wf_0123456789abcdef0123456789abcdef',
+    revisionId: `rev_${'a'.repeat(64)}`,
+    humanVersion: 1,
+    createdAt: '2026-07-10T08:00:00.000Z',
+    authorizedAt: '2026-07-10T08:01:00.000Z',
+    chatBinding: BINDING,
+    artifacts,
+  }));
   return runDir;
 }
 
@@ -63,6 +129,24 @@ function stubDeps(base: string, overrides: Partial<V3DaemonRunDeps> = {}): {
 }
 
 describe('driveV3Run — suspend gate → 发卡 → 点击 redrive', () => {
+  it('Saved Workflow 无 grill 也能从 run.json 启动，并使用冻结 bot snapshot', async () => {
+    const base = freshBase();
+    try {
+      seedSavedDefinitionRun(base, 'saved-run');
+      const shared = stubDeps(base, {
+        // If runtime re-resolves the live bot this unsupported CLI would fail;
+        // the definition run must use bots.snapshot.json instead.
+        loadBots: () => [{ larkAppId: 'cli_test', larkAppSecret: 's', cliId: 'gemini' } as any],
+      });
+      const outcome = await driveV3Run('saved-run', shared.deps);
+      expect(outcome.reason).toBe('awaitingGate');
+      expect(shared.postGateCard).toHaveBeenCalledTimes(1);
+      expect(shared.postGateCard.mock.calls[0]![0]).toEqual(BINDING);
+    } finally {
+      rmSync(base, { recursive: true, force: true });
+    }
+  });
+
   it('首跑撞 gate → 返回 awaitingGate + postGateCard 一次（runNode 不被调）', async () => {
     const base = freshBase();
     try {
@@ -113,6 +197,29 @@ describe('driveV3Run — suspend gate → 发卡 → 点击 redrive', () => {
 });
 
 describe('driveV3Run — 错误路径', () => {
+  it('旧 dag_approved run 在首次 worker 派发前生成诚实的 legacy backfill envelope', async () => {
+    const base = freshBase();
+    try {
+      const runDir = seedApprovedRun(base, 'legacy-approved', { binding: BINDING });
+      const preflight = preflightV3RunStart(runDir);
+      expect(preflight.ok).toBe(true);
+      expect(readRunEnvelope(runDir).kind).toBe('missing');
+      const { deps } = stubDeps(base);
+      await driveV3Run('legacy-approved', deps);
+      const loaded = loadAuthorizedV3Run(runDir);
+      expect(loaded.envelope).toMatchObject({
+        source: { kind: 'legacy_v3', original: 'grill' },
+        authorization: {
+          kind: 'legacy_backfill',
+          basis: 'grill_dag_approved',
+          integrity: 'unverifiable_before_backfill',
+        },
+      });
+    } finally {
+      rmSync(base, { recursive: true, force: true });
+    }
+  });
+
   it('awaitingGate 但无 chatBinding（非 grill 出生）→ 抛错（发不了卡）', async () => {
     const base = freshBase();
     try {
@@ -135,11 +242,71 @@ describe('driveV3Run — 错误路径', () => {
     }
   });
 
+  it('dagPath 已存在但仍是 dag_ready → start 被 Gate-2 守卫拒绝且不创建 journal', async () => {
+    const base = freshBase();
+    try {
+      const { runDir } = birthRun({ goal: 'g', baseDir: base, runId: 'not-approved', chatBinding: BINDING });
+      const dagPath = join(runDir, 'dag.json');
+      writeFileSync(dagPath, JSON.stringify(gateDag('not-approved')));
+      const state = readGrillState(runDir)!;
+      writeGrillState(runDir, { ...state, status: 'dag_ready', dagPath });
+
+      expect(preflightV3RunStart(runDir)).toEqual({
+        ok: false,
+        error: 'dag_not_approved',
+        status: 'dag_ready',
+      });
+      const { deps, runNodeCalls } = stubDeps(base);
+      await expect(driveV3Run('not-approved', deps)).rejects.toThrow(/no approved dag.*dag_ready/);
+      expect(runNodeCalls()).toBe(0);
+      expect(existsSync(join(runDir, 'journal.ndjson'))).toBe(false);
+    } finally {
+      rmSync(base, { recursive: true, force: true });
+    }
+  });
+
+  it('状态虽已 dag_approved 但 DAG 文件丢失 → preflight 明确报 approved_dag_missing', () => {
+    const base = freshBase();
+    try {
+      const { runDir } = birthRun({ goal: 'g', baseDir: base, runId: 'missing-approved-dag', chatBinding: BINDING });
+      const state = readGrillState(runDir)!;
+      writeGrillState(runDir, {
+        ...state,
+        status: 'dag_approved',
+        dagPath: join(runDir, 'missing-dag.json'),
+      });
+      expect(preflightV3RunStart(runDir)).toEqual({
+        ok: false,
+        error: 'approved_dag_missing',
+        status: 'dag_approved',
+      });
+    } finally {
+      rmSync(base, { recursive: true, force: true });
+    }
+  });
+
   it('无 grill state（runId 不存在）→ 抛错', async () => {
     const base = freshBase();
     try {
       const { deps } = stubDeps(base);
       await expect(driveV3Run('ghost', deps)).rejects.toThrow(/no grill state/);
+    } finally {
+      rmSync(base, { recursive: true, force: true });
+    }
+  });
+
+  it('run.json 已存在但 DAG 被篡改 → fail-closed，不回退 grill/不创建 journal', async () => {
+    const base = freshBase();
+    try {
+      const runDir = seedSavedDefinitionRun(base, 'tampered-run');
+      writeFileSync(join(runDir, 'dag.json'), `${JSON.stringify(gateDag('tampered-run'), null, 2)}\n`);
+      const preflight = preflightV3RunStart(runDir);
+      expect(preflight).toMatchObject({ ok: false, error: 'run_envelope_invalid' });
+      if (!preflight.ok) expect(preflight.detail).toContain('digest mismatch');
+      const shared = stubDeps(base);
+      await expect(driveV3Run('tampered-run', shared.deps)).rejects.toThrow(/authorization failed/);
+      expect(shared.runNodeCalls()).toBe(0);
+      expect(existsSync(join(runDir, 'journal.ndjson'))).toBe(false);
     } finally {
       rmSync(base, { recursive: true, force: true });
     }
@@ -265,7 +432,7 @@ describe('resolveV3GateClick — 幂等 + terminal-safe（codex #5/#1/#2）', ()
     const base = freshBase();
     try {
       const runId = 'gate-revisit';
-      const { runDir } = birthRun({ goal: 'g', baseDir: base, runId, chatBinding: BINDING });
+      const runDir = seedApprovedRun(base, runId, { binding: BINDING });
       const jp = join(runDir, 'journal.ndjson');
       appendEvent(jp, { type: 'runStarted', runId });
       // A#001 派 gate → 被回溯 supersede → A#002 重新派 gate（两张独立 wait 文件）
@@ -282,6 +449,172 @@ describe('resolveV3GateClick — 幂等 + terminal-safe（codex #5/#1/#2）', ()
       // 当前 A#002 卡点击 → 正常 resolved
       expect(resolveV3GateClick(base, runId, { waitId: 'A#002-gate', selected: 'approve', by: 'ou_user' }))
         .toEqual({ kind: 'resolved', resolution: 'approved' });
+    } finally {
+      rmSync(base, { recursive: true, force: true });
+    }
+  });
+});
+
+describe('v3 mutation integrity — tamper fail-closed before side effects', () => {
+  function tamperAuthorizedDag(runDir: string): void {
+    const dagPath = join(runDir, 'dag.json');
+    writeFileSync(dagPath, `${readFileSync(dagPath, 'utf-8')} `);
+  }
+
+  it('gate click re-verifies run.json artifacts before consuming the wait', async () => {
+    const base = freshBase();
+    try {
+      const runId = 'tampered-gate-mutation';
+      const runDir = seedSavedDefinitionRun(base, runId);
+      await driveV3Run(runId, stubDeps(base).deps);
+      const journalPath = join(runDir, 'journal.ndjson');
+      const pendingPath = waitPath(runDir, 'deploy#001-gate');
+      const journalBefore = readFileSync(journalPath, 'utf-8');
+      const waitBefore = readFileSync(pendingPath, 'utf-8');
+
+      tamperAuthorizedDag(runDir);
+      expect(() => resolveV3GateClick(base, runId, {
+        waitId: 'deploy#001-gate', selected: 'approve', by: 'ou_user',
+      })).toThrow(/digest mismatch/);
+
+      expect(readFileSync(journalPath, 'utf-8')).toBe(journalBefore);
+      expect(readFileSync(pendingPath, 'utf-8')).toBe(waitBefore);
+      expect(readWait(runDir, 'deploy#001-gate')?.status).toBe('pending');
+    } finally {
+      rmSync(base, { recursive: true, force: true });
+    }
+  });
+
+  it('retry re-verifies run.json artifacts before answer.json or journal writes', () => {
+    const base = freshBase();
+    try {
+      const runId = 'tampered-retry-mutation';
+      const runDir = seedSavedDefinitionRun(base, runId);
+      const journalPath = join(runDir, 'journal.ndjson');
+      appendEvent(journalPath, { type: 'runStarted', runId });
+      appendEvent(journalPath, {
+        type: 'nodeDispatched', nodeId: 'deploy', instanceId: 'deploy#001',
+        attemptId: 'deploy#001/attempts/001',
+      });
+      appendEvent(journalPath, {
+        type: 'nodeBlocked', nodeId: 'deploy', instanceId: 'deploy#001',
+        attemptId: 'deploy#001/attempts/001', errorClass: 'manifestInvalid',
+        errorCode: 'ASK_HUMAN', ask: { question: 'where?', options: ['prod'] },
+      });
+      appendEvent(journalPath, { type: 'runBlocked', blockedNodeId: 'deploy' });
+      const journalBefore = readFileSync(journalPath, 'utf-8');
+
+      tamperAuthorizedDag(runDir);
+      expect(() => requestV3Retry(base, runId, {
+        nodeId: 'deploy',
+        expectedAttemptId: 'deploy#001/attempts/001',
+        answer: { selected: 'prod', by: 'ou_user' },
+      })).toThrow(/digest mismatch/);
+
+      expect(readFileSync(journalPath, 'utf-8')).toBe(journalBefore);
+      expect(existsSync(join(runDir, 'deploy#001/attempts/001', 'answer.json'))).toBe(false);
+    } finally {
+      rmSync(base, { recursive: true, force: true });
+    }
+  });
+
+  it('loop and revisit grants re-verify artifacts before adding budget', () => {
+    const base = freshBase();
+    try {
+      const loopRunId = 'tampered-loop-mutation';
+      const loopRunDir = seedSavedDefinitionRun(base, loopRunId);
+      const loopJournal = join(loopRunDir, 'journal.ndjson');
+      appendEvent(loopJournal, { type: 'runStarted', runId: loopRunId });
+      appendEvent(loopJournal, { type: 'loopStarted', loopId: 'fix' });
+      appendEvent(loopJournal, { type: 'loopIterationStarted', loopId: 'fix', iteration: 1 });
+      appendEvent(loopJournal, {
+        type: 'loopIterationDecision', loopId: 'fix', iteration: 1, decision: 'exhausted',
+      });
+      appendEvent(loopJournal, { type: 'runBlocked', blockedNodeId: 'fix' });
+      const loopBefore = readFileSync(loopJournal, 'utf-8');
+      tamperAuthorizedDag(loopRunDir);
+      expect(() => requestV3LoopGrant(base, loopRunId, { by: 'ou_user' }))
+        .toThrow(/digest mismatch/);
+      expect(readFileSync(loopJournal, 'utf-8')).toBe(loopBefore);
+
+      const revisitRunId = 'tampered-revisit-mutation';
+      const revisitRunDir = seedSavedDefinitionRun(base, revisitRunId);
+      const revisitJournal = join(revisitRunDir, 'journal.ndjson');
+      appendEvent(revisitJournal, { type: 'runStarted', runId: revisitRunId });
+      appendEvent(revisitJournal, {
+        type: 'nodeDispatched', nodeId: 'deploy', instanceId: 'deploy#002',
+        attemptId: 'deploy#002/attempts/001',
+      });
+      appendEvent(revisitJournal, {
+        type: 'nodeBlocked', nodeId: 'deploy', instanceId: 'deploy#002',
+        attemptId: 'deploy#002/attempts/001', errorClass: 'resultInvalid',
+        errorCode: 'REVISIT_BUDGET_EXHAUSTED', revisitTo: 'prepare',
+      });
+      appendEvent(revisitJournal, { type: 'runBlocked', blockedNodeId: 'deploy' });
+      const revisitBefore = readFileSync(revisitJournal, 'utf-8');
+      tamperAuthorizedDag(revisitRunDir);
+      expect(() => requestRevisitGrant(base, revisitRunId, {
+        sourceNodeId: 'deploy', toNodeId: 'prepare', by: 'ou_user',
+        expectedAttemptId: 'deploy#002/attempts/001',
+      })).toThrow(/digest mismatch/);
+      expect(readFileSync(revisitJournal, 'utf-8')).toBe(revisitBefore);
+    } finally {
+      rmSync(base, { recursive: true, force: true });
+    }
+  });
+
+  it('missing run.json legacy path rejects cross-run journal/DAG identity before mutation', () => {
+    const base = freshBase();
+    try {
+      const runId = 'legacy-mutation-identity';
+      const runDir = seedApprovedRun(base, runId, { binding: BINDING });
+      const journalPath = join(runDir, 'journal.ndjson');
+      appendEvent(journalPath, { type: 'runStarted', runId: 'another-run' });
+      appendEvent(journalPath, { type: 'gateDispatched', nodeId: 'deploy', waitId: 'deploy-gate' });
+      writePendingWait(runDir, { waitId: 'deploy-gate', nodeId: 'deploy', prompt: 'approve?' });
+      const journalBefore = readFileSync(journalPath, 'utf-8');
+      const waitBefore = readFileSync(waitPath(runDir, 'deploy-gate'), 'utf-8');
+
+      expect(() => resolveV3GateClick(base, runId, {
+        waitId: 'deploy-gate', selected: 'approve', by: 'ou_user',
+      })).toThrow(/legacy journal identity mismatch/);
+      expect(readFileSync(journalPath, 'utf-8')).toBe(journalBefore);
+      expect(readFileSync(waitPath(runDir, 'deploy-gate'), 'utf-8')).toBe(waitBefore);
+
+      // Correct the journal identity, then prove the approved DAG identity is
+      // independently enforced as well.
+      writeFileSync(journalPath, '');
+      appendEvent(journalPath, { type: 'runStarted', runId });
+      appendEvent(journalPath, { type: 'gateDispatched', nodeId: 'deploy', waitId: 'deploy-gate' });
+      writeFileSync(join(runDir, 'dag.json'), JSON.stringify(gateDag('another-run')));
+      const beforeDagMismatch = readFileSync(journalPath, 'utf-8');
+      expect(() => resolveV3GateClick(base, runId, {
+        waitId: 'deploy-gate', selected: 'approve', by: 'ou_user',
+      })).toThrow(/legacy DAG identity mismatch/);
+      expect(readFileSync(journalPath, 'utf-8')).toBe(beforeDagMismatch);
+      expect(readWait(runDir, 'deploy-gate')?.status).toBe('pending');
+    } finally {
+      rmSync(base, { recursive: true, force: true });
+    }
+  });
+
+  it('cold attach skips a tampered envelope without recreating waits or healing journal', () => {
+    const base = freshBase();
+    try {
+      const runId = 'tampered-cold-attach';
+      const runDir = seedSavedDefinitionRun(base, runId);
+      const journalPath = join(runDir, 'journal.ndjson');
+      appendEvent(journalPath, { type: 'runStarted', runId });
+      appendEvent(journalPath, {
+        type: 'gateDispatched', nodeId: 'deploy', instanceId: 'deploy#001',
+        waitId: 'deploy#001-gate',
+      });
+      const journalBefore = readFileSync(journalPath, 'utf-8');
+      tamperAuthorizedDag(runDir);
+
+      expect(reconcileV3PendingGates(base)).toEqual([]);
+      expect(existsSync(waitPath(runDir, 'deploy#001-gate'))).toBe(false);
+      expect(readFileSync(journalPath, 'utf-8')).toBe(journalBefore);
     } finally {
       rmSync(base, { recursive: true, force: true });
     }
@@ -411,10 +744,9 @@ describe('reconcileV3PendingGates — 重启恢复 + 原子窗口（codex #2/#3�
       const recs = reconcileV3PendingGates(base);
       // 健康 run 照常恢复
       expect(recs.find((r) => r.runId === 'healthy')?.repost).toHaveLength(1);
-      // 坏 grill.state 的 run：readGrillState 返回 undefined（不抛），仍能补 wait + repost（只是 binding 为空）
-      const corrupt = recs.find((r) => r.runId === 'corrupt');
-      expect(corrupt).toBeTruthy();
-      expect(corrupt!.binding).toBeUndefined();
+      // 坏 grill.state 的 legacy run 身份无法验证：fail-closed 跳过，但
+      // 单个坏目录不会阻断同一轮扫描里的健康 run。
+      expect(recs.find((r) => r.runId === 'corrupt')).toBeUndefined();
     } finally {
       rmSync(base, { recursive: true, force: true });
     }

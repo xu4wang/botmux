@@ -22,10 +22,10 @@ import { t, localeForBot, type Locale } from '../../i18n/index.js';
 
 // v3 即兴 grill 引擎占用 /workflow 主语义。
 export const WORKFLOW_USAGE =
-  '用法：/workflow new <目标>（或直接 /workflow <目标>）——我会先拷问澄清需求，再自动编排成流程跑完。\n跑已存好的模板用 /template run <id>。';
-// 旧 /workflow run|cancel 软降级：仍能跑，但提示已改名（迁移期友好，不直接断老用户）。
+  '用法：/workflow <目标>（即兴） | /workflow run <名称> | /workflow save last [名称] | /workflow list。';
+// 旧 /workflow cancel 软降级：仍能跑，但提示已改名（迁移期友好，不直接断老用户）。
 export const WORKFLOW_V2_RENAME_NOTICE =
-  '⚠️ /workflow run|cancel 已改名为 /template run|cancel（/workflow 现用于即兴 workflow）。本次仍照旧执行，请尽快改用 /template。';
+  '⚠️ v2 的 /workflow cancel 已改名为 /template cancel。本次仍照旧执行，请尽快改用 /template。';
 // v2「跑已存模板」引擎命令（/template run|cancel）出错时回显的用法（i18n，已随 C 方案改名）。
 function workflowUsage(locale?: Locale): string {
   return t('card.wf.usage', undefined, locale);
@@ -114,8 +114,8 @@ export type ExecuteWorkflowCommandInput = {
  *
  *  - `/workflow new <目标>` / 裸 `/workflow <目标>` → `{ kind:'goal', goal }`
  *  - `/workflow`（无目标）→ `{ kind:'usage' }`
- *  - `/workflow run|cancel …` → `null`（那是 v2 模板的 legacy 入口，交给
- *    `parseWorkflowCommand` 处理；这里刻意不吞）
+ *  - `/workflow run|save|list|show …` → `null`（Saved Workflow 命令）；
+ *    `/workflow cancel …` → `null`（迁移期 legacy 入口）。这里刻意不吞。
  *  - 非 `/workflow` → `null`
  *
  * 注意 word-boundary：`/workflowfoo` 不匹配（避免误吞别的命令）。
@@ -127,8 +127,8 @@ export function parseWorkflowGrillTrigger(content: string): WorkflowGrillTrigger
   const tail = (m[1] ?? '').trim();
   if (!tail) return { kind: 'usage' };
   const firstTok = tail.split(/\s+/)[0];
-  // run/cancel 归 v2（legacy），不当作 grill 目标。
-  if (firstTok === 'run' || firstTok === 'cancel') return null;
+  // Saved Workflow verbs + legacy cancel are commands, not ad-hoc goals.
+  if (['run', 'save', 'list', 'show', 'cancel'].includes(firstTok)) return null;
   // 显式 `new` 前缀可选：剥掉后剩下的就是目标；否则整段 tail 即目标。
   const goal = firstTok === 'new' ? tail.slice(firstTok.length).trim() : tail;
   if (!goal) return { kind: 'usage' };
@@ -154,16 +154,17 @@ export function parseWorkflowCommand(content: string, locale?: Locale): Workflow
   const trimmed = content.trim();
   const parts = trimmed.split(/\s+/);
   const cmd = parts[0];
-  // v2 模板主入口 = /template；/workflow 仅保留 run|cancel 作 legacy 软降级
+  // v2 模板主入口 = /template；/workflow 仅保留 cancel 作 legacy 软降级。
+  // `/workflow run` 已回收给 v3 Saved Workflow，由上层的 v3 parser 处理。
   // （其余 /workflow 子命令是 v3 grill，由 parseWorkflowGrillTrigger 处理）。
   const isTemplate = cmd === '/template';
   const isLegacyWorkflow = cmd === '/workflow';
   if (!isTemplate && !isLegacyWorkflow) return null;
   const sub = parts[1];
-  // /workflow 仅 run|cancel 作 legacy（其余 /workflow 子命令是 v3 grill）。legacy 与
+  // /workflow 仅 cancel 作 legacy（其余 /workflow 子命令是 v3）。legacy 与
   // /template 解析结果相同——legacy 的「改名提示」由 daemon 从原始 content 判定，
   // 这里不需要再带标记（单一检测来源，避免双重机制）。
-  if (isLegacyWorkflow && sub !== 'run' && sub !== 'cancel') return null;
+  if (isLegacyWorkflow && sub !== 'cancel') return null;
 
   if (sub === 'cancel') {
     const runId = parts[2];

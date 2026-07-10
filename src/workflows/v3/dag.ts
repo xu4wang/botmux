@@ -111,21 +111,17 @@ export type V3TriggerRule = 'all_success' | 'one_success' | { quorum: number };
 
 /**
  * Per-node capability override (P2, edge-activation follow-up).  Merged onto
- * the bot's frozen `BotSnapshot` at dispatch time — the node can RESTRICT or
- * redirect, never escalate:
+ * the bot's frozen `BotSnapshot` at dispatch time:
  *   - `model` picks a different model for THIS node (cost control: cheap
  *     models for research nodes, strong models for code nodes);
- *   - `permissionMode:'restricted'` forces the CLI's permission bypass OFF for
- *     this node.  There is deliberately NO 'bypass' value — a node on a
- *     restricted bot cannot grant itself what the bot does not have (the
- *     no-escalation red line is structural, not a runtime check);
  *   - `systemPromptAppend` adds node-specific instructions to the goal file.
+ * Permission is deliberately not overridable: every workflow worker requires
+ * CLI bypass permission, and bots configured to disable it are rejected.
  * `toolsSubset` is deferred — it needs a per-CLI capability matrix across the
  * daemon init/worker/adapter chain (P2b).
  */
 export interface V3CapabilityOverride {
   model?: string;
-  permissionMode?: 'inherit' | 'restricted';
   systemPromptAppend?: string;
 }
 
@@ -755,9 +751,8 @@ function normTriggerRule(
 /**
  * Validate the per-node capability override (P2).  Fail-loud on unknown keys
  * (incl. the deferred `toolsSubset` — better an explicit "not yet" than a
- * field the runtime silently ignores).  `permissionMode` has no 'bypass'
- * value BY CONSTRUCTION — the no-escalation red line lives in the type, not
- * in a runtime check.
+ * field the runtime silently ignores). Permissions are not part of this
+ * object: workflow workers always require CLI bypass permission.
  */
 function normOverride(
   v: unknown,
@@ -769,11 +764,16 @@ function normOverride(
     problems.push(`${where}.override must be an object`);
     return undefined;
   }
-  const known = new Set(['model', 'permissionMode', 'systemPromptAppend']);
+  const known = new Set(['model', 'systemPromptAppend']);
   const extra = Object.keys(v).filter((k) => !known.has(k));
   if (extra.length > 0) {
-    const hint = extra.includes('toolsSubset') ? ' (toolsSubset is deferred — P2b)' : '';
-    problems.push(`${where}.override has unsupported key(s): ${extra.join(', ')}${hint} (allowed: model, permissionMode, systemPromptAppend)`);
+    const hints: string[] = [];
+    if (extra.includes('toolsSubset')) hints.push('toolsSubset is deferred — P2b');
+    if (extra.includes('permissionMode')) {
+      hints.push('permissionMode was removed — v3 workflow workers always require CLI bypass; delete this key');
+    }
+    const hint = hints.length > 0 ? ` (${hints.join('; ')})` : '';
+    problems.push(`${where}.override has unsupported key(s): ${extra.join(', ')}${hint} (allowed: model, systemPromptAppend)`);
     return undefined;
   }
   const out: V3CapabilityOverride = {};
@@ -783,13 +783,6 @@ function normOverride(
       return undefined;
     }
     out.model = v.model.trim();
-  }
-  if (v.permissionMode !== undefined) {
-    if (v.permissionMode !== 'inherit' && v.permissionMode !== 'restricted') {
-      problems.push(`${where}.override.permissionMode must be 'inherit' | 'restricted' (there is no 'bypass' — a node can only reduce privilege)`);
-      return undefined;
-    }
-    out.permissionMode = v.permissionMode;
   }
   if (v.systemPromptAppend !== undefined) {
     if (
@@ -803,7 +796,7 @@ function normOverride(
     out.systemPromptAppend = v.systemPromptAppend;
   }
   if (Object.keys(out).length === 0) {
-    problems.push(`${where}.override must set at least one of model / permissionMode / systemPromptAppend`);
+    problems.push(`${where}.override must set at least one of model / systemPromptAppend`);
     return undefined;
   }
   return out;

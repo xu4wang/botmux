@@ -7,7 +7,7 @@
  */
 
 import { describe, it, expect } from 'vitest';
-import { mkdtempSync, rmSync, appendFileSync } from 'node:fs';
+import { mkdtempSync, rmSync, appendFileSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -479,6 +479,55 @@ describe('journal + state', () => {
       const events = readJournal(jp);
       expect(events).toHaveLength(1);
       expect(events[0]!.type).toBe('runStarted');
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('valid + torn tail 后 append 会先持久修复，不把两个 JSON 粘死', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'v3-torn-repair-'));
+    try {
+      const jp = join(dir, 'journal.ndjson');
+      appendEvent(jp, { type: 'runStarted', runId: 'r' });
+      appendFileSync(jp, '{"ts":2,"type":"nodeDispa');
+
+      appendEvent(jp, { type: 'runSucceeded' });
+
+      const raw = readFileSync(jp, 'utf-8');
+      expect(raw.endsWith('\n')).toBe(true);
+      expect(raw).not.toContain('nodeDispa');
+      expect(readJournal(jp).map((event) => event.type)).toEqual(['runStarted', 'runSucceeded']);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('保留完整但缺 newline 的最后事件，再安全 append', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'v3-tail-seal-'));
+    try {
+      const jp = join(dir, 'journal.ndjson');
+      writeFileSync(jp, JSON.stringify({ ts: 1, type: 'runStarted', runId: 'r' }));
+
+      appendEvent(jp, { type: 'runSucceeded' });
+
+      expect(readJournal(jp).map((event) => event.type)).toEqual(['runStarted', 'runSucceeded']);
+      expect(readFileSync(jp, 'utf-8').split('\n').filter(Boolean)).toHaveLength(2);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('已 newline 提交的中段损坏仍 fail loud', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'v3-middle-corrupt-'));
+    try {
+      const jp = join(dir, 'journal.ndjson');
+      writeFileSync(
+        jp,
+        `${JSON.stringify({ ts: 1, type: 'runStarted', runId: 'r' })}\n{not-json}\n` +
+        `${JSON.stringify({ ts: 3, type: 'runSucceeded' })}\n`,
+      );
+
+      expect(() => readJournal(jp)).toThrow(/corrupted at line 2/);
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
