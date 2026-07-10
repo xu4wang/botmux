@@ -3042,6 +3042,43 @@ async function handleTuiKeys(keys: string[], isFinal: boolean): Promise<void> {
   log(`TUI keys: ${keys.join(' ')}${isFinal ? ' (final)' : ''}`);
 }
 
+// 待注入的 TUI 命令队列。生命周期绑定当前 CLI 进程：killCli() 会清空它，
+// 防止 restart 后残留命令重放进新 CLI——新增清理状态时记得同步那里。
+const pendingInjections: string[] = [];
+let injectionFlushing = false;
+
+/** 排队注入一行 TUI 命令：idle（isPromptReady）时经 sendRawCommandLine 敲入。 */
+async function flushPendingInjections(): Promise<void> {
+  if (injectionFlushing) return;
+  if (bareShellLaunchBlocked) return;  // launch failed into a bare shell — don't type commands into it
+  injectionFlushing = true;
+  try {
+    while (pendingInjections.length > 0 && backend && isPromptReady && !bareShellLaunchBlocked) {
+      // Mirror flushPending's one-shot launch-failure guard: when an injection is
+      // the FIRST writer after a (re)spawn, flushPending may never have run
+      // (pendingMessages empty ⇒ early return) so the bare-shell check must also
+      // fire here before typing. Shares the same one-shot flag — whichever flush
+      // path sends first runs the detection.
+      if (!bareShellChecked) {
+        bareShellChecked = true;
+        if (detectBareShellLaunch()) return;  // finally{} releases the mutex; queue stays
+      }
+      const cmd = pendingInjections.shift()!;
+      isPromptReady = false;
+      idleDetector?.reset();
+      try {
+        await sendRawCommandLine(backend, cmd);
+        await awaitPtyQuiescence(STARTUP_CMD_QUIET_MS, STARTUP_CMD_CAP_MS);
+        log(`Injected command: ${cmd}`);
+      } catch (e: any) {
+        log(`Inject command failed (${cmd}): ${e?.message ?? e}`);
+      }
+    }
+  } finally {
+    injectionFlushing = false;
+  }
+}
+
 /**
  * Handle atomic text-input: navigate to "Type something" (WITHOUT pressing Enter),
  * then write text via cliAdapter (which adds its own Enter to submit).
@@ -3418,6 +3455,7 @@ function markPromptReady(): void {
     send({ type: 'screen_update', content, ...usageLimitTracker.classify(content, 'idle'), turnId: currentBotmuxTurnId });
   }
   flushPending();
+  if (pendingInjections.length > 0) void flushPendingInjections();
 }
 
 function persistCliSessionId(cliSessionId: string): void {
@@ -5514,6 +5552,7 @@ function killCli(): void {
   }
   isPromptReady = false;
   pendingMessages.length = 0;
+  pendingInjections.length = 0;
   scrollback = '';
   altBufferActive = false;
   trustHandled = false;
@@ -6784,6 +6823,12 @@ process.on('message', async (raw: unknown) => {
 
     case 'tui_keys': {
       handleTuiKeys(msg.keys, msg.isFinal);
+      break;
+    }
+
+    case 'inject_command': {
+      pendingInjections.push(msg.command);
+      void flushPendingInjections();
       break;
     }
 
