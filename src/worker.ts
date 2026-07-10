@@ -96,7 +96,8 @@ import { isObserveBackend, type ObserveBackend } from './adapters/backend/types.
 import { selectSessionBackend, decideBackendGate, backendGateUserMessage } from './adapters/backend/session-backend-selector.js';
 import { prepareSandbox, attachSandboxOutbox, startOutboxWatcher, sandboxEnabled, sandboxedClaudeDataDir } from './adapters/backend/sandbox.js';
 import type { BackendType, SessionBackend } from './adapters/backend/types.js';
-import { tmuxEnv, probeTmuxFunctional } from './setup/ensure-tmux.js';
+import { tmuxEnv, probeTmuxFunctionalWithRetry } from './setup/ensure-tmux.js';
+import { tmuxRestartJitterMs } from './core/tmux-recovery.js';
 import { IdleDetector } from './utils/idle-detector.js';
 import { ScreenAnalyzer } from './utils/screen-analyzer.js';
 import { captureToPng } from './utils/screenshot-renderer.js';
@@ -131,6 +132,7 @@ let sandboxTeardownDone = false;                     // guards the exit-time bes
  *  (non-forced) config, so healthy restarts (e.g. user `/restart`) are
  *  unaffected. */
 let consecutiveInWorkerRestarts = 0;
+let tmuxRestartTimer: NodeJS.Timeout | null = null;
 /** Guard: user_notify for "resume → fresh fallback" is sent once per worker
  *  lifecycle so a 4× crash loop does not spam the Lark thread with 4 copies
  *  of the same warning. */
@@ -4140,7 +4142,7 @@ function spawnCli(cfg: Extract<DaemonToWorker, { type: 'init' }>): void {
     if (effectiveBackend === 'tmux') {
       hasExistingSession = TmuxBackend.hasSession(TmuxBackend.sessionName(cfg.sessionId));
       if (!hasExistingSession) {
-        const probe = probeTmuxFunctional();
+        const probe = probeTmuxFunctionalWithRetry();
         available = probe.ok;
         if (!probe.ok) reason = probe.reason;
       }
@@ -6083,16 +6085,27 @@ process.on('message', async (raw: unknown) => {
       // process would never actually restart. destroySession() tears the session
       // down so the respawn starts a fresh CLI. (PTY has no destroySession, so
       // the ?. no-ops and killCli()'s kill() does the teardown.)
-      backend?.destroySession?.();
-      killCli();
-      awaitingFirstPrompt = true;
-      setTimeout(() => {
-        if (lastInitConfig) {
-          startScreenUpdates();
-          startScreenAnalyzer();
-          spawnCli({ ...lastInitConfig, resume: true, prompt: '' });
-        }
-      }, 500);
+      const restart = () => {
+        tmuxRestartTimer = null;
+        backend?.destroySession?.();
+        killCli();
+        awaitingFirstPrompt = true;
+        setTimeout(() => {
+          if (lastInitConfig) {
+            startScreenUpdates();
+            startScreenAnalyzer();
+            spawnCli({ ...lastInitConfig, resume: true, prompt: '' });
+          }
+        }, 500);
+      };
+      if (effectiveBackendType === 'tmux') {
+        const delayMs = tmuxRestartJitterMs(lastInitConfig?.sessionId ?? '', consecutiveInWorkerRestarts);
+        log(`Staggering tmux teardown/restart by ${delayMs}ms to avoid shared-server probe storms`);
+        if (tmuxRestartTimer) clearTimeout(tmuxRestartTimer);
+        tmuxRestartTimer = setTimeout(restart, delayMs);
+      } else {
+        restart();
+      }
       break;
     }
 
@@ -6219,6 +6232,10 @@ process.on('message', async (raw: unknown) => {
 // ─── Cleanup ─────────────────────────────────────────────────────────────────
 
 function cleanup(): void {
+  if (tmuxRestartTimer) {
+    clearTimeout(tmuxRestartTimer);
+    tmuxRestartTimer = null;
+  }
   for (const [, cp] of clientPtys) {
     try { cp.kill(); } catch { /* already dead */ }
   }
