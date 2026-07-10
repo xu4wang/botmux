@@ -321,6 +321,7 @@ export type DaemonToWorker =
   // onExit so transient auto-restarted exits don't park-then-tear-down.
   | { type: 'park_diagnostic' }
   | { type: 'tui_keys'; keys: string[]; isFinal: boolean }
+  | { type: 'inject_command'; command: string }
   | { type: 'tui_text_input'; keys: string[]; text: string }
   // CoCo AskUserQuestion 作答：daemon 在 ask 结算后下发，worker 等原生 picker 渲染后
   // 用 navKeys 驱动它选择+导航。needsReviewSubmit=true（多题）时 navKeys 停在 Review
