@@ -114,8 +114,9 @@ import {
   getBotName,
   type SessionRow,
 } from './dashboard-rows.js';
-import { getBotBrand, getBot, loadBotConfigs, readBotSkillPolicy } from '../bot-registry.js';
+import { getBotBrand, getBot, loadBotConfigs, readBotSkillPolicy, getBotTuiSlashAllow } from '../bot-registry.js';
 import { normalizeKanbanColumn, normalizeKanbanPosition, normalizeSessionTitle } from './session-board.js';
+import { validateSlashInjection } from './slash-inject.js';
 import type { DaemonToWorker, ScheduledTask, ParsedSchedule, Session } from '../types.js';
 import type { DaemonSession } from './types.js';
 import { attachSkillPolicy, detachSkillPolicy } from './skills/im-command.js';
@@ -319,6 +320,26 @@ ipcRoute('POST', '/api/sessions/:sessionId/suspend', (_req, res, params) => {
     return jsonRes(res, 409, { ok: false, error: 'backend_not_suspendable' });
   }
   jsonRes(res, 200, { ok: true, sessionId: params.sessionId, suspended: true });
+});
+
+/** 向本会话 CLI 注入一条 allowlist 内的原生斜杠命令（idle 后生效）。
+ *  Loopback-trusted（同 suspend/resume）：签名所需 .dashboard-secret 被读隔离
+ *  deny，沙箱内 CLI 无法签名；安全边界由 allowlist（默认空=全拒）承担。 */
+ipcRoute('POST', '/api/sessions/:sessionId/slash', async (req, res, params) => {
+  const ds = findActiveBySessionId(params.sessionId);
+  if (!ds) return jsonRes(res, 404, { ok: false, error: 'session_not_active' });
+  // Adopt/observed 会话是收编的用户自有 pane，用户可能正在里面打字——机器注入
+  // 会与人的输入交错。与 /suspend、/restart 同款排除。
+  if (ds.adoptedFrom || ds.initConfig?.adoptMode) {
+    return jsonRes(res, 409, { ok: false, error: 'adopt_inject_unsupported' });
+  }
+  if (!ds.worker || ds.worker.killed) return jsonRes(res, 409, { ok: false, error: 'no_live_worker' });
+  const body = await readJsonBody<{ command?: string }>(req).catch(() => ({} as { command?: string }));
+  const allow = getBotTuiSlashAllow(ds.larkAppId);
+  const v = validateSlashInjection(body?.command ?? '', allow);
+  if (!v.ok) return jsonRes(res, 403, { ok: false, error: v.error });
+  ds.worker.send({ type: 'inject_command', command: v.command } as DaemonToWorker);
+  jsonRes(res, 200, { ok: true, sessionId: params.sessionId, queued: v.command });
 });
 
 /** 解析 session（活跃优先，已关闭兜底）。活跃会话取 ds.session —— registry 与
