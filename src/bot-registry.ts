@@ -491,6 +491,11 @@ export interface BotConfig {
    */
   brandLabel?: string;
   /**
+   * botmux slash 可注入的 CLI 原生斜杠命令 allowlist（如 ["/compact","/model"]）。
+   * 缺省/空 = 通用注入关闭。/cd 永远被拒（见 core/slash-inject.ts）。
+   */
+  tuiSlashAllow?: string[];
+  /**
    * When true, suppress the live streaming session card entirely. The web
    * terminal still runs and the final answer still arrives via `botmux send`;
    * only the auto-updating status card is never posted/patched. Default
@@ -946,6 +951,15 @@ export function resolveBrandLabel(larkAppId: string): string | undefined {
 }
 
 /**
+ * 只读 accessor：该 bot 配置的 tuiSlashAllow allowlist（TUI 通用 slash 注入用）。
+ * 仅读内存态注册表，daemon 进程内使用；无需 bots.json 磁盘回退（不同于
+ * resolveBrandLabel——`botmux send` 等一次性 CLI 进程不消费此 accessor）。
+ */
+export function getBotTuiSlashAllow(larkAppId: string): string[] | undefined {
+  return bots.get(larkAppId)?.config.tuiSlashAllow;
+}
+
+/**
  * Load bot configurations from one of (in priority order):
  * 1. BOTS_CONFIG env var — path to a JSON file
  * 2. ~/.botmux/bots.json — default config path
@@ -1125,6 +1139,23 @@ export function parseBotConfigsFromText(jsonText: string): BotConfig[] {
       if (uniq.length > 0) customPassthroughCommands = uniq;
     }
 
+    // tuiSlashAllow：botmux 通用 slash 注入通道（inject_command，见
+    // core/slash-inject.ts）的 CLI 原生命令 allowlist。归一化规则与
+    // customPassthroughCommands 同款：转小写、自动补前导 `/`、按
+    // /^\/[a-z0-9][a-z0-9:_-]*$/ 过滤非法项、去重。非法/缺省/空 → undefined
+    // （= 通用注入关闭，默认拒绝）。/cd 即使写在这里也会被
+    // validateSlashInjection 的固定黑名单挡住，这里不重复过滤。
+    let tuiSlashAllow: string[] | undefined;
+    if (Array.isArray(entry.tuiSlashAllow)) {
+      const normalized = entry.tuiSlashAllow
+        .filter((x: any): x is string => typeof x === 'string')
+        .map((x: string) => x.trim().toLowerCase())
+        .map((x: string) => (x.startsWith('/') ? x : `/${x}`))
+        .filter((x: string) => /^\/[a-z0-9][a-z0-9:_-]*$/.test(x));
+      const uniq = [...new Set<string>(normalized)];
+      if (uniq.length > 0) tuiSlashAllow = uniq;
+    }
+
     // startupCommands：开会话后、首条 prompt 前自动敲进 CLI 的 slash 命令行（可带
     // 参数，如 `/effort ultracode`）。归一化：去多余空白、补前导 `/`、去重；空 →
     // undefined（与 customPassthroughCommands 同款"不写空数组保持干净"）。
@@ -1214,6 +1245,7 @@ export function parseBotConfigsFromText(jsonText: string): BotConfig[] {
       // Default is ON, so only explicit false is meaningful/persisted.
       autoGrantRequestCards: entry.autoGrantRequestCards === false ? false : undefined,
       customPassthroughCommands,
+      tuiSlashAllow,
       startupCommands,
       env,
       skills,
