@@ -3228,6 +3228,33 @@ async function cmdSuspend(): Promise<void> {
   if (failed > 0) process.exitCode = 1;
 }
 
+/** botmux slash "<斜杠命令>"：请求 daemon 在本会话 idle 后把命令敲入自己的 CLI。
+ *  自识别当前会话（pid marker → BOTMUX_SESSION_ID env），allowlist 由 daemon 侧校验。 */
+async function cmdSlash(): Promise<void> {
+  const argv = process.argv.slice(3);
+  const sIdx = argv.indexOf('--session');
+  const explicitSid = sIdx >= 0 ? argv[sIdx + 1] : undefined;
+  const command = argv.filter((a, i) => !a.startsWith('--') && !(sIdx >= 0 && i === sIdx + 1))[0];
+  if (!command) { console.error('用法: botmux slash "/compact" [--session <id>]'); process.exit(1); }
+
+  const ctx = explicitSid ? null : findAncestorSessionContext();
+  const sid = explicitSid ?? ctx?.sessionId;
+  if (!sid) { console.error('❌ 无法定位当前会话（需在 bot 会话内执行，或用 --session 指定）'); process.exit(1); }
+  const sessions = loadSessions();
+  const s = [...sessions.values()].find(x => x.sessionId === sid || x.sessionId.startsWith(sid));
+  if (!s) { console.error(`❌ 未找到 session ${sid}`); process.exit(1); }
+  const daemon = findDaemon(s.larkAppId);
+  if (!daemon) { console.error('❌ daemon 不在线'); process.exit(1); }
+  const res = await fetch(
+    `http://127.0.0.1:${daemon.ipcPort}/api/sessions/${encodeURIComponent(s.sessionId)}/slash`,
+    { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ command }) },
+  );
+  const body: any = await res.json().catch(() => ({}));
+  if (res.ok && body?.ok) { console.log(`✓ 已排队注入: ${body.queued}（会话空闲时执行）`); return; }
+  console.error(`✗ 被拒绝: ${body?.error ?? `HTTP ${res.status}`}`);
+  process.exit(1);
+}
+
 /**
  * Discover online daemons. Mirrors the staleness rule used by
  * dashboard/registry.ts (90s heartbeat) so we don't try to talk to a daemon
@@ -3602,6 +3629,7 @@ botmux v${getVersion()} — IM ↔ AI 编程 CLI 桥接
        --bot <appId>   挂起该 bot 的全部活跃会话
        --isolated      挂起所有读隔离 bot（凭证轮换后用；下次冷启动自动同步最新凭证）
        --dry-run       只列出目标，不执行
+  slash "<斜杠命令>"   会话空闲后向本会话 CLI 注入一条原生斜杠命令（需 bots.json 配 tuiSlashAllow；/cd 恒被拒）
   term-link [id]   获取活跃会话的「可操作终端」（带写 token）。不回显链接，改由
                    daemon 把可操作卡片私密发给 owner（群内仅你可见，话题/单聊回退 DM）。
                    单个活跃会话可省略 id
@@ -6547,6 +6575,7 @@ switch (command) {
   case 'rm':      cmdDelete(); break;
   case 'resume':  await cmdResume(); break;
   case 'suspend': await cmdSuspend(); break;
+  case 'slash':   await cmdSlash(); break;
   case 'term-link': await cmdTermLink(process.argv.slice(3)); break;
   case 'schedule': await cmdSchedule(process.argv[3] ?? '', process.argv.slice(4)); break;
   case 'ask': {
