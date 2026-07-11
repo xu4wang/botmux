@@ -65,6 +65,10 @@ interface CreatedConnector {
 
 type ConnectorsTab = 'webhooks' | 'logs';
 
+export function replaceConnectorById<T extends { id: string }>(connectors: T[], updated: T): T[] {
+  return connectors.map(connector => connector.id === updated.id ? updated : connector);
+}
+
 const emptyForm: CreateForm = {
   name: '',
   botId: '',
@@ -493,10 +497,10 @@ function ConnectorsPage(props: { tab: ConnectorsTab }) {
       if ((r.status === 201 || r.status === 200) && r.body?.ok) {
         if (editingConnector) {
           const editedId = editingConnector.id;
+          setConnectors(current => replaceConnectorById(current, r.body.connector as Connector));
           setEditMsg({ id: editedId, text: tr('connectors.updated') });
           setCreateOpen(false);
           setEditingConnector(null);
-          await load();
           return;
         }
         const url = r.body.webhookUrl || webhookUrl(r.body.connector.id);
