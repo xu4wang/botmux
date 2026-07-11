@@ -33,9 +33,23 @@
 
 ### 「沉淀知识」
 按以下顺序执行（pull → merge → distill → push）：
-1. pull：若本目录 `.botmux-dir.json` 已有知识文档 url/token，拉取飞书文档最新版
-   （吸收用户人工修订）；没有则本次创建文档「<角色名>·领域知识」，并把 url 回填
-   `.botmux-dir.json`、把文档分享给角色主人（编辑权限）。
+1. pull：若本目录 `.botmux-dir.json` 已有知识文档 `url`，拉取该飞书文档最新版
+   （吸收用户人工修订）；没有则本次创建文档「<角色名>·领域知识」、把文档分享给角色主人
+   （编辑权限），并把 url 写进 `.botmux-dir.json`。
+
+   ⚠️ **`.botmux-dir.json` 的字段结构是与 botmux 的硬契约，不得自由发挥**——botmux 的卡片
+   脚注只读**顶层**的 `name` 与 `url` 两个字段（`src/im/lark/brand-template.ts` 的
+   `readDirMeta`）。必须严格是这个形状（可另加自定义字段，但 `name`/`url` 必须在顶层）：
+
+   ```json
+   {
+     "name": "<角色名>",
+     "url": "https://<domain>/docx/<token>"
+   }
+   ```
+
+   写错结构（如把 url 嵌进 `knowledgeDoc.url`）不会报错，但脚注上的角色名会**静默失去
+   链接**，退化成纯文本。写完自检：`python3 -c "import json;d=json.load(open('.botmux-dir.json'));print(d['name'],d['url'])"` 应打印出角色名与文档链接。
 2. merge + distill：三方语义合并（文档修订版 + 本地 knowledge/ + 记忆目录新原始记忆）。
    优先级：用户人工修订默认保留（与新记忆冲突→汇报请裁决）＞ 新记忆更新机器旧知识
    （变更列入汇报）。删除也是修订：文档没有、本地还有 → 同步删除本地，不复活。
