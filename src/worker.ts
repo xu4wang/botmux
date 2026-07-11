@@ -4564,11 +4564,18 @@ function spawnCli(cfg: Extract<DaemonToWorker, { type: 'init' }>): void {
   }
   // macOS write-sandbox rules (pure): the writable-zone allow-list + crown-jewel
   // re-denies. Realpath'd + emitted into the Seatbelt profile at the spawn site.
-  let writeSandboxRules: { allowWritePaths: string[]; denyWritePaths: string[] } | undefined;
+  let writeSandboxRules: {
+    allowWritePaths: string[];
+    allowWriteRegexes: string[];
+    denyWritePaths: string[];
+  } | undefined;
   if (willWriteSandbox && process.env.SESSION_DATA_DIR) {
     const sessionDataDir = process.env.SESSION_DATA_DIR;
+    // Regex rules cannot be realpath'd after construction, so build their home
+    // prefix from the canonical path up front (Seatbelt matches canonical paths).
+    const sandboxHome = (() => { try { return realpathSync(homedir()); } catch { return homedir(); } })();
     writeSandboxRules = buildWriteSandboxRules({
-      homeDir: homedir(),
+      homeDir: sandboxHome,
       botmuxHome: dirname(sessionDataDir),
       sessionDataDir,
       workingDir: cfg.workingDir,
@@ -4776,6 +4783,7 @@ function spawnCli(cfg: Extract<DaemonToWorker, { type: 'init' }>): void {
     const writeRules = writeSandboxRules
       ? {
           allowWritePaths: writeSandboxRules.allowWritePaths.map(canonical),
+          allowWriteRegexes: writeSandboxRules.allowWriteRegexes,
           denyWritePaths: writeSandboxRules.denyWritePaths.map(canonical),
         }
       : undefined;

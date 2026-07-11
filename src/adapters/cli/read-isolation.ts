@@ -309,6 +309,7 @@ export interface WriteSandboxContext {
  */
 export function buildWriteSandboxRules(ctx: WriteSandboxContext): {
   allowWritePaths: string[];
+  allowWriteRegexes: string[];
   denyWritePaths: string[];
 } {
   const h = ctx.homeDir.replace(/\/+$/, '');
@@ -326,6 +327,11 @@ export function buildWriteSandboxRules(ctx: WriteSandboxContext): {
       botHomePath(bh, ctx.currentAppId),
       // CLI data dirs (write-sandbox standalone leaves them at the real path).
       `${h}/.claude`, `${h}/.claude.json`, `${h}/.codex`,
+      // Claude Code's updater/OAuth refresh uses sibling lock directories rather
+      // than placing every state file under ~/.claude. Without these, a valid
+      // login can fail to refresh because lock acquisition returns EPERM.
+      `${h}/.claude.lock`, `${h}/.claude.json.lock`,
+      `${h}/.local/state/claude`,
       // Ephemeral scratch / caches every CLI + spawned tool (git, npm, node) needs.
       `${h}/Library/Caches`,
       `${h}/Library/Application Support`,
@@ -336,6 +342,13 @@ export function buildWriteSandboxRules(ctx: WriteSandboxContext): {
       '/dev',                   // ptys, /dev/null, /dev/tty — required to run at all
       ...(ctx.extraWritePaths ?? []),
     ]),
+    allowWriteRegexes: [
+      // Claude Code saves ~/.claude.json atomically through a PID/random-suffixed
+      // sibling (e.g. .claude.json.tmp.1234.abcd). A subpath rule for the exact
+      // state file cannot match those siblings, so allow only that basename class
+      // at the home root — not arbitrary home dotfiles.
+      `^${escapeForRegex(h)}/\\.claude\\.json\\.tmp\\.[^/]+$`,
+    ],
     denyWritePaths: keep([
       // Crown jewels — re-denied AFTER the allows so a semi-trusted operator can't
       // plant an ssh key or tamper another bot's creds even if the project/home
@@ -405,7 +418,7 @@ export function buildSeatbeltProfile(
   /** When set, layer the macOS file-sandbox WRITE isolation (Linux-bwrap twin) into
    *  the SAME profile: deny all writes, re-allow the writable zones, then final-deny
    *  the crown jewels. Reads are unaffected. Omit for read-isolation-only sessions. */
-  writeSandbox?: { allowWritePaths: string[]; denyWritePaths: string[] },
+  writeSandbox?: { allowWritePaths: string[]; allowWriteRegexes?: string[]; denyWritePaths: string[] },
 ): string {
   const esc = (p: string) => p.replace(/\\/g, '\\\\').replace(/"/g, '\\"');
   // Regex literals (#"…") pass backslashes RAW to the regex engine — do NOT
@@ -436,6 +449,7 @@ export function buildSeatbeltProfile(
   if (writeSandbox) {
     lines.push('(deny file-write* (subpath "/"))');
     for (const p of writeSandbox.allowWritePaths) lines.push(`(allow file-write* (subpath "${esc(p)}"))`);
+    for (const r of writeSandbox.allowWriteRegexes ?? []) lines.push(`(allow file-write* (regex #"${escRe(r)}"))`);
     for (const p of writeSandbox.denyWritePaths) lines.push(`(deny file-write* (subpath "${esc(p)}"))`);
   }
   return lines.join('\n') + '\n';

@@ -337,6 +337,10 @@ describe('macOS write-sandbox (buildWriteSandboxRules)', () => {
     // CLI data + ephemeral scratch the CLI/tools need
     expect(r.allowWritePaths).toContain('/Users/bot/.claude');
     expect(r.allowWritePaths).toContain('/Users/bot/.codex');
+    expect(r.allowWritePaths).toContain('/Users/bot/.claude.lock');
+    expect(r.allowWritePaths).toContain('/Users/bot/.claude.json.lock');
+    expect(r.allowWritePaths).toContain('/Users/bot/.local/state/claude');
+    expect(r.allowWriteRegexes).toContain('^/Users/bot/\\.claude\\.json\\.tmp\\.[^/]+$');
     expect(r.allowWritePaths).toContain('/private/var/folders');
     expect(r.allowWritePaths).toContain('/dev');
     // NOT writable: home dotfiles at large are protected by the profile's deny-all
@@ -363,10 +367,12 @@ describe('macOS write-sandbox (buildWriteSandboxRules)', () => {
   it('buildSeatbeltProfile emits deny-all-writes + allow-list + final crown-jewel denies, in order', () => {
     const prof = buildSeatbeltProfile([], [], [], [], [], {
       allowWritePaths: ['/Users/bot/projects/app'],
+      allowWriteRegexes: ['^/Users/bot/\\.claude\\.json\\.tmp\\.[^/]+$'],
       denyWritePaths: ['/Users/bot/.ssh'],
     });
     expect(prof).toContain('(deny file-write* (subpath "/"))');
     expect(prof).toContain('(allow file-write* (subpath "/Users/bot/projects/app"))');
+    expect(prof).toContain('(allow file-write* (regex #"^/Users/bot/\\.claude\\.json\\.tmp\\.[^/]+$"))');
     expect(prof).toContain('(deny file-write* (subpath "/Users/bot/.ssh"))');
     // ORDER matters (Seatbelt last-match wins): deny-all < allow project < final deny ssh
     const iDenyAll = prof.indexOf('(deny file-write* (subpath "/"))');
