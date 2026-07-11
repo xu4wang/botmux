@@ -27,6 +27,7 @@ import { killWorker, forkWorker, forkAdoptWorker, getCurrentCliVersion, postFres
 import { expandHome, getSessionWorkingDir, getProjectScanDir, getProjectScanDirs, rememberLastCliInput } from './session-manager.js';
 import { discoverSlashCommandsForAdapter, listMcpServerNames, supportsFilesystemCommandDiscovery } from './command-discovery.js';
 import { validateWorkingDir } from './working-dir.js';
+import { repinSessionWorkingDir } from './session-cwd.js';
 import { discoverAdoptableSessions, validateAdoptTarget, adoptTargetKey, adoptTargetLabel, type AdoptableSession } from './session-discovery.js';
 import { discoverAdoptableZellijSessions, validateZellijAdoptTarget, type ZellijAdoptableSession } from './zellij-adopt-discovery.js';
 import { listCodexAppThreads, type CodexAppThreadSummary } from '../services/codex-app-threads.js';
@@ -1258,9 +1259,7 @@ export async function handleCommand(
         }
         const resolvedPath = validation.resolvedPath;
         killWorker(ds);
-        ds.workingDir = targetPath;
-        ds.session.workingDir = targetPath;
-        sessionStore.updateSession(ds.session);
+        repinSessionWorkingDir(ds, resolvedPath);
         if (validation.created) {
           await sessionReply(rootId, t('cmd.cd.created_switched', { path: resolvedPath }, loc));
         } else {
