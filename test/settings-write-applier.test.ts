@@ -21,7 +21,7 @@ function makeDeps(overrides: Partial<SettingsWriteApplierDeps> = {}): SettingsWr
     enableLocalCliOpen: false,
     localCliOpenMode: 'attach',
     chatBotDiscovery: true,
-    herdrTraexPlugin: { enabled: false, spec: '' },
+    herdrTraexPlugin: { enabled: false, source: '', ref: '', recommendedSource: '', recommendedRef: '' },
     vcMeetingAgent: { enabled: true },
     maintenance: {},
     localDevInstall: false,
@@ -92,12 +92,14 @@ describe('applySettingsWrite happy paths', () => {
     expect(deps.mergeDashboardConfig).toHaveBeenCalledWith({ chatBotDiscovery: false });
   });
 
-  it('writes herdrTraexPlugin opt-in and trims spec through the dashboard segment', async () => {
+  it('writes herdrTraexPlugin opt-in and trims source/ref through the dashboard segment', async () => {
     const deps = makeDeps();
-    const r = await applySettingsWrite({ herdrTraexPlugin: { enabled: true, spec: ' owner/repo#tag ' } }, deps);
+    const r = await applySettingsWrite({
+      herdrTraexPlugin: { enabled: true, source: ' owner/repo/subdir ', ref: ' reviewed-sha ' },
+    }, deps);
     expect(r.ok).toBe(true);
     expect(deps.mergeDashboardConfig).toHaveBeenCalledWith({
-      herdrTraexPlugin: { enabled: true, spec: 'owner/repo#tag' },
+      herdrTraexPlugin: { enabled: true, source: 'owner/repo/subdir', ref: 'reviewed-sha' },
     });
   });
 
@@ -195,10 +197,25 @@ describe('applySettingsWrite — validation errors', () => {
     if (r2.ok) throw new Error('expected failure');
     expect(r2.error).toBe('invalid_herdrTraexPlugin_enabled');
 
-    const r3 = await applySettingsWrite({ herdrTraexPlugin: { spec: 42 } }, deps);
+    const r3 = await applySettingsWrite({ herdrTraexPlugin: { source: 42 } }, deps);
     expect(r3.ok).toBe(false);
     if (r3.ok) throw new Error('expected failure');
-    expect(r3.error).toBe('invalid_herdrTraexPlugin_spec');
+    expect(r3.error).toBe('invalid_herdrTraexPlugin_source');
+
+    const r4 = await applySettingsWrite({ herdrTraexPlugin: { ref: 42 } }, deps);
+    expect(r4.ok).toBe(false);
+    if (r4.ok) throw new Error('expected failure');
+    expect(r4.error).toBe('invalid_herdrTraexPlugin_ref');
+
+    const r5 = await applySettingsWrite({ herdrTraexPlugin: { source: '--ref evil' } }, deps);
+    expect(r5.ok).toBe(false);
+    if (r5.ok) throw new Error('expected failure');
+    expect(r5.error).toBe('invalid_herdrTraexPlugin_source');
+
+    const r6 = await applySettingsWrite({ herdrTraexPlugin: { ref: '--yes' } }, deps);
+    expect(r6.ok).toBe(false);
+    if (r6.ok) throw new Error('expected failure');
+    expect(r6.error).toBe('invalid_herdrTraexPlugin_ref');
   });
 
   it('rejects non-boolean openTerminalInFeishu → invalid_openTerminalInFeishu', async () => {

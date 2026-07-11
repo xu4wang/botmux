@@ -14,7 +14,13 @@ interface DashboardSettings {
   enableLocalCliOpen: boolean;
   localCliOpenMode: 'attach' | 'resume';
   chatBotDiscovery: boolean;
-  herdrTraexPlugin: { enabled: boolean; spec: string; recommendedSpec: string };
+  herdrTraexPlugin: {
+    enabled: boolean;
+    source: string;
+    ref: string;
+    recommendedSource: string;
+    recommendedRef: string;
+  };
   vcMeetingAgent: {
     enabled: boolean;
     listenerBotAppId: string | null;
@@ -74,7 +80,11 @@ function traexInstallMessage(install: any, tr: (k: string) => string): StatusMes
       : tr('settings.herdrTraexInstallStepAction');
     return { text: `${tr('settings.herdrTraexInstallFailed')}（${step}）: ${install.failed.reason ?? ''}`, cls: 'hint-warn-inline' };
   }
-  if (install.installed) return { text: tr('settings.herdrTraexInstalled'), cls: 'hint-ok' };
+  if (install.skippedReason === 'plugin_unsupported') {
+    const version = typeof install.herdrVersion === 'string' && install.herdrVersion ? ` (${install.herdrVersion})` : '';
+    return { text: `${tr('settings.herdrTraexUnsupported')}${version}`, cls: 'hint-warn-inline' };
+  }
+  if (install.installed || install.actionInvoked) return { text: tr('settings.herdrTraexInstalled'), cls: 'hint-ok' };
   if (install.alreadyInstalled) return { text: tr('settings.herdrTraexAlreadyInstalled'), cls: 'hint-ok' };
   return null;
 }
@@ -88,8 +98,10 @@ function parseSettings(s: any): DashboardSettings {
     chatBotDiscovery: s?.chatBotDiscovery !== false,
     herdrTraexPlugin: {
       enabled: s?.herdrTraexPlugin?.enabled === true,
-      spec: typeof s?.herdrTraexPlugin?.spec === 'string' ? s.herdrTraexPlugin.spec : '',
-      recommendedSpec: typeof s?.herdrTraexPlugin?.recommendedSpec === 'string' ? s.herdrTraexPlugin.recommendedSpec : '',
+      source: typeof s?.herdrTraexPlugin?.source === 'string' ? s.herdrTraexPlugin.source : '',
+      ref: typeof s?.herdrTraexPlugin?.ref === 'string' ? s.herdrTraexPlugin.ref : '',
+      recommendedSource: typeof s?.herdrTraexPlugin?.recommendedSource === 'string' ? s.herdrTraexPlugin.recommendedSource : '',
+      recommendedRef: typeof s?.herdrTraexPlugin?.recommendedRef === 'string' ? s.herdrTraexPlugin.recommendedRef : '',
     },
     vcMeetingAgent: {
       enabled: s?.vcMeetingAgent?.enabled !== false,
@@ -260,8 +272,30 @@ function SettingsPage() {
       setSettingsMsg(traexMsg ?? { text: tr('settings.saved'), cls: 'hint-ok' });
     } catch (e) {
       if (!mountedRef.current) return;
-      setSettings(before);
-      setSettingsMsg({ text: `${tr('settings.saveFailed')}: ${e instanceof Error ? e.message : String(e)}`, cls: 'hint-warn-inline' });
+      // The PUT may have committed before a proxy/browser timeout dropped its
+      // response (TraeX installation can legitimately take minutes). Re-read
+      // the server before deciding whether to roll back the optimistic state.
+      let reconciled = false;
+      try {
+        const confirmedResponse = await fetch('/api/settings');
+        const confirmedBody = await confirmedResponse.json().catch(() => ({}));
+        if (mountedRef.current && confirmedResponse.ok && confirmedBody?.settings) {
+          const confirmed = parseSettings(confirmedBody.settings);
+          setSettings(confirmed);
+          ui.publicReadOnly = confirmed.publicReadOnly;
+          store.setScheduleTimeZone(confirmed.effectiveScheduleTimeZone);
+          reconciled = true;
+        }
+      } catch { /* still offline: fall back to the pre-save snapshot */ }
+      if (!mountedRef.current) return;
+      if (!reconciled) setSettings(before);
+      const detail = e instanceof Error ? e.message : String(e);
+      setSettingsMsg({
+        text: reconciled
+          ? `${tr('settings.saveReconciled')}: ${detail}`
+          : `${tr('settings.saveFailed')}: ${detail}`,
+        cls: 'hint-warn-inline',
+      });
     } finally {
       if (mountedRef.current) setSavingKey(null);
     }
@@ -465,8 +499,8 @@ function SettingsBody(props: {
   const saveBoolean = (key: 'publicReadOnly' | 'openTerminalInFeishu' | 'enableLocalCliOpen' | 'chatBotDiscovery' | 'remoteAccess', value: boolean) => {
     void props.onSave(key, { [key]: value }, s => ({ ...s, [key]: value }));
   };
-  const saveHerdrTraexPlugin = (patch: Partial<DashboardSettings['herdrTraexPlugin']>) => {
-    void props.onSave(
+  const saveHerdrTraexPlugin = (patch: Partial<Pick<DashboardSettings['herdrTraexPlugin'], 'enabled' | 'source' | 'ref'>>) => {
+    return props.onSave(
       'herdrTraexPlugin',
       { herdrTraexPlugin: patch },
       s => ({ ...s, herdrTraexPlugin: { ...s.herdrTraexPlugin, ...patch } }),
@@ -566,34 +600,11 @@ function SettingsBody(props: {
             onChange={value => saveHerdrTraexPlugin({ enabled: value })}
           />
           {settings.herdrTraexPlugin.enabled ? (
-            <div className="settings-subfield">
-              <div className="settings-field-row">
-                <FieldTitle help={tr('settings.herdrTraexPluginSpecHelp')}>{tr('settings.herdrTraexPluginSpec')}</FieldTitle>
-                <SpecInput
-                  value={settings.herdrTraexPlugin.spec}
-                  placeholder={tr('settings.herdrTraexPluginSpecPlaceholder')}
-                  disabled={dis || savingKey === 'herdrTraexPlugin'}
-                  onCommit={spec => saveHerdrTraexPlugin({ spec })}
-                />
-              </div>
-              {settings.herdrTraexPlugin.spec.trim() ? null : (
-                <p className="hint-warn-inline settings-subfield-hint">{tr('settings.herdrTraexPluginSpecRequired')}</p>
-              )}
-              {settings.herdrTraexPlugin.recommendedSpec
-                && settings.herdrTraexPlugin.spec.trim() !== settings.herdrTraexPlugin.recommendedSpec ? (
-                  <p className="settings-subfield-hint">
-                    {tr('settings.herdrTraexPluginRecommended')}{' '}
-                    <button
-                      type="button"
-                      className="settings-inline-link"
-                      disabled={dis || savingKey === 'herdrTraexPlugin'}
-                      onClick={() => saveHerdrTraexPlugin({ spec: settings.herdrTraexPlugin.recommendedSpec })}
-                    >
-                      {settings.herdrTraexPlugin.recommendedSpec}
-                    </button>
-                  </p>
-                ) : null}
-            </div>
+            <TraexPluginEditor
+              value={settings.herdrTraexPlugin}
+              disabled={dis || savingKey === 'herdrTraexPlugin'}
+              onSave={patch => saveHerdrTraexPlugin(patch)}
+            />
           ) : null}
         </SettingsBlock>
         <SettingsBlock title={tr('settings.sectionWhiteboard')}>
@@ -867,35 +878,84 @@ function ToggleRow(props: {
   );
 }
 
-/** Free-text input that commits on blur / Enter (not per keystroke) with an
- *  unchanged-guard. Avoids firing a PUT — and disabling the field mid-type — on
- *  every character; mirrors the timezone field's commit model. */
-function SpecInput(props: { value: string; placeholder: string; disabled: boolean; onCommit(value: string): void }) {
-  const [draft, setDraft] = useState(props.value);
-  const synced = useRef(props.value);
+function TraexPluginEditor(props: {
+  value: DashboardSettings['herdrTraexPlugin'];
+  disabled: boolean;
+  onSave(patch: { source: string; ref: string }): Promise<void>;
+}) {
+  const tr = useT();
+  const [source, setSource] = useState(props.value.source);
+  const [ref, setRef] = useState(props.value.ref);
   useEffect(() => {
-    if (props.value !== synced.current) {
-      synced.current = props.value;
-      setDraft(props.value);
-    }
-  }, [props.value]);
-  const commit = () => {
-    const next = draft.trim();
-    if (next === props.value.trim()) return; // unchanged — skip the PUT
-    synced.current = next;
-    props.onCommit(next);
+    setSource(props.value.source);
+    setRef(props.value.ref);
+  }, [props.value.source, props.value.ref]);
+
+  const normalizedSource = source.trim();
+  const normalizedRef = ref.trim();
+  const dirty = normalizedSource !== props.value.source.trim() || normalizedRef !== props.value.ref.trim();
+  const submit = () => {
+    if (props.disabled || !dirty) return;
+    void props.onSave({ source: normalizedSource, ref: normalizedRef });
   };
+
   return (
-    <input
-      className="settings-text-input"
-      type="text"
-      value={draft}
-      placeholder={props.placeholder}
-      disabled={props.disabled}
-      onChange={e => setDraft(e.currentTarget.value)}
-      onBlur={commit}
-      onKeyDown={e => { if (e.key === 'Enter') { e.preventDefault(); e.currentTarget.blur(); } }}
-    />
+    <div className="settings-subfield">
+      <div className="settings-field-row">
+        <FieldTitle help={tr('settings.herdrTraexPluginSourceHelp')}>{tr('settings.herdrTraexPluginSource')}</FieldTitle>
+        <input
+          className="settings-text-input"
+          type="text"
+          value={source}
+          placeholder={tr('settings.herdrTraexPluginSourcePlaceholder')}
+          disabled={props.disabled}
+          onChange={event => setSource(event.currentTarget.value)}
+          onKeyDown={event => { if (event.key === 'Enter') { event.preventDefault(); submit(); } }}
+        />
+      </div>
+      <div className="settings-field-row">
+        <FieldTitle help={tr('settings.herdrTraexPluginRefHelp')}>{tr('settings.herdrTraexPluginRef')}</FieldTitle>
+        <input
+          className="settings-text-input"
+          type="text"
+          value={ref}
+          placeholder={tr('settings.herdrTraexPluginRefPlaceholder')}
+          disabled={props.disabled}
+          onChange={event => setRef(event.currentTarget.value)}
+          onKeyDown={event => { if (event.key === 'Enter') { event.preventDefault(); submit(); } }}
+        />
+      </div>
+      {normalizedSource ? null : (
+        <p className="hint-warn-inline settings-subfield-hint">{tr('settings.herdrTraexPluginSourceRequired')}</p>
+      )}
+      {props.value.recommendedSource
+        && (normalizedSource !== props.value.recommendedSource || normalizedRef !== props.value.recommendedRef) ? (
+          <p className="settings-subfield-hint">
+            {tr('settings.herdrTraexPluginRecommended')}{' '}
+            <button
+              type="button"
+              className="settings-inline-link"
+              disabled={props.disabled}
+              onClick={() => {
+                setSource(props.value.recommendedSource);
+                setRef(props.value.recommendedRef);
+              }}
+            >
+              {props.value.recommendedSource}{props.value.recommendedRef ? ` @ ${props.value.recommendedRef}` : ''}
+            </button>
+          </p>
+        ) : null}
+      <div className="actions">
+        <button
+          type="button"
+          className="page-primary-action"
+          disabled={props.disabled || !dirty}
+          onClick={submit}
+        >
+          {tr('settings.herdrTraexPluginSave')}
+        </button>
+      </div>
+    </div>
   );
 }
 

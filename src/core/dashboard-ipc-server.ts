@@ -14,6 +14,7 @@ import * as oncallStore from '../services/oncall-store.js';
 import * as brandStore from '../services/brand-store.js';
 import * as sandboxStore from '../services/sandbox-store.js';
 import * as backendTypeStore from '../services/backend-type-store.js';
+import { ensureBackendAvailable } from '../services/backend-availability.js';
 import type { BackendType } from '../adapters/backend/types.js';
 import * as cardPrefsStore from '../services/card-prefs-store.js';
 import * as substituteModeStore from '../services/substitute-mode-store.js';
@@ -2079,9 +2080,20 @@ ipcRoute('PUT', '/api/bot-backend-type', async (req, res) => {
   if (raw == null || raw === '' || raw === 'auto') next = null;
   else if (backendTypeStore.isEditableBackendType(raw)) next = raw;
   else return jsonRes(res, 400, { ok: false, error: 'invalid_backendType' });
+  const effectiveBackendType = next ?? config.daemon.backendType;
+  const availability = await ensureBackendAvailable(effectiveBackendType);
+  if (!availability.ok) {
+    return jsonRes(res, 409, {
+      ok: false,
+      error: 'backend_unavailable',
+      backendType: effectiveBackendType,
+      reason: availability.reason,
+      manualCommand: availability.manualCommand,
+    });
+  }
   const r = await backendTypeStore.updateBotBackendType(cachedLarkAppId, next);
   if (!r.ok) return jsonRes(res, 400, { ok: false, error: r.reason });
-  jsonRes(res, 200, { ok: true, backendType: r.backendType });
+  jsonRes(res, 200, { ok: true, backendType: r.backendType, effectiveBackendType, version: availability.version });
 });
 
 // 实时切换 UI 语言（locale），无需重启 daemon。`botmux lang` / Dashboard 语言开关

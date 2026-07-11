@@ -61,7 +61,8 @@ export interface ChatBotDiscoveryConfig {
 
 export interface HerdrTraexPluginRuntimeConfig {
   enabled: boolean;
-  spec: string;
+  source: string;
+  ref: string;
 }
 
 /**
@@ -91,8 +92,8 @@ export function resolveChatBotDiscoveryConfig(env: NodeJS.ProcessEnv = process.e
 /**
  * TraeX ↔ herdr plugin bootstrap is a machine-wide opt-in because the plugin
  * writes host-level `~/.trae` hooks. There is intentionally no default plugin
- * source in botmux; operators must provide a spec they trust (preferably pinned)
- * via dashboard Settings or env.
+ * source in botmux; operators provide a `source` (owner/repo[/subdir]) they trust
+ * plus an optional pinned `ref` (tag/branch/SHA) via dashboard Settings or env.
  */
 export function resolveHerdrTraexPluginConfig(env: NodeJS.ProcessEnv = process.env): HerdrTraexPluginRuntimeConfig {
   const envEnabled = env.BOTMUX_HERDR_TRAEX_PLUGIN_ENABLED;
@@ -100,8 +101,16 @@ export function resolveHerdrTraexPluginConfig(env: NodeJS.ProcessEnv = process.e
   const enabled = envEnabled != null && envEnabled !== ''
     ? envEnabled.toLowerCase() === 'true'
     : dashboardCfg?.enabled === true; // default OFF
-  const spec = (env.BOTMUX_HERDR_TRAEX_PLUGIN_SPEC ?? dashboardCfg?.spec ?? '').trim();
-  return { enabled, spec };
+  // One-cycle compatibility for review deployments of the old `spec` schema.
+  // `owner/repo#ref` was never valid herdr argv; split it into the real fields.
+  const legacySpec = (env.BOTMUX_HERDR_TRAEX_PLUGIN_SPEC ?? '').trim();
+  const legacyHash = legacySpec.lastIndexOf('#');
+  const legacySource = legacyHash > 0 ? legacySpec.slice(0, legacyHash) : legacySpec;
+  const legacyRef = legacyHash > 0 ? legacySpec.slice(legacyHash + 1) : '';
+  const usesLegacySpec = env.BOTMUX_HERDR_TRAEX_PLUGIN_SOURCE == null && !!legacySource;
+  const source = (env.BOTMUX_HERDR_TRAEX_PLUGIN_SOURCE ?? (legacySource || dashboardCfg?.source) ?? '').trim();
+  const ref = (env.BOTMUX_HERDR_TRAEX_PLUGIN_REF ?? (usesLegacySpec ? legacyRef : dashboardCfg?.ref) ?? '').trim();
+  return { enabled, source, ref };
 }
 
 /** Machine-wide VC meeting listener kill-switch.

@@ -116,7 +116,7 @@ import { cleanupIdleSessions, parseIdleCleanupHours } from './dashboard/session-
 import { aggregateRoleBatch, parseRoleBatchTargets } from './dashboard/roles-batch.js';
 import { automateOpenPlatformSetup } from './setup/open-platform-automation.js';
 import { VC_MEETING_FEATURE_SCOPES, VC_MEETING_REALTIME_VOICE_SCOPES } from './setup/verify-permissions.js';
-import { maybeInstallTraexPluginOnSettingsChange, TRAEX_RECOMMENDED_SPEC } from './setup/ensure-herdr-integrations.js';
+import { maybeInstallTraexPluginOnSettingsChange, TRAEX_RECOMMENDED_SOURCE, TRAEX_RECOMMENDED_REF } from './setup/ensure-herdr-integrations.js';
 import { checkLarkCliVersion, MIN_LARK_CLI_VERSION_FOR_VC_BOT } from './vc-agent/polling-source.js';
 import { larkHosts } from './im/lark/lark-hosts.js';
 import { buildResourceMonitorDaemonSeeds, createResourceMonitorService, handleResourceMonitorApi, toResourceMonitorSessionSeed } from './dashboard/resource-monitor-service.js';
@@ -315,9 +315,9 @@ interface ResolvedDashboardSettings {
   /** Experimental current-chat bot discovery via Lark `/members/bots`. Default ON. */
   chatBotDiscovery: boolean;
   /** Machine-wide opt-in TraeX herdr plugin bootstrap. Default OFF.
-   *  `recommendedSpec` is a non-default, author-recommended source the SPA can
-   *  offer as a one-click fill; it is never persisted unless the operator picks it. */
-  herdrTraexPlugin: { enabled: boolean; spec: string; recommendedSpec: string };
+   *  `recommendedSource`/`recommendedRef` are a non-default, author-recommended
+   *  source the SPA can offer as a one-click fill; never persisted unless picked. */
+  herdrTraexPlugin: { enabled: boolean; source: string; ref: string; recommendedSource: string; recommendedRef: string };
   /** Machine-wide VC meeting listener kill-switch. Default ON. */
   vcMeetingAgent: {
     enabled: boolean;
@@ -718,8 +718,10 @@ function resolveDashboardSettings(): ResolvedDashboardSettings {
     chatBotDiscovery: dashboard.chatBotDiscovery !== false, // default ON
     herdrTraexPlugin: {
       enabled: dashboard.herdrTraexPlugin?.enabled === true,
-      spec: dashboard.herdrTraexPlugin?.spec ?? '',
-      recommendedSpec: TRAEX_RECOMMENDED_SPEC,
+      source: dashboard.herdrTraexPlugin?.source ?? '',
+      ref: dashboard.herdrTraexPlugin?.ref ?? '',
+      recommendedSource: TRAEX_RECOMMENDED_SOURCE,
+      recommendedRef: TRAEX_RECOMMENDED_REF,
     },
     vcMeetingAgent: {
       enabled: global.vcMeetingAgent?.enabled !== false,

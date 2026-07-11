@@ -130,8 +130,10 @@ export interface MaintenanceToggle {
 
 export interface HerdrTraexPluginConfig {
   enabled?: boolean;
-  /** herdr plugin spec, e.g. owner/repo or a pinned source accepted by `herdr plugin install`. */
-  spec?: string;
+  /** herdr plugin source: `owner/repo[/subdir]` passed to `herdr plugin install`. */
+  source?: string;
+  /** Optional git ref (tag / branch / commit SHA) → `--ref`. Prefer a pinned SHA. */
+  ref?: string;
 }
 
 export interface DashboardGlobalConfig {
@@ -159,7 +161,7 @@ export interface DashboardGlobalConfig {
   /** Installed plugin Dashboard pages pinned into the main sidebar. This is a
    *  machine-wide display preference and does not enable the plugin for a Bot. */
   pinnedPlugins?: string[];
-  /** Opt-in TraeX herdr plugin bootstrap. Default OFF; spec is operator-supplied. */
+  /** Opt-in TraeX herdr plugin bootstrap. Default OFF; source/ref are operator-supplied. */
   herdrTraexPlugin?: HerdrTraexPluginConfig;
 }
 
@@ -260,7 +262,15 @@ function readHerdrTraexPlugin(raw: unknown): HerdrTraexPluginConfig | undefined 
   const r = raw as Record<string, unknown>;
   const out: HerdrTraexPluginConfig = {};
   if (typeof r.enabled === 'boolean') out.enabled = r.enabled;
-  if (typeof r.spec === 'string' && r.spec.trim()) out.spec = r.spec.trim();
+  if (typeof r.source === 'string' && r.source.trim()) out.source = r.source.trim();
+  if (typeof r.ref === 'string' && r.ref.trim()) out.ref = r.ref.trim();
+  // Migrate the unmerged review schema in-memory without rewriting config.json.
+  if (!out.source && typeof r.spec === 'string' && r.spec.trim()) {
+    const legacy = r.spec.trim();
+    const hash = legacy.lastIndexOf('#');
+    out.source = hash > 0 ? legacy.slice(0, hash) : legacy;
+    if (!out.ref && hash > 0 && hash < legacy.length - 1) out.ref = legacy.slice(hash + 1);
+  }
   return Object.keys(out).length > 0 ? out : undefined;
 }
 

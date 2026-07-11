@@ -9,15 +9,20 @@
  * https://herdr.dev/docs/integrations/ (claude/codex/opencode/hermes are
  * the ones with botmux adapter equivalents). TraeX is not built into herdr
  * upstream yet; optional TraeX plugin bootstrap is dashboard/env opt-in and
- * uses an operator-supplied plugin spec. The `pi`, `omp`, `qodercli` upstream
+ * uses operator-supplied plugin source/ref fields. The `pi`, `omp`, `qodercli` upstream
  * integrations have no botmux adapter and are not auto-installed.
  *
  * Like ensureTmux/ensureHerdr, this never throws — failures only generate
  * warnings. The caller decides whether to surface them.
  */
 import { execSync, spawn, spawnSync } from 'node:child_process';
+import { mkdirSync, readFileSync } from 'node:fs';
+import { homedir } from 'node:os';
+import { dirname, join } from 'node:path';
 import type { CliId } from '../adapters/cli/types.js';
 import { resolveHerdrTraexPluginConfig } from '../config.js';
+import { withFileLock } from '../utils/file-lock.js';
+import { atomicWriteFileSync } from '../utils/atomic-write.js';
 
 /**
  * Map botmux CliId → herdr integration name. CLIs with no upstream
@@ -35,18 +40,93 @@ const CLI_TO_HERDR_INTEGRATION: Partial<Record<CliId, string>> = {
 
 const TRAEX_PLUGIN_ID = 'com.traex.herdr-integration';
 
-function traexPluginInstallCommand(spec: string): string {
-  return `herdr plugin install ${spec} --yes && herdr plugin action invoke ${TRAEX_PLUGIN_ID}.install`;
-}
+const TRAEX_INSTALL_LOCK_WAIT_MS = 200_000;
 
 /**
- * Author-recommended community plugin source for the TraeX↔herdr integration.
- * Surfaced in the dashboard ONLY as a one-click suggestion the operator must
- * actively select — it is NEVER a silent default and is NEVER auto-installed.
- * botmux ships no default `spec`; operators should verify (and preferably pin)
- * the source before enabling it. Empty string ⇒ no recommendation offered.
+ * Author-recommended plugin source, surfaced in the dashboard ONLY as a one-click
+ * suggestion the operator must actively select (never a silent default / auto-install).
+ *
+ * Intentionally EMPTY this round: the only known community TraeX plugin's
+ * `scripts/install.sh` uses BSD `sed -i ''` and fails on Linux (the daemon's own
+ * platform), so a one-click default would action-fail. Re-populate with a
+ * `{source, ref: <verified commit SHA>}` (NOT a branch — avoid drift) once upstream
+ * install.sh is fixed and validated on herdr 0.7.3 / Linux.
  */
-export const TRAEX_RECOMMENDED_SPEC = 'Phoobobo/herdr-traex-integration';
+export const TRAEX_RECOMMENDED_SOURCE = '';
+export const TRAEX_RECOMMENDED_REF = '';
+
+function traexMarkerPath(): string {
+  return join(homedir(), '.botmux', 'state', 'herdr-traex-plugin.json');
+}
+
+function traexPluginInstallCommand(source: string, ref: string): string {
+  const install = `herdr plugin install ${source}${ref ? ` --ref ${ref}` : ''} --yes`;
+  return `${install} && herdr plugin action invoke ${TRAEX_PLUGIN_ID}.install`;
+}
+
+/** botmux-owned marker recording the last (source, ref) whose install action
+ *  fully completed, keyed by herdr's authoritative resolved_commit. Lives in
+ *  ~/.botmux/state (NOT the desired config) so a failed action leaves no marker
+ *  and simply retries next time, while a source/ref change forces
+ *  a re-run — without needlessly re-cloning when nothing changed. */
+interface TraexMarker { source: string; ref: string; resolvedCommit: string; actionInvokedAt: string; }
+
+function readTraexMarker(): TraexMarker | undefined {
+  try {
+    const m = JSON.parse(readFileSync(traexMarkerPath(), 'utf-8'));
+    return m && typeof m === 'object' && typeof m.resolvedCommit === 'string' ? m as TraexMarker : undefined;
+  } catch { return undefined; }
+}
+
+function writeTraexMarker(m: TraexMarker): void {
+  const p = traexMarkerPath();
+  mkdirSync(dirname(p), { recursive: true });
+  atomicWriteFileSync(p, JSON.stringify(m, null, 2), { mode: 0o600 });
+}
+
+/** Capability probe: herdr < 0.7.0 has no `plugin` subcommand (`herdr plugin
+ *  --help` exits non-zero). Returns the current version for the operator hint. */
+function probeHerdrVersion(): string | undefined {
+  try {
+    const out = execSync('herdr --version', { stdio: ['ignore', 'pipe', 'pipe'], timeout: 5000, encoding: 'utf-8' });
+    const m = out.match(/(\d+\.\d+\.\d+)/);
+    return m ? m[1] : out.trim() || undefined;
+  } catch { return undefined; }
+}
+
+function herdrSupportsPlugins(): { ok: true } | { ok: false; version?: string } {
+  const probe = spawnSync('herdr', ['plugin', '--help'], { stdio: ['ignore', 'pipe', 'pipe'], timeout: 5000, encoding: 'utf-8' });
+  if (probe.status === 0) return { ok: true };
+  return { ok: false, version: probeHerdrVersion() };
+}
+
+interface TraexPluginState { present: boolean; source?: string; requestedRef?: string; resolvedCommit?: string; }
+
+/** Read the traex plugin's authoritative source metadata from herdr 0.7.x
+ *  `plugin list --json` (`source.owner/repo[/subdir]`, `requested_ref`,
+ *  `resolved_commit`). Never throws. */
+async function getTraexPluginState(): Promise<TraexPluginState> {
+  const result = await spawnHerdrAsync(['plugin', 'list', '--json'], 5000);
+  if (!result.ok) return { present: false };
+  try {
+    const plugins = pluginsArrayFromJson(JSON.parse(result.stdout));
+    if (!plugins) return { present: result.stdout.includes(TRAEX_PLUGIN_ID) };
+    const p = plugins.find((x: any) => x?.plugin_id === TRAEX_PLUGIN_ID || x?.id === TRAEX_PLUGIN_ID || x?.name === TRAEX_PLUGIN_ID);
+    if (!p) return { present: false };
+    const src = (p.source && typeof p.source === 'object') ? p.source : {};
+    const source = src.owner && src.repo
+      ? `${src.owner}/${src.repo}${src.subdir ? `/${src.subdir}` : ''}`
+      : (typeof p.source === 'string' ? p.source : undefined);
+    return {
+      present: true,
+      source,
+      requestedRef: src.requested_ref ?? p.requested_ref,
+      resolvedCommit: src.resolved_commit ?? p.resolved_commit,
+    };
+  } catch {
+    return { present: result.stdout.includes(TRAEX_PLUGIN_ID) };
+  }
+}
 
 export interface HerdrIntegrationResult {
   /** Integrations we attempted (after dedup + filtering by available CLIs). */
@@ -61,11 +141,14 @@ export interface HerdrIntegrationResult {
   traexPlugin?: {
     attempted: boolean;
     enabled: boolean;
-    spec?: string;
+    source?: string;
+    ref?: string;
     installed: boolean;
     alreadyInstalled: boolean;
     actionInvoked: boolean;
-    skippedReason?: 'disabled' | 'missing_spec';
+    skippedReason?: 'disabled' | 'missing_source' | 'plugin_unsupported';
+    /** Current herdr version, set when skippedReason === 'plugin_unsupported'. */
+    herdrVersion?: string;
     failed?: { step: 'install' | 'action'; reason: string; manualCommand: string };
   };
   /** CliIds in bots.json that have no upstream herdr integration mapping. */
@@ -135,29 +218,40 @@ function installSingleIntegration(name: string): { ok: true } | { ok: false; rea
  * `herdr plugin install`. Never rejects — resolves an ok/err discriminated
  * union just like `spawnHerdr`.
  */
-function spawnHerdrAsync(args: string[], timeout = 60_000): Promise<{ ok: true; stdout: string } | { ok: false; reason: string; stdout: string }> {
+export function spawnHerdrAsync(args: string[], timeout = 60_000): Promise<{ ok: true; stdout: string } | { ok: false; reason: string; stdout: string }> {
   return new Promise((resolve) => {
     let stdout = '';
     let stderr = '';
     let settled = false;
-    const done = (r: { ok: true; stdout: string } | { ok: false; reason: string; stdout: string }) => {
+    let timedOut = false;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    let grace: ReturnType<typeof setTimeout> | undefined;
+    const finish = (r: { ok: true; stdout: string } | { ok: false; reason: string; stdout: string }) => {
       if (settled) return;
       settled = true;
-      clearTimeout(timer);
+      if (timer) clearTimeout(timer);
+      if (grace) clearTimeout(grace);
       resolve(r);
     };
-    const child = spawn('herdr', args, { stdio: ['ignore', 'pipe', 'pipe'] });
-    const timer = setTimeout(() => {
-      try { child.kill('SIGKILL'); } catch { /* already gone */ }
-      done({ ok: false, reason: `timeout after ${timeout}ms`, stdout: stdout.trim() });
+    // detached: the child leads its own process group, so on timeout we SIGKILL the
+    // WHOLE group (herdr + any git/npm/install-script it spawned) rather than just the
+    // direct child — which could otherwise keep writing the plugin dir / ~/.trae in the
+    // background and race a retry. POSIX only; Windows would need a different teardown.
+    const child = spawn('herdr', args, { stdio: ['ignore', 'pipe', 'pipe'], detached: true });
+    timer = setTimeout(() => {
+      timedOut = true;
+      try { if (child.pid) process.kill(-child.pid, 'SIGKILL'); } catch { try { child.kill('SIGKILL'); } catch { /* gone */ } }
+      // Settle on 'close' (group reaped); bound the wait so a wedged group can't hang us.
+      grace = setTimeout(() => finish({ ok: false, reason: `timeout after ${timeout}ms`, stdout: stdout.trim() }), 3000);
     }, timeout);
     child.stdout?.on('data', (d) => { stdout += d.toString(); });
     child.stderr?.on('data', (d) => { stderr += d.toString(); });
-    child.on('error', (err) => done({ ok: false, reason: String((err as any)?.message ?? err), stdout: stdout.trim() }));
+    child.on('error', (err) => finish({ ok: false, reason: String((err as any)?.message ?? err), stdout: stdout.trim() }));
     child.on('close', (code) => {
       const out = stdout.trim();
-      if (code === 0) return done({ ok: true, stdout: out });
-      done({ ok: false, reason: stderr.trim() || out || `exit ${code}`, stdout: out });
+      if (timedOut) return finish({ ok: false, reason: `timeout after ${timeout}ms`, stdout: out });
+      if (code === 0) return finish({ ok: true, stdout: out });
+      finish({ ok: false, reason: stderr.trim() || out || `exit ${code}`, stdout: out });
     });
   });
 }
@@ -170,93 +264,149 @@ function pluginsArrayFromJson(parsed: any): any[] | undefined {
   return undefined;
 }
 
-async function isTraexPluginInstalled(): Promise<boolean> {
-  const result = await spawnHerdrAsync(['plugin', 'list', '--json'], 5000);
-  if (!result.ok) return false;
-  try {
-    const parsed = JSON.parse(result.stdout);
-    const plugins = pluginsArrayFromJson(parsed);
-    if (plugins) {
-      return plugins.some((p: any) =>
-        p?.plugin_id === TRAEX_PLUGIN_ID || p?.id === TRAEX_PLUGIN_ID || p?.name === TRAEX_PLUGIN_ID,
-      );
-    }
-    return result.stdout.includes(TRAEX_PLUGIN_ID);
-  } catch {
-    return result.stdout.includes(TRAEX_PLUGIN_ID);
-  }
-}
-
 /**
- * Install/verify the TraeX herdr plugin for an already-resolved, non-empty
- * operator-supplied spec. Async so it can run both at startup (awaited by
+ * Install / update / verify the TraeX herdr plugin for an operator-supplied
+ * (source, ref). Async so it runs both at startup (awaited by
  * ensureHerdrIntegrations) and live from the dashboard settings-write handler.
- * Idempotent: if the plugin is already installed we skip both the install and
- * the install action (never re-runs the ~/.trae hook writer on every call).
+ *
+ * Correct idempotency (herdr 0.7.x): plugin-ID presence alone is NOT "done" —
+ *  - needsInstall = plugin absent OR its herdr `source`/`requested_ref` metadata
+ *    differs from the desired (source, ref) → `plugin install` (herdr `replaces:`
+ *    and re-checks out on a changed ref/source);
+ *  - needsAction = our own success marker is missing or points at a different
+ *    `resolved_commit` → re-run the install action. A prior action failure leaves
+ *    NO marker, so we retry the action next time WITHOUT a needless re-clone.
+ * The whole check→install→action→marker sequence runs under a cross-process file
+ * lock so concurrent triggers (two tabs, or a dashboard PUT racing startup) can't
+ * double-clone the repo or double-write ~/.trae hooks.
  */
-export async function installTraexPluginNow(spec: string): Promise<NonNullable<HerdrIntegrationResult['traexPlugin']>> {
-  const trimmed = spec.trim();
-  if (!trimmed) {
-    return { attempted: false, enabled: true, installed: false, alreadyInstalled: false, actionInvoked: false, skippedReason: 'missing_spec' };
-  }
+export async function installTraexPluginNow(source: string, ref: string): Promise<NonNullable<HerdrIntegrationResult['traexPlugin']>> {
+  const src = source.trim();
+  const rf = ref.trim();
+  const base = { attempted: false, enabled: true, source: src || undefined, ref: rf || undefined, installed: false, alreadyInstalled: false, actionInvoked: false };
 
-  const manualCommand = traexPluginInstallCommand(trimmed);
-  const alreadyInstalled = await isTraexPluginInstalled();
-  if (alreadyInstalled) {
-    return { attempted: true, enabled: true, spec: trimmed, installed: false, alreadyInstalled: true, actionInvoked: false };
-  }
+  if (!src) return { ...base, skippedReason: 'missing_source' };
 
-  console.log(`   安装 herdr TraeX plugin: ${trimmed}`);
-  const install = await spawnHerdrAsync(['plugin', 'install', trimmed, '--yes'], 120_000);
-  if (!install.ok) {
+  // Capability gate: herdr < 0.7.0 has no `plugin` subcommand at all.
+  const cap = herdrSupportsPlugins();
+  if (!cap.ok) return { ...base, skippedReason: 'plugin_unsupported', herdrVersion: cap.version };
+
+  const manualCommand = traexPluginInstallCommand(src, rf);
+
+  try {
+    // The lock file is `<marker>.lock`; ensure the state dir exists before acquiring it.
+    mkdirSync(dirname(traexMarkerPath()), { recursive: true });
+    return await withFileLock(traexMarkerPath(), async () => {
+      const before = await getTraexPluginState();
+      // Treat missing metadata as a mismatch too. On supported herdr versions
+      // source/requested_ref are authoritative; silently accepting an unknown
+      // source would defeat the operator's trust boundary.
+      const sourceMismatch = before.present && (before.source ?? '') !== src;
+      const refMismatch = before.present && (before.requestedRef ?? '') !== rf;
+      const needsInstall = !before.present || sourceMismatch || refMismatch;
+
+      let installed = false;
+      if (needsInstall) {
+        console.log(`   安装 herdr TraeX plugin: ${src}${rf ? ` (--ref ${rf})` : ''}`);
+        const install = await spawnHerdrAsync(['plugin', 'install', src, ...(rf ? ['--ref', rf] : []), '--yes'], 120_000);
+        if (!install.ok) {
+          return { ...base, attempted: true, failed: { step: 'install' as const, reason: install.reason, manualCommand } };
+        }
+        installed = true;
+      }
+
+      // Re-list for authoritative metadata only after an install. When nothing
+      // changed, `before` is already the same snapshot and a second list would
+      // widen the race surface without adding information.
+      const after = installed ? await getTraexPluginState() : before;
+      const installedSource = after.source ?? '';
+      const installedRef = after.requestedRef ?? '';
+      if (!after.present || installedSource !== src || installedRef !== rf || !after.resolvedCommit) {
+        return {
+          ...base,
+          attempted: true,
+          installed,
+          failed: {
+            step: 'install' as const,
+            reason: `herdr 安装后元数据不匹配（source=${installedSource || '缺失'}, ref=${installedRef || '缺失'}, resolved_commit=${after.resolvedCommit || '缺失'}）`,
+            manualCommand,
+          },
+        };
+      }
+      const resolvedCommit = after.resolvedCommit ?? '';
+      const marker = readTraexMarker();
+      const actionDone = !!marker
+        && !!resolvedCommit
+        && marker.source === src
+        && marker.ref === rf
+        && marker.resolvedCommit === resolvedCommit;
+
+      let actionInvoked = false;
+      if (!actionDone) {
+        const action = await spawnHerdrAsync(['plugin', 'action', 'invoke', `${TRAEX_PLUGIN_ID}.install`], 60_000);
+        if (!action.ok) {
+          return { ...base, attempted: true, installed, failed: { step: 'action' as const, reason: action.reason, manualCommand } };
+        }
+        actionInvoked = true;
+        try {
+          writeTraexMarker({ source: src, ref: rf, resolvedCommit, actionInvokedAt: new Date().toISOString() });
+        } catch (err: any) {
+          return {
+            ...base,
+            attempted: true,
+            installed,
+            actionInvoked,
+            failed: { step: 'action' as const, reason: `hooks 已写入，但状态 marker 保存失败：${err?.message ?? err}`, manualCommand },
+          };
+        }
+      }
+
+      return { ...base, attempted: true, source: src, ref: rf || undefined, installed, actionInvoked, alreadyInstalled: !installed && !actionInvoked };
+    }, { maxWaitMs: TRAEX_INSTALL_LOCK_WAIT_MS });
+  } catch (err: any) {
     return {
-      attempted: true, enabled: true, spec: trimmed, installed: false, alreadyInstalled: false, actionInvoked: false,
-      failed: { step: 'install', reason: install.reason, manualCommand },
+      ...base,
+      attempted: true,
+      failed: {
+        step: 'install',
+        reason: `安装锁失败：${err?.message ?? err}`,
+        manualCommand,
+      },
     };
   }
-
-  const action = await spawnHerdrAsync(['plugin', 'action', 'invoke', `${TRAEX_PLUGIN_ID}.install`], 60_000);
-  if (!action.ok) {
-    return {
-      attempted: true, enabled: true, spec: trimmed, installed: true, alreadyInstalled: false, actionInvoked: false,
-      failed: { step: 'action', reason: action.reason, manualCommand },
-    };
-  }
-
-  return { attempted: true, enabled: true, spec: trimmed, installed: true, alreadyInstalled: false, actionInvoked: true };
 }
 
 /**
  * Live (dashboard) path: when a settings-write flips the TraeX plugin config,
  * install immediately instead of waiting for the next daemon restart. Returns
  * undefined (no-op) unless the write actually touched `herdrTraexPlugin` AND
- * the resolved config is enabled with a non-empty spec — so unrelated settings
- * writes never trigger an install, and enabling without a spec stays a no-op
- * (the UI surfaces the required-spec hint). `installFn` is injectable for tests.
+ * the resolved config is enabled with a non-empty `source` — so unrelated settings
+ * writes never trigger an install, and enabling without a source stays a no-op
+ * (the UI surfaces the required-source hint). `installFn` is injectable for tests.
  */
 export async function maybeInstallTraexPluginOnSettingsChange(
   patchTouchedHerdrTraex: boolean,
-  resolved: { enabled: boolean; spec: string } | undefined,
-  installFn: (spec: string) => Promise<NonNullable<HerdrIntegrationResult['traexPlugin']>> = installTraexPluginNow,
+  resolved: { enabled: boolean; source: string; ref: string } | undefined,
+  installFn: (source: string, ref: string) => Promise<NonNullable<HerdrIntegrationResult['traexPlugin']>> = installTraexPluginNow,
 ): Promise<NonNullable<HerdrIntegrationResult['traexPlugin']> | undefined> {
   if (!patchTouchedHerdrTraex) return undefined;
-  if (!resolved?.enabled || !resolved.spec.trim()) return undefined;
-  return installFn(resolved.spec);
+  if (!resolved?.enabled || !resolved.source.trim()) return undefined;
+  return installFn(resolved.source, resolved.ref);
 }
 
 /**
  * Startup path: resolve the opt-in config (default OFF + operator-supplied
- * spec, no botmux default source), then delegate to installTraexPluginNow.
+ * source/ref, no botmux default source), then delegate to installTraexPluginNow.
  */
 async function ensureTraexPlugin(): Promise<NonNullable<HerdrIntegrationResult['traexPlugin']>> {
   const cfg = resolveHerdrTraexPluginConfig();
   if (!cfg.enabled) {
     return { attempted: false, enabled: false, installed: false, alreadyInstalled: false, actionInvoked: false, skippedReason: 'disabled' };
   }
-  if (!cfg.spec) {
-    return { attempted: false, enabled: true, installed: false, alreadyInstalled: false, actionInvoked: false, skippedReason: 'missing_spec' };
+  if (!cfg.source) {
+    return { attempted: false, enabled: true, installed: false, alreadyInstalled: false, actionInvoked: false, skippedReason: 'missing_source' };
   }
-  return installTraexPluginNow(cfg.spec);
+  return installTraexPluginNow(cfg.source, cfg.ref);
 }
 
 /**

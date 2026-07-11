@@ -1,40 +1,61 @@
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { EventEmitter } from 'node:events';
-import { mkdirSync, mkdtempSync, rmSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { join } from 'node:path';
 import { tmpdir } from 'node:os';
-import { dirname, join } from 'node:path';
-import { globalConfigPath } from '../src/global-config.js';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
-// The TraeX plugin path uses async `spawn` (so install-now can run live from the
-// dashboard without blocking the daemon event loop); the official-integration
-// path still uses `spawnSync`/`execSync` (unused in these traex-only tests).
 const spawn = vi.fn();
 const spawnSync = vi.fn();
 const execSync = vi.fn();
 
 vi.mock('node:child_process', () => ({ spawn, spawnSync, execSync }));
 
-/** Fake ChildProcess that emits its configured output once listeners attach. */
-function makeChild(result: { stdout?: string; stderr?: string; code?: number; error?: Error }) {
-  const c: any = new EventEmitter();
-  c.stdout = new EventEmitter();
-  c.stderr = new EventEmitter();
-  c.kill = () => {};
-  // setImmediate fires after spawnHerdrAsync has synchronously attached its
-  // stdout/stderr/close/error listeners.
+function makeChild(result: { stdout?: string; stderr?: string; code?: number; error?: Error; pid?: number }) {
+  const child: any = new EventEmitter();
+  child.stdout = new EventEmitter();
+  child.stderr = new EventEmitter();
+  child.pid = result.pid ?? 12345;
+  child.kill = vi.fn();
   setImmediate(() => {
-    if (result.error) { c.emit('error', result.error); return; }
-    if (result.stdout != null) c.stdout.emit('data', Buffer.from(result.stdout));
-    if (result.stderr != null) c.stderr.emit('data', Buffer.from(result.stderr));
-    c.emit('close', result.code ?? 0);
+    if (result.error) {
+      child.emit('error', result.error);
+      return;
+    }
+    if (result.stdout != null) child.stdout.emit('data', Buffer.from(result.stdout));
+    if (result.stderr != null) child.stderr.emit('data', Buffer.from(result.stderr));
+    child.emit('close', result.code ?? 0);
   });
-  return c;
+  return child;
 }
 
-/** Make `spawn` return the given results in call order (last repeats). */
 function queueSpawn(...results: Array<Parameters<typeof makeChild>[0]>) {
-  let i = 0;
-  spawn.mockImplementation(() => makeChild(results[Math.min(i++, results.length - 1)] ?? { code: 0 }));
+  let index = 0;
+  spawn.mockImplementation(() => makeChild(results[Math.min(index++, results.length - 1)] ?? { code: 0 }));
+}
+
+function pluginState(
+  source = 'trusted/repo',
+  ref = 'reviewed-sha',
+  resolvedCommit = 'deadbeef',
+): { stdout: string; code: number } {
+  const [owner, repo, ...subdirParts] = source.split('/');
+  return {
+    stdout: JSON.stringify({
+      result: {
+        plugins: [{
+          plugin_id: 'com.traex.herdr-integration',
+          source: {
+            owner,
+            repo,
+            ...(subdirParts.length ? { subdir: subdirParts.join('/') } : {}),
+            ...(ref ? { requested_ref: ref } : {}),
+            resolved_commit: resolvedCommit,
+          },
+        }],
+      },
+    }),
+    code: 0,
+  };
 }
 
 const LIST_EMPTY = { stdout: '{"result":{"plugins":[]}}', code: 0 };
@@ -46,146 +67,218 @@ async function loadSubject() {
   return import('../src/setup/ensure-herdr-integrations.js');
 }
 
-describe('ensureHerdrIntegrations TraeX plugin opt-in', () => {
+describe('TraeX herdr plugin installation', () => {
   let home: string;
+  let markerPath: string;
 
   beforeEach(() => {
     home = mkdtempSync(join(tmpdir(), 'botmux-herdr-int-'));
+    markerPath = join(home, '.botmux', 'state', 'herdr-traex-plugin.json');
     vi.stubEnv('HOME', home);
     vi.stubEnv('BOTMUX_HERDR_TRAEX_PLUGIN_ENABLED', '');
+    vi.stubEnv('BOTMUX_HERDR_TRAEX_PLUGIN_SOURCE', '');
+    vi.stubEnv('BOTMUX_HERDR_TRAEX_PLUGIN_REF', '');
     vi.stubEnv('BOTMUX_HERDR_TRAEX_PLUGIN_SPEC', '');
-    mkdirSync(dirname(globalConfigPath()), { recursive: true });
     spawn.mockReset();
     spawnSync.mockReset();
     execSync.mockReset();
+    spawnSync.mockReturnValue({ status: 0, stdout: '', stderr: '' });
+    execSync.mockReturnValue('herdr 0.7.3');
   });
 
   afterEach(() => {
+    vi.restoreAllMocks();
     vi.unstubAllEnvs();
     rmSync(home, { recursive: true, force: true });
   });
 
-  it('does not install anything for traex unless the global opt-in is enabled', async () => {
+  function writeMarker(source: string, ref: string, resolvedCommit: string) {
+    mkdirSync(join(home, '.botmux', 'state'), { recursive: true });
+    writeFileSync(markerPath, JSON.stringify({ source, ref, resolvedCommit, actionInvokedAt: '2026-01-01T00:00:00.000Z' }));
+  }
+
+  it('stays inert unless the machine-wide opt-in is enabled', async () => {
     const { ensureHerdrIntegrations } = await loadSubject();
     const result = await ensureHerdrIntegrations(['traex']);
-
     expect(result.traexPlugin).toMatchObject({ attempted: false, enabled: false, skippedReason: 'disabled' });
     expect(spawn).not.toHaveBeenCalled();
+    expect(spawnSync).not.toHaveBeenCalled();
   });
 
-  it('requires an operator-supplied plugin spec when enabled', async () => {
+  it('requires an operator-supplied source', async () => {
     vi.stubEnv('BOTMUX_HERDR_TRAEX_PLUGIN_ENABLED', 'true');
     const { ensureHerdrIntegrations } = await loadSubject();
     const result = await ensureHerdrIntegrations(['traex']);
-
-    expect(result.traexPlugin).toMatchObject({ attempted: false, enabled: true, skippedReason: 'missing_spec' });
+    expect(result.traexPlugin).toMatchObject({ attempted: false, enabled: true, skippedReason: 'missing_source' });
     expect(spawn).not.toHaveBeenCalled();
   });
 
-  it('installs the configured spec and invokes install action only after a fresh install', async () => {
+  it('gates herdr versions without the plugin capability and reports the version', async () => {
     vi.stubEnv('BOTMUX_HERDR_TRAEX_PLUGIN_ENABLED', 'true');
-    vi.stubEnv('BOTMUX_HERDR_TRAEX_PLUGIN_SPEC', 'trusted/repo#v1');
-    queueSpawn(LIST_EMPTY, INSTALL_OK, ACTION_OK);
+    vi.stubEnv('BOTMUX_HERDR_TRAEX_PLUGIN_SOURCE', 'trusted/repo');
+    spawnSync.mockReturnValue({ status: 1, stdout: '', stderr: 'unknown command' });
+    execSync.mockReturnValue('herdr 0.6.6');
+    const { ensureHerdrIntegrations } = await loadSubject();
+    const result = await ensureHerdrIntegrations(['traex']);
+    expect(result.traexPlugin).toMatchObject({
+      attempted: false,
+      skippedReason: 'plugin_unsupported',
+      herdrVersion: '0.6.6',
+    });
+    expect(spawn).not.toHaveBeenCalled();
+  });
+
+  it('passes source and ref as separate argv, invokes the action, and writes the marker', async () => {
+    vi.stubEnv('BOTMUX_HERDR_TRAEX_PLUGIN_ENABLED', 'true');
+    vi.stubEnv('BOTMUX_HERDR_TRAEX_PLUGIN_SOURCE', 'trusted/repo/subdir');
+    vi.stubEnv('BOTMUX_HERDR_TRAEX_PLUGIN_REF', 'reviewed-sha');
+    queueSpawn(LIST_EMPTY, INSTALL_OK, pluginState('trusted/repo/subdir'), ACTION_OK);
 
     const { ensureHerdrIntegrations } = await loadSubject();
     const result = await ensureHerdrIntegrations(['traex']);
 
     expect(result.traexPlugin).toMatchObject({
-      attempted: true, enabled: true, spec: 'trusted/repo#v1',
-      installed: true, alreadyInstalled: false, actionInvoked: true,
+      attempted: true,
+      source: 'trusted/repo/subdir',
+      ref: 'reviewed-sha',
+      installed: true,
+      actionInvoked: true,
     });
-    expect(spawn).toHaveBeenNthCalledWith(2, 'herdr', ['plugin', 'install', 'trusted/repo#v1', '--yes'], expect.any(Object));
-    expect(spawn).toHaveBeenNthCalledWith(3, 'herdr', ['plugin', 'action', 'invoke', 'com.traex.herdr-integration.install'], expect.any(Object));
+    expect(spawn).toHaveBeenNthCalledWith(2, 'herdr', [
+      'plugin', 'install', 'trusted/repo/subdir', '--ref', 'reviewed-sha', '--yes',
+    ], expect.objectContaining({ detached: true }));
+    expect(spawn).toHaveBeenNthCalledWith(4, 'herdr', [
+      'plugin', 'action', 'invoke', 'com.traex.herdr-integration.install',
+    ], expect.objectContaining({ detached: true }));
+    expect(JSON.parse(readFileSync(markerPath, 'utf-8'))).toMatchObject({
+      source: 'trusted/repo/subdir',
+      ref: 'reviewed-sha',
+      resolvedCommit: 'deadbeef',
+    });
   });
 
-  it('skips install and action when the plugin is already installed (top-level JSON shape)', async () => {
-    vi.stubEnv('BOTMUX_HERDR_TRAEX_PLUGIN_ENABLED', 'true');
-    vi.stubEnv('BOTMUX_HERDR_TRAEX_PLUGIN_SPEC', 'trusted/repo#v1');
-    queueSpawn({ stdout: '{"plugins":[{"id":"com.traex.herdr-integration"}]}', code: 0 });
-
-    const { ensureHerdrIntegrations } = await loadSubject();
-    const result = await ensureHerdrIntegrations(['traex']);
-
-    expect(result.traexPlugin).toMatchObject({ attempted: true, installed: false, alreadyInstalled: true, actionInvoked: false });
+  it('skips install and action only when herdr metadata and the action marker both match', async () => {
+    writeMarker('trusted/repo', 'reviewed-sha', 'deadbeef');
+    queueSpawn(pluginState());
+    const { installTraexPluginNow } = await loadSubject();
+    const result = await installTraexPluginNow('trusted/repo', 'reviewed-sha');
+    expect(result).toMatchObject({ alreadyInstalled: true, installed: false, actionInvoked: false });
     expect(spawn).toHaveBeenCalledTimes(1);
   });
 
-  it('falls back to substring detection when plugin-list JSON shape is unknown', async () => {
-    vi.stubEnv('BOTMUX_HERDR_TRAEX_PLUGIN_ENABLED', 'true');
-    vi.stubEnv('BOTMUX_HERDR_TRAEX_PLUGIN_SPEC', 'trusted/repo#v1');
-    queueSpawn({ stdout: '{"unexpected":"com.traex.herdr-integration"}', code: 0 });
-
-    const { ensureHerdrIntegrations } = await loadSubject();
-    const result = await ensureHerdrIntegrations(['traex']);
-
-    expect(result.traexPlugin?.alreadyInstalled).toBe(true);
-    expect(spawn).toHaveBeenCalledTimes(1);
+  it('does not invoke third-party actions when post-install metadata cannot verify source/ref/commit', async () => {
+    queueSpawn(LIST_EMPTY, INSTALL_OK, pluginState('other/repo', 'reviewed-sha', 'deadbeef'));
+    const { installTraexPluginNow } = await loadSubject();
+    const result = await installTraexPluginNow('trusted/repo', 'reviewed-sha');
+    expect(result.failed).toMatchObject({ step: 'install' });
+    expect(result.failed?.reason).toContain('元数据不匹配');
+    expect(spawn.mock.calls.filter(([, args]) => args?.[1] === 'action')).toHaveLength(0);
+    expect(existsSync(markerPath)).toBe(false);
   });
 
-  it('reports install and action failures with a manual command using the configured spec', async () => {
-    vi.stubEnv('BOTMUX_HERDR_TRAEX_PLUGIN_ENABLED', 'true');
-    vi.stubEnv('BOTMUX_HERDR_TRAEX_PLUGIN_SPEC', 'trusted/repo#v1');
+  it('retries a failed action without reinstalling the already-correct source/ref', async () => {
+    queueSpawn(
+      LIST_EMPTY,
+      INSTALL_OK,
+      pluginState(),
+      { stderr: 'action boom', code: 1 },
+      pluginState(),
+      ACTION_OK,
+    );
+    const { installTraexPluginNow } = await loadSubject();
+
+    const first = await installTraexPluginNow('trusted/repo', 'reviewed-sha');
+    expect(first.failed).toMatchObject({ step: 'action', reason: 'action boom' });
+    expect(existsSync(markerPath)).toBe(false);
+
+    const second = await installTraexPluginNow('trusted/repo', 'reviewed-sha');
+    expect(second).toMatchObject({ installed: false, actionInvoked: true });
+    const installCalls = spawn.mock.calls.filter(([, args]) => args?.[1] === 'install');
+    const actionCalls = spawn.mock.calls.filter(([, args]) => args?.[1] === 'action');
+    expect(installCalls).toHaveLength(1);
+    expect(actionCalls).toHaveLength(2);
+  });
+
+  it('reinstalls when the desired ref changes, even though the plugin id is present', async () => {
+    writeMarker('trusted/repo', 'old-sha', 'old-commit');
+    queueSpawn(
+      pluginState('trusted/repo', 'old-sha', 'old-commit'),
+      INSTALL_OK,
+      pluginState('trusted/repo', 'new-sha', 'new-commit'),
+      ACTION_OK,
+    );
+    const { installTraexPluginNow } = await loadSubject();
+    const result = await installTraexPluginNow('trusted/repo', 'new-sha');
+    expect(result).toMatchObject({ installed: true, actionInvoked: true });
+    expect(spawn).toHaveBeenNthCalledWith(2, 'herdr', [
+      'plugin', 'install', 'trusted/repo', '--ref', 'new-sha', '--yes',
+    ], expect.any(Object));
+  });
+
+  it('serializes concurrent triggers so install/action run once', async () => {
+    queueSpawn(LIST_EMPTY, INSTALL_OK, pluginState(), ACTION_OK, pluginState());
+    const { installTraexPluginNow } = await loadSubject();
+    const [first, second] = await Promise.all([
+      installTraexPluginNow('trusted/repo', 'reviewed-sha'),
+      installTraexPluginNow('trusted/repo', 'reviewed-sha'),
+    ]);
+    expect([first, second].some(result => result.installed)).toBe(true);
+    expect([first, second].some(result => result.alreadyInstalled)).toBe(true);
+    expect(spawn.mock.calls.filter(([, args]) => args?.[1] === 'install')).toHaveLength(1);
+    expect(spawn.mock.calls.filter(([, args]) => args?.[1] === 'action')).toHaveLength(1);
+  });
+
+  it('kills the detached process group on timeout and resolves only after close', async () => {
+    const child: any = new EventEmitter();
+    child.stdout = new EventEmitter();
+    child.stderr = new EventEmitter();
+    child.pid = 24680;
+    child.kill = vi.fn();
+    spawn.mockReturnValue(child);
+    const kill = vi.spyOn(process, 'kill').mockImplementation(() => true);
+    const { spawnHerdrAsync } = await loadSubject();
+
+    let settled = false;
+    const promise = spawnHerdrAsync(['plugin', 'list'], 10).then(result => {
+      settled = true;
+      return result;
+    });
+    await new Promise(resolve => setTimeout(resolve, 25));
+    expect(kill).toHaveBeenCalledWith(-24680, 'SIGKILL');
+    expect(settled).toBe(false);
+    child.emit('close', null);
+    await expect(promise).resolves.toMatchObject({ ok: false, reason: 'timeout after 10ms' });
+  });
+
+  it('reports install failures with a valid source/ref manual command', async () => {
     queueSpawn(LIST_EMPTY, { stderr: 'network', code: 1 });
-
-    const { ensureHerdrIntegrations } = await loadSubject();
-    const installFail = await ensureHerdrIntegrations(['traex']);
-    expect(installFail.traexPlugin?.failed).toMatchObject({
+    const { installTraexPluginNow } = await loadSubject();
+    const result = await installTraexPluginNow('trusted/repo', 'reviewed-sha');
+    expect(result.failed).toMatchObject({
       step: 'install',
       reason: 'network',
-      manualCommand: 'herdr plugin install trusted/repo#v1 --yes && herdr plugin action invoke com.traex.herdr-integration.install',
+      manualCommand: 'herdr plugin install trusted/repo --ref reviewed-sha --yes && herdr plugin action invoke com.traex.herdr-integration.install',
     });
-
-    spawn.mockReset();
-    queueSpawn(LIST_EMPTY, INSTALL_OK, { stderr: 'action boom', code: 1 });
-    const actionFail = await ensureHerdrIntegrations(['traex']);
-    expect(actionFail.traexPlugin?.failed).toMatchObject({ step: 'action', reason: 'action boom' });
-  });
-});
-
-describe('installTraexPluginNow (live install)', () => {
-  beforeEach(() => { spawn.mockReset(); });
-
-  it('installs a fresh plugin and invokes the install action', async () => {
-    queueSpawn(LIST_EMPTY, INSTALL_OK, ACTION_OK);
-    const { installTraexPluginNow } = await loadSubject();
-    const r = await installTraexPluginNow('  trusted/repo#v1  '); // trims
-    expect(r).toMatchObject({ spec: 'trusted/repo#v1', installed: true, alreadyInstalled: false, actionInvoked: true });
   });
 
-  it('is a no-op skip when the spec is blank', async () => {
-    const { installTraexPluginNow } = await loadSubject();
-    const r = await installTraexPluginNow('   ');
-    expect(r).toMatchObject({ attempted: false, skippedReason: 'missing_spec' });
-    expect(spawn).not.toHaveBeenCalled();
-  });
-
-  it('skips install when already present', async () => {
-    queueSpawn({ stdout: '{"result":{"plugins":[{"plugin_id":"com.traex.herdr-integration"}]}}', code: 0 });
-    const { installTraexPluginNow } = await loadSubject();
-    const r = await installTraexPluginNow('trusted/repo#v1');
-    expect(r).toMatchObject({ alreadyInstalled: true, actionInvoked: false });
-    expect(spawn).toHaveBeenCalledTimes(1);
-  });
-});
-
-describe('maybeInstallTraexPluginOnSettingsChange', () => {
-  it('installs only when the write touched herdrTraexPlugin AND it is enabled with a spec', async () => {
+  it('only installs on a touched, enabled settings patch with a non-empty source', async () => {
     const { maybeInstallTraexPluginOnSettingsChange } = await loadSubject();
-    const installFn = vi.fn(async (spec: string) => ({
-      attempted: true, enabled: true, spec, installed: true, alreadyInstalled: false, actionInvoked: true,
+    const installFn = vi.fn(async (source: string, ref: string) => ({
+      attempted: true,
+      enabled: true,
+      source,
+      ref,
+      installed: true,
+      alreadyInstalled: false,
+      actionInvoked: true,
     }));
-
-    // untouched patch → no-op
-    expect(await maybeInstallTraexPluginOnSettingsChange(false, { enabled: true, spec: 'a/b' }, installFn)).toBeUndefined();
-    // touched but disabled → no-op
-    expect(await maybeInstallTraexPluginOnSettingsChange(true, { enabled: false, spec: 'a/b' }, installFn)).toBeUndefined();
-    // touched + enabled but blank spec → no-op
-    expect(await maybeInstallTraexPluginOnSettingsChange(true, { enabled: true, spec: '  ' }, installFn)).toBeUndefined();
+    expect(await maybeInstallTraexPluginOnSettingsChange(false, { enabled: true, source: 'a/b', ref: 'sha' }, installFn)).toBeUndefined();
+    expect(await maybeInstallTraexPluginOnSettingsChange(true, { enabled: false, source: 'a/b', ref: 'sha' }, installFn)).toBeUndefined();
+    expect(await maybeInstallTraexPluginOnSettingsChange(true, { enabled: true, source: ' ', ref: '' }, installFn)).toBeUndefined();
     expect(installFn).not.toHaveBeenCalled();
 
-    // touched + enabled + spec → installs
-    const r = await maybeInstallTraexPluginOnSettingsChange(true, { enabled: true, spec: 'a/b' }, installFn);
-    expect(installFn).toHaveBeenCalledWith('a/b');
-    expect(r).toMatchObject({ installed: true });
+    const result = await maybeInstallTraexPluginOnSettingsChange(true, { enabled: true, source: 'a/b', ref: 'sha' }, installFn);
+    expect(installFn).toHaveBeenCalledWith('a/b', 'sha');
+    expect(result).toMatchObject({ installed: true });
   });
 });

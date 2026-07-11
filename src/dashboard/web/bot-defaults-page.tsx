@@ -144,7 +144,10 @@ async function sendJson(method: string, url: string, body?: unknown): Promise<Js
 }
 
 function responseErrorText(res: JsonResponse): string {
-  return String(res.body?.error ?? res.status);
+  const reason = typeof res.body?.reason === 'string' ? res.body.reason : '';
+  const manual = typeof res.body?.manualCommand === 'string' ? res.body.manualCommand : '';
+  if (reason && manual) return `${reason}（${manual}）`;
+  return String(reason || res.body?.error || res.status);
 }
 
 function caughtErrorText(e: any): string {
@@ -1226,7 +1229,7 @@ function BackendTypeSection(props: { bot: BotDefaultsRow; patchBot: PatchBot }) 
     <section className="bd-section">
       <h3 className="bd-section-title">{tr('botDefaults.sectionBackend')}</h3>
       <div className="bd-row">
-        <label>
+        <div className="bd-field">
           <FieldTitle help={tr('botDefaults.backendHelp')}>{tr('botDefaults.backendLabel')}</FieldTitle>
           <DropdownField
             dataInput="backendType"
@@ -1236,7 +1239,7 @@ function BackendTypeSection(props: { bot: BotDefaultsRow; patchBot: PatchBot }) 
             options={options}
             onChange={next => void save(next)}
           />
-        </label>
+        </div>
         <div className="actions">
           <StatusSpan status={status} attr={{ 'data-backend-status': '' }} />
         </div>
