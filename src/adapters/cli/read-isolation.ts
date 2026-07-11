@@ -362,6 +362,109 @@ export function buildWriteSandboxRules(ctx: WriteSandboxContext): {
   };
 }
 
+// ─── Linux read isolation: bwrap mask set (the Seatbelt read-deny twin) ──────
+
+export interface LinuxReadIsolationInput {
+  ctx: V2IsolationContext;
+  /** Every OTHER bot's appId — the worker enumerates these from the registry.
+   *  bwrap has NO regex (unlike the macOS Seatbelt profile), so each sibling's
+   *  per-bot paths are masked INDIVIDUALLY. Consequence: the mask set is
+   *  spawn-time-static — a bot added AFTER this session spawned isn't covered
+   *  until a cold restart (the macOS regex covers new bots without one). */
+  siblingAppIds: string[];
+  /** Existing `bots.json.*` sidecars (backups/tmp) globbed by the worker at spawn
+   *  — each carries every bot's plaintext secret under a dynamic name that no
+   *  wholesale rule matches, so they're masked individually. */
+  botsJsonSidecars?: string[];
+}
+
+/**
+ * The bwrap MASK set for Linux read isolation — the functional twin of the macOS
+ * Seatbelt read-deny profile ({@link buildV2DenyPaths} + regexes + carve-outs),
+ * expressed for bwrap (which blanks paths with tmpfs/empty-binds and has no regex).
+ *
+ * SAME cross-bot-sensitive set as macOS, but the per-bot classes (other bots'
+ * BOT_HOMEs / lark configs / session stores / identities / send-creds / attachment
+ * buckets) are enumerated PER SIBLING instead of wholesale-denied + regex-matched.
+ * The bot's OWN slice is simply never masked (so it stays readable through the
+ * overlay), and its BOT_HOME is additionally bound real+writable via
+ * `ownReadWritePaths` so its redirected CLI data persists — matching macOS.
+ *
+ * Pure: the worker resolves the impure inputs (sibling list, sidecar glob, realpath).
+ * NOTE: keep the `shared` set in lock-step with {@link buildV2DenyPaths} — the
+ * `read-isolation.test.ts` parity test fails if a sensitive path is added to one
+ * platform but not the other.
+ */
+export function buildLinuxReadIsolationMasks(input: LinuxReadIsolationInput): {
+  /** Paths to blank inside bwrap (prepareSandbox stat-classifies: dir→tmpfs,
+   *  file→empty ro-bind, missing→skipped). Feed as prepareSandbox.hidePaths. */
+  hidePaths: string[];
+  /** The bot's OWN BOT_HOME — bound REAL + writable (feed as authPaths) so the
+   *  redirected CLI data (CLAUDE_CONFIG_DIR/CODEX_HOME) persists and escapes the
+   *  write overlay. Its parent `bots/` is enumerated per-sibling (NOT wholesale-
+   *  masked) so this real bind survives. */
+  ownReadWritePaths: string[];
+  /** The bot's OWN slices that sit UNDER a wholesale-masked parent and must be
+   *  re-exposed read-only AFTER the masks (feed as readonlyRoots — bound after the
+   *  tmpfs masks). Currently the own attachments bucket, under the wholesale
+   *  `data/attachments` mask. Read-only is enough (the agent only READS uploads). */
+  ownReadOnlyPaths: string[];
+} {
+  const { ctx } = input;
+  const h = ctx.homeDir.replace(/\/+$/, '');
+  const bh = ctx.botmuxHome.replace(/\/+$/, '');
+  const sd = ctx.sessionDataDir.replace(/\/+$/, '');
+  const self = assertSafeAppId(ctx.currentAppId);
+  const keep = (arr: string[]) => dedupe(arr.map(normalizeIsolationPath).filter((p): p is string => !!p));
+
+  // Cross-bot-sensitive paths handled WHOLESALE (not per-bot, OR a per-bot dir with
+  // a non-enumerable layout) — MUST mirror the same entries in buildV2DenyPaths.
+  const shared = [
+    `${h}/.claude`, `${h}/.claude.json`, `${h}/.codex`,
+    `${h}/.ssh`, `${h}/.aws`, `${h}/.azure`, `${h}/.gnupg`, `${h}/.netrc`,
+    `${h}/.config/gh`, `${h}/.config/glab-cli`, `${h}/.config/gcloud`, `${h}/.config/op`,
+    `${h}/.config/1Password`, `${h}/.1password`, `${h}/.password-store`,
+    `${h}/.git-credentials`, `${h}/.npmrc`, `${h}/.pypirc`, `${h}/.docker/config.json`, `${h}/.kube`,
+    `${h}/Library/Keychains`,
+    `${bh}/bots.json`, `${bh}/logs`, `${h}/.lark-cli`,
+    `${bh}/feishu-session.json`, `${bh}/.dashboard-secret`, `${bh}/.dashboard-token`,
+    `${sd}/sessions.json`, `${sd}/frozen-cards`, `${sd}/turn-sends`,
+    `${sd}/crash-diagnostics`, `${sd}/queues`, `${sd}/read-isolation`,
+    // attachments/ is masked WHOLESALE (like macOS) — covers every sibling bucket
+    // AND the legacy flat per-messageId layout (which per-sibling enumeration can't
+    // reach); the OWN bucket is re-exposed read-only via ownReadOnlyPaths below.
+    `${sd}/attachments`,
+    // schedules.json + whiteboards deliberately NOT masked (same owner decision as
+    // macOS: RMW-clobber / shared content).
+  ];
+
+  // Per-sibling enumeration for the classes macOS covers by REGEX (bwrap has none):
+  // other bots' BOT_HOMEs, lark configs, session stores, identities, send-creds. Own
+  // BOT_HOME + lark + session stay UNMASKED (readable via the overlay lower; BOT_HOME
+  // also bound real+writable below). identities/send-cred get NO own carve-out — the
+  // CLI never reads them (daemon-side) — so the own ones are masked too.
+  const perBot: string[] = [];
+  for (const raw of input.siblingAppIds) {
+    let sib: string;
+    try { sib = assertSafeAppId(raw); } catch { continue; }
+    if (sib === self) continue;
+    perBot.push(
+      `${bh}/bots/${sib}`,
+      `${h}/.lark-cli-bots/${sib}`,
+      `${sd}/sessions-${sib}.json`,
+      `${sd}/identities-${sib}.json`,
+      `${sd}/.send-cred-${sib}`,
+    );
+  }
+  perBot.push(`${sd}/identities-${self}.json`, `${sd}/.send-cred-${self}`);
+
+  return {
+    hidePaths: keep([...shared, ...perBot, ...(input.botsJsonSidecars ?? [])]),
+    ownReadWritePaths: keep([botHomePath(bh, self)]),
+    ownReadOnlyPaths: keep([`${sd}/attachments/${self}`]),
+  };
+}
+
 /**
  * Decide whether read isolation is enabled for a session, or fail-closed.
  * Pure: the caller resolves the impure inputs. This is the SINGLE decision

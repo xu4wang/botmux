@@ -8,6 +8,7 @@ import {
   buildV2DenyRegexes,
   buildV2CarveOuts,
   buildWriteSandboxRules,
+  buildLinuxReadIsolationMasks,
   sendCredFilePath,
   assertSafeAppId,
   normalizeIsolationPath,
@@ -388,6 +389,60 @@ describe('macOS write-sandbox (buildWriteSandboxRules)', () => {
     const prof = buildSeatbeltProfile(['/Users/bot/.ssh']);
     expect(prof).toContain('(deny file-read* (subpath "/Users/bot/.ssh"))');
     expect(prof).not.toContain('file-write*');
+  });
+});
+
+describe('Linux read isolation (buildLinuxReadIsolationMasks)', () => {
+  it('masks the shared cross-bot sensitive set + per-sibling paths; own BOT_HOME stays real+writable', () => {
+    const r = buildLinuxReadIsolationMasks({ ctx: v2(), siblingAppIds: ['cli_other1', 'cli_other2'] });
+    // shared sensitive (non-per-bot)
+    for (const p of ['/Users/bot/.claude', '/Users/bot/.codex', '/Users/bot/.ssh',
+      '/Users/bot/.botmux/bots.json', '/Users/bot/.botmux/feishu-session.json',
+      '/Users/bot/.botmux/.dashboard-secret', '/Users/bot/.botmux/data/frozen-cards',
+      '/Users/bot/.botmux/data/queues']) expect(r.hidePaths).toContain(p);
+    // per-sibling (enumerated — no regex on bwrap)
+    for (const p of ['/Users/bot/.botmux/bots/cli_other1', '/Users/bot/.lark-cli-bots/cli_other2',
+      '/Users/bot/.botmux/data/sessions-cli_other1.json', '/Users/bot/.botmux/data/identities-cli_other2.json',
+      '/Users/bot/.botmux/data/.send-cred-cli_other1']) expect(r.hidePaths).toContain(p);
+    // attachments/ masked WHOLESALE (covers legacy flat layout too); own bucket re-exposed RO
+    expect(r.hidePaths).toContain('/Users/bot/.botmux/data/attachments');
+    expect(r.ownReadOnlyPaths).toEqual(['/Users/bot/.botmux/data/attachments/cli_self']);
+    // OWN slice is NOT masked (readable via the overlay lower)
+    expect(r.hidePaths).not.toContain('/Users/bot/.botmux/bots/cli_self');
+    expect(r.hidePaths).not.toContain('/Users/bot/.botmux/data/sessions-cli_self.json');
+    expect(r.hidePaths).not.toContain('/Users/bot/.lark-cli-bots/cli_self');
+    // own identities/send-cred ARE masked (daemon-side only, no own carve-out — parity w/ macOS)
+    expect(r.hidePaths).toContain('/Users/bot/.botmux/data/identities-cli_self.json');
+    expect(r.hidePaths).toContain('/Users/bot/.botmux/data/.send-cred-cli_self');
+    // own BOT_HOME kept real+writable (persists redirected CLI data)
+    expect(r.ownReadWritePaths).toEqual(['/Users/bot/.botmux/bots/cli_self']);
+    // NOT masked: schedules.json + whiteboards (same owner decision as macOS)
+    expect(r.hidePaths).not.toContain('/Users/bot/.botmux/data/schedules.json');
+    expect(r.hidePaths).not.toContain('/Users/bot/.botmux/data/whiteboards');
+  });
+
+  it('PARITY: every non-per-bot path macOS denies is also masked on Linux', () => {
+    // Guard against the two platforms drifting: any shared-sensitive path added to
+    // buildV2DenyPaths must also appear in the Linux mask set. The per-bot WHOLESALE
+    // dirs (bots/, .lark-cli-bots/) are the only ones handled differently (enumerated
+    // per-sibling), so exclude just those two from the comparison.
+    const macDeny = buildV2DenyPaths(v2());
+    const linux = buildLinuxReadIsolationMasks({ ctx: v2(), siblingAppIds: [] }).hidePaths;
+    const wholesalePerBot = new Set(['/Users/bot/.botmux/bots', '/Users/bot/.lark-cli-bots']);
+    const shouldMatch = macDeny.filter(p => !wholesalePerBot.has(p));
+    for (const p of shouldMatch) expect(linux).toContain(p);
+  });
+
+  it('folds bots.json sidecars + skips unsafe sibling ids', () => {
+    const r = buildLinuxReadIsolationMasks({
+      ctx: v2(),
+      siblingAppIds: ['cli_ok', '../evil', 'bad/id'],
+      botsJsonSidecars: ['/Users/bot/.botmux/bots.json.bak', '/Users/bot/.botmux/bots.json.tmp'],
+    });
+    expect(r.hidePaths).toContain('/Users/bot/.botmux/bots.json.bak');
+    expect(r.hidePaths).toContain('/Users/bot/.botmux/bots/cli_ok');
+    // unsafe sibling ids are dropped, never concatenated into a mask path
+    expect(r.hidePaths.some(p => p.includes('evil') || p.includes('bad'))).toBe(false);
   });
 });
 
