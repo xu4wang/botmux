@@ -37,6 +37,7 @@ import { drainTranscript, joinAssistantText, trailingAssistantText, findJsonlCon
 import { BridgeTurnQueue, makeFingerprint, normaliseForFingerprint } from './services/bridge-turn-queue.js';
 import { shouldSuppressBridgeEmit, type BridgeSendMarker } from './services/bridge-fallback-gate.js';
 import { shouldReleaseFirstPromptTimeout, shouldWriteNow } from './utils/input-gate.js';
+import { shouldDeferUserFlush, shouldFlushInjectionsFirst, type PendingInjection } from './core/inject-queue-policy.js';
 import { stripAnsiForLog, tailChars } from './utils/crash-log.js';
 import { CodexUpdateDialogGuard } from './utils/codex-update-dialog.js';
 import { installStdioEpipeGuard, isIgnorableStreamError } from './utils/stdio-epipe-guard.js';
@@ -3046,8 +3047,9 @@ async function handleTuiKeys(keys: string[], isFinal: boolean): Promise<void> {
 // 防止 restart 后残留命令重放进新 CLI——新增清理状态时记得同步那里。
 // barrier=true 标记该注入携带 updateWorkingDir（cwd-move，如 /cd）：markPromptReady
 // 里 barrier 注入必须先于本次 pending 用户消息落地，防止用户消息在「记录已是新
-// cwd、进程仍在旧 cwd」的窗口里被写进旧目录的 CLI。
-interface PendingInjection { command: string; barrier: boolean }
+// cwd、进程仍在旧 cwd」的窗口里被写进旧目录的 CLI。排队策略判定收敛到
+// core/inject-queue-policy.ts（shouldDeferUserFlush / shouldFlushInjectionsFirst）
+// 以获得可单测的纯函数单元——本文件只持有队列状态。
 const pendingInjections: PendingInjection[] = [];
 let injectionFlushing = false;
 
@@ -3469,7 +3471,7 @@ function markPromptReady(): void {
   // 消息：flushPending 自身的 injectionFlushing 守卫会挡住并发写入，
   // flushPendingInjections 的 finally 会在注入完成、CLI 重新 idle 后补踢一次
   // flushPending 排空 pendingMessages。
-  if (pendingInjections.some(i => i.barrier)) {
+  if (shouldFlushInjectionsFirst(pendingInjections)) {
     void flushPendingInjections();
   } else {
     flushPending();
@@ -3716,6 +3718,12 @@ async function flushPending(): Promise<void> {
   // 注入进行中不得并发写 PTY（用户消息留在 pendingMessages，注入完成后的下一次
   // markPromptReady 自然排空）——防止 type-ahead 插进注入的 text→Enter 窗口。
   if (injectionFlushing) return;
+  // cwd 切换是 barrier：在它执行前，任何用户消息都不得写入（type-ahead 路径也会
+  // 走到这里，因为 supportsTypeAhead 的 CLI 从 sendToPty 直接调 flushPending，
+  // 完全绕过 markPromptReady 的 barrier-first 分支）——否则消息会落进旧 cwd 的
+  // CLI。消息留在 pendingMessages，待 markPromptReady → flushPendingInjections
+  // 消费完 barrier 后由其 finally 的 re-kick 排空。
+  if (shouldDeferUserFlush(pendingInjections)) return;
   if (bareShellLaunchBlocked) return;  // launch failed into a bare shell — don't type prompts into it
   // Ready-gate: hold the FIRST prompt until the SessionStart hook fires a true-
   // ready signal. A cjadk-style startup selector's ❯ falsely matches readyPattern
