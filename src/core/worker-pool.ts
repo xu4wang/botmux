@@ -32,7 +32,7 @@ import { replyToDocComment, chunkCommentText, unsubscribeDocFile, removeCommentR
 import { listDocSubscriptionsForSession, removeDocSubscription } from '../services/doc-subs-store.js';
 import { TmuxBackend } from '../adapters/backend/tmux-backend.js';
 import { HerdrBackend } from '../adapters/backend/herdr-backend.js';
-import { isSuspendableBackendType, getSessionPersistentBackendType, persistentSessionName, killPersistentSession } from './persistent-backend.js';
+import { isSuspendableBackendType, getSessionPersistentBackendType, resolveSpawnBackendType, persistentSessionName, killPersistentSession } from './persistent-backend.js';
 import { getBot, getAllBots, loadBotConfigs, resolveBrandLabel } from '../bot-registry.js';
 
 /** A random id minted once per daemon process (this lifetime). Stamped onto
@@ -1742,7 +1742,13 @@ export function forkWorker(ds: DaemonSession, prompt: string, resumeOrTurnId: bo
     // can tell a suspend→resume reattach (same boot id, still isolated) from a
     // stale pane surviving a daemon restart (different id → kill + cold-spawn).
     daemonBootId: DAEMON_BOOT_ID,
-    backendType: botCfg.backendType ?? config.daemon.backendType,
+    // Freeze-once: an already-running session keeps the backend stamped at spawn
+    // (ds.session.backendType) even if the bot's live `backendType` changed since —
+    // otherwise a cold-resume/refork would re-derive from live config and strand
+    // the real persistent pane (the stamp is written below; restore reads it via
+    // getSessionPersistentBackendType). A brand-new session (no stamp) resolves
+    // from live config, so a dashboard backend switch only affects NEW sessions.
+    backendType: resolveSpawnBackendType(ds.session.backendType, botCfg.backendType, config.daemon.backendType),
     prompt,
     resume,
     cliSessionId: ds.session.cliSessionId,

@@ -147,6 +147,7 @@ import { normalizeBrand } from './im/lark/lark-hosts.js';
 import { buildDocCommentPrompt, buildDocWatchWarmupPrompt } from './core/doc-comment-prompt.js';
 import { advanceDocCommentCursor, docCommentRepliesAfterCursor, latestDocCommentPollCursor } from './core/doc-comment-poller.js';
 import { renderBufferedSenderBlock } from './core/session-manager.js';
+import { shutdownBackendDisposition } from './core/persistent-backend.js';
 import { markSessionActivity, announcePendingRepoSession, publishAttentionPatch, clearAgentAttention } from './core/session-activity.js';
 import { emitSessionLifecycleHook } from './services/session-lifecycle-hooks.js';
 import { WorkflowEventWatcher, handleWorkflowFanoutEvent } from './workflows/fanout.js';
@@ -8679,10 +8680,12 @@ export async function startDaemon(botIndex?: number): Promise<void> {
           }));
           survivors.push(w);
         }
-        const backendType = ds.larkAppId
-          ? (getBot(ds.larkAppId).config.backendType ?? config.daemon.backendType)
-          : config.daemon.backendType;
-        if (backendType === 'tmux' || backendType === 'herdr' || backendType === 'zellij') {
+        // Branch by the session's FROZEN backend (stamped on Session.backendType
+        // at spawn), NOT the bot's live config — a dashboard backendType edit must
+        // not change how a running session is torn down, or we'd e.g. try to
+        // detach-preserve a "herdr" session whose real pane is tmux (freeze-once).
+        // undefined (frozen pty, or unresolvable legacy) → non-persistent → killWorker.
+        if (shutdownBackendDisposition(ds) === 'detach') {
           // Persistent backends (tmux / herdr / zellij): just kill the worker process —
           // the multiplexer session survives for re-attach. The worker's SIGTERM
           // handler calls backend.kill(), which only DETACHES. Going through
