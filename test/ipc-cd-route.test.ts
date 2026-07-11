@@ -178,6 +178,29 @@ describe('POST /api/sessions/:sessionId/cd', () => {
     expect(ds.initConfig.workingDir).toBe(roleDirReal);
   });
 
+  it('200 mode:cold-restart — worker.send() throws: record already repinned, kill it so next message cold-starts in the new dir', async () => {
+    const send = vi.fn(() => { throw new Error('EPIPE: worker channel closed'); });
+    const ds = {
+      session: { sessionId: 's-send-throws', cliId: 'claude-code' },
+      worker: { send, killed: false },
+      adoptedFrom: undefined,
+      initConfig: { workingDir: '/old/stale/dir' },
+    } as any;
+    vi.spyOn(workerPool, 'findActiveBySessionId').mockReturnValue(ds);
+    const repinSpy = vi.spyOn(sessionCwd, 'repinSessionWorkingDir').mockImplementation(() => {});
+    const killSpy = vi.spyOn(workerPool, 'killWorker').mockImplementation(() => {});
+
+    const res = await postCd('s-send-throws', roleDir);
+
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({ ok: true, mode: 'cold-restart', dir: roleDirReal });
+    expect(send).toHaveBeenCalledTimes(1);
+    // 绝不能留下「记录新、进程仍在旧目录」的分裂状态：send 抛错必须触发 killWorker。
+    expect(killSpy).toHaveBeenCalledTimes(1);
+    expect(killSpy).toHaveBeenCalledWith(ds);
+    expect(repinSpy).toHaveBeenCalledWith(ds, roleDirReal);
+  });
+
   it('200 mode:cold-restart — NO live worker: killWorker is STILL called (unconditional, no ds.worker guard)', async () => {
     // 锁定行为：worker 为 null 时也必须调用 killWorker——其内部的
     // destroyOrphanedBackingSession 是清掉 lazy-restore/crash-stopped 场景下

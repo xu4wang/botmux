@@ -34,8 +34,11 @@ export function validateRoleLibraryPath(
   const raw = (input ?? '').trim();
   if (!raw) return { ok: false, error: 'empty_path' };
   // 维持「单行注入」不变量（与 slash 校验的 multiline_rejected 对称）：拒绝内嵌
-  // 控制字符，防止 /cd 路径把第二条命令伪装进注入的 text→Enter 窗口。
-  if (/[\r\n]/.test(raw)) return { ok: false, error: 'invalid_path_chars' };
+  // 控制字符，防止 /cd 路径把第二条命令伪装进注入的 text→Enter 窗口。范围覆盖全部
+  // C0 控制字符 + DEL（\x00-\x1f\x7f），不只是 \r\n——tab、ESC（\x1b，可能携带
+  // 终端转义序列）、backspace 等同样能在 sendRawCommandLine 的 text→Enter 窗口里
+  // 污染 TUI 输入行。
+  if (/[\x00-\x1f\x7f]/.test(raw)) return { ok: false, error: 'invalid_path_chars' };
   let rootReal: string;
   try { rootReal = realpathSync(rootOverride ?? roleLibraryRoot()); }
   catch { return { ok: false, error: 'role_library_missing' }; }
@@ -44,7 +47,7 @@ export function validateRoleLibraryPath(
   catch { return { ok: false, error: 'dir_not_found' }; }
   // 库内符号链接可能指向含换行等控制字符的目录名，把 raw 处的干净校验洗掉——
   // resolvedPath 是最终写回调用方（进而可能被注入）的值，必须同样校验。
-  if (/[\r\n]/.test(real)) return { ok: false, error: 'invalid_path_chars' };
+  if (/[\x00-\x1f\x7f]/.test(real)) return { ok: false, error: 'invalid_path_chars' };
   if (!isContainedIn(real, rootReal)) return { ok: false, error: 'outside_role_library' };
   try { if (!statSync(real).isDirectory()) return { ok: false, error: 'not_a_directory' }; }
   catch { return { ok: false, error: 'dir_not_found' }; }

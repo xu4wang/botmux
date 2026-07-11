@@ -62,6 +62,15 @@ describe('validateRoleLibraryPath', () => {
     expect(validateRoleLibraryPath(`${join(root, 'users')}\r\nevil`, root))
       .toEqual({ ok: false, error: 'invalid_path_chars' });
   });
+  it('拒绝内嵌 ESC / tab 等其余 C0 控制字符与 DEL（不止 \\r\\n）', () => {
+    const { root } = setup();
+    expect(validateRoleLibraryPath(`${join(root, 'users')}\x1b[31mevil`, root))
+      .toEqual({ ok: false, error: 'invalid_path_chars' });
+    expect(validateRoleLibraryPath(`${join(root, 'users')}\tevil`, root))
+      .toEqual({ ok: false, error: 'invalid_path_chars' });
+    expect(validateRoleLibraryPath(`${join(root, 'users')}\x7fevil`, root))
+      .toEqual({ ok: false, error: 'invalid_path_chars' });
+  });
   it('拒绝库内符号链接解析出的含换行 resolvedPath（干净名字符号链接 → 库内含 \\n 的目录）', () => {
     const { root } = setup();
     // 目标目录在库内：不加 resolvedPath 复检时会通过 containment 并返回

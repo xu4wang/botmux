@@ -2901,7 +2901,11 @@ async function handleTuiKeys(keys: string[], isFinal: boolean): Promise<void> {
 
 // 待注入的 TUI 命令队列。生命周期绑定当前 CLI 进程：killCli() 会清空它，
 // 防止 restart 后残留命令重放进新 CLI——新增清理状态时记得同步那里。
-const pendingInjections: string[] = [];
+// barrier=true 标记该注入携带 updateWorkingDir（cwd-move，如 /cd）：markPromptReady
+// 里 barrier 注入必须先于本次 pending 用户消息落地，防止用户消息在「记录已是新
+// cwd、进程仍在旧 cwd」的窗口里被写进旧目录的 CLI。
+interface PendingInjection { command: string; barrier: boolean }
+const pendingInjections: PendingInjection[] = [];
 let injectionFlushing = false;
 
 /** 排队注入一行 TUI 命令：idle（isPromptReady）时经 sendRawCommandLine 敲入。 */
@@ -2920,7 +2924,8 @@ async function flushPendingInjections(): Promise<void> {
         bareShellChecked = true;
         if (detectBareShellLaunch()) return;  // finally{} releases the mutex; queue stays
       }
-      const cmd = pendingInjections.shift()!;
+      const item = pendingInjections.shift()!;
+      const cmd = item.command;
       isPromptReady = false;
       idleDetector?.reset();
       try {
@@ -3255,8 +3260,19 @@ function markPromptReady(): void {
     const { content } = renderer.snapshot();
     send({ type: 'screen_update', content, ...usageLimitTracker.classify(content, 'idle'), turnId: currentBotmuxTurnId });
   }
-  flushPending();
-  if (pendingInjections.length > 0) void flushPendingInjections();
+  // cwd-move 注入（barrier=true，如 /cd）必须先于本次 pending 用户消息落地：
+  // 用户在 bot 发完「已切换角色」确认后立刻发下一条消息是最常见路径——若
+  // flushPending 先跑，该消息会在 barrier 注入之前被写进旧 cwd 的 CLI（daemon
+  // 记录已是新目录，实际执行仍在旧目录）。跳过本次 flushPending 不会饿死用户
+  // 消息：flushPending 自身的 injectionFlushing 守卫会挡住并发写入，
+  // flushPendingInjections 的 finally 会在注入完成、CLI 重新 idle 后补踢一次
+  // flushPending 排空 pendingMessages。
+  if (pendingInjections.some(i => i.barrier)) {
+    void flushPendingInjections();
+  } else {
+    flushPending();
+    if (pendingInjections.length > 0) void flushPendingInjections();
+  }
 }
 
 function persistCliSessionId(cliSessionId: string): void {
@@ -6055,7 +6071,7 @@ process.on('message', async (raw: unknown) => {
       if (msg.updateWorkingDir && lastInitConfig) {
         lastInitConfig.workingDir = msg.updateWorkingDir;
       }
-      pendingInjections.push(msg.command);
+      pendingInjections.push({ command: msg.command, barrier: !!msg.updateWorkingDir });
       void flushPendingInjections();
       break;
     }

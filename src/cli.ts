@@ -3234,7 +3234,9 @@ async function cmdSlash(): Promise<void> {
   const argv = process.argv.slice(3);
   const sIdx = argv.indexOf('--session');
   const explicitSid = sIdx >= 0 ? argv[sIdx + 1] : undefined;
-  const command = argv.filter((a, i) => !a.startsWith('--') && !(sIdx >= 0 && i === sIdx + 1))[0];
+  // 所有非 flag 位置参数 join(' ')，而不是只取第一个——未加引号的命令若含空格
+  // （如 `botmux slash /model opus`）此前会被截断成 `/model`。
+  const command = argv.filter((a, i) => !a.startsWith('--') && !(sIdx >= 0 && i === sIdx + 1)).join(' ');
   if (!command) { console.error('用法: botmux slash "/compact" [--session <id>]'); process.exit(1); }
 
   const ctx = explicitSid ? null : findAncestorSessionContext();
@@ -3262,8 +3264,10 @@ async function cmdCd(): Promise<void> {
   const argv = process.argv.slice(3);
   const sIdx = argv.indexOf('--session');
   const explicitSid = sIdx >= 0 ? argv[sIdx + 1] : undefined;
-  const dir = argv.filter((a, i) => !a.startsWith('--') && !(sIdx >= 0 && i === sIdx + 1))[0];
-  if (!dir) { console.error('用法: botmux cd <目标目录> [--session <id>]'); process.exit(1); }
+  // 所有非 flag 位置参数 join(' ')，而不是只取第一个——路径含空格且未加引号时
+  // （如 `botmux cd ~/botmux-roles/我的 角色`）此前会被截断。
+  const dir = argv.filter((a, i) => !a.startsWith('--') && !(sIdx >= 0 && i === sIdx + 1)).join(' ');
+  if (!dir) { console.error('用法: botmux cd <目标目录（含空格建议加引号）> [--session <id>]'); process.exit(1); }
 
   const ctx = explicitSid ? null : findAncestorSessionContext();
   const sid = explicitSid ?? ctx?.sessionId;

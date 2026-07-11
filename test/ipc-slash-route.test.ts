@@ -112,4 +112,22 @@ describe('POST /api/sessions/:sessionId/slash', () => {
     expect(send).toHaveBeenCalledWith({ type: 'inject_command', command: '/status' });
     expect(send.mock.calls[0][0]).not.toHaveProperty('updateWorkingDir');
   });
+
+  it('502s when worker.send() throws — slash is stateless, no repin to reconcile, so no kill needed', async () => {
+    const send = vi.fn(() => { throw new Error('EPIPE: worker channel closed'); });
+    vi.spyOn(workerPool, 'findActiveBySessionId').mockReturnValue({
+      session: { sessionId: 's-send-throws', cliId: 'claude-code' },
+      larkAppId: 'app-1',
+      worker: { send, killed: false },
+      adoptedFrom: undefined,
+    } as any);
+    vi.spyOn(botRegistry, 'getBotTuiSlashAllow').mockReturnValue(['/status']);
+    const killSpy = vi.spyOn(workerPool, 'killWorker').mockImplementation(() => {});
+
+    const res = await postSlash('s-send-throws', '/status');
+
+    expect(res.status).toBe(502);
+    expect(await res.json()).toMatchObject({ ok: false, error: 'worker_send_failed' });
+    expect(killSpy).not.toHaveBeenCalled();
+  });
 });

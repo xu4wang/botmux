@@ -313,7 +313,13 @@ ipcRoute('POST', '/api/sessions/:sessionId/slash', async (req, res, params) => {
   const allow = getBotTuiSlashAllow(ds.larkAppId);
   const v = validateSlashInjection(body?.command ?? '', allow);
   if (!v.ok) return jsonRes(res, 403, { ok: false, error: v.error });
-  ds.worker.send({ type: 'inject_command', command: v.command } as DaemonToWorker);
+  try {
+    ds.worker.send({ type: 'inject_command', command: v.command } as DaemonToWorker);
+  } catch {
+    // slash 注入无状态（不像 /cd 那样已 repin 记录），send 失败不需要杀进程
+    // 冷启动——直接把失败面报给调用方即可。
+    return jsonRes(res, 502, { ok: false, error: 'worker_send_failed' });
+  }
   jsonRes(res, 200, { ok: true, sessionId: params.sessionId, queued: v.command });
 });
 
@@ -346,7 +352,15 @@ ipcRoute('POST', '/api/sessions/:sessionId/cd', async (req, res, params) => {
     // 新目录，而不是陈旧的 lastInitConfig.workingDir。daemon 侧的 ds.initConfig 同步
     // 更新，保持与 worker 侧一致（下次 forkWorker 用它重建 init 消息）。
     if (ds.initConfig) ds.initConfig.workingDir = v.resolvedPath;
-    ds.worker.send({ type: 'inject_command', command: `/cd ${v.resolvedPath}`, updateWorkingDir: v.resolvedPath } as DaemonToWorker);
+    try {
+      ds.worker.send({ type: 'inject_command', command: `/cd ${v.resolvedPath}`, updateWorkingDir: v.resolvedPath } as DaemonToWorker);
+    } catch {
+      // send() 抛异常：worker 进程实际上已经不可达（管道已断），但 above 的
+      // repinSessionWorkingDir 已经把记录改成了新目录——绝不能留下「记录新、
+      // 进程仍在旧目录」的分裂状态。杀掉 worker 让下一条消息冷启动进新目录。
+      killWorker(ds);
+      return jsonRes(res, 200, { ok: true, mode: 'cold-restart', dir: v.resolvedPath });
+    }
     return jsonRes(res, 200, { ok: true, mode: 'inject', dir: v.resolvedPath });
   }
   // Unconditional (no `ds.worker` guard), matching the IM `/cd` command handler
