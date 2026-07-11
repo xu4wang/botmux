@@ -156,6 +156,7 @@ describe('POST /api/sessions/:sessionId/cd', () => {
       session: { sessionId: 's-inject', cliId: 'claude-code' },
       worker: { send, killed: false },
       adoptedFrom: undefined,
+      initConfig: { workingDir: '/old/stale/dir' },
     } as any;
     vi.spyOn(workerPool, 'findActiveBySessionId').mockReturnValue(ds);
     const repinSpy = vi.spyOn(sessionCwd, 'repinSessionWorkingDir').mockImplementation(() => {});
@@ -166,12 +167,15 @@ describe('POST /api/sessions/:sessionId/cd', () => {
     expect(res.status).toBe(200);
     expect(await res.json()).toEqual({ ok: true, mode: 'inject', dir: roleDirReal });
     // TOCTOU 契约：注入命令原样使用校验产出 resolvedPath（realpath 归一），
-    // 而非请求原始输入。
-    expect(send).toHaveBeenCalledWith({ type: 'inject_command', command: `/cd ${roleDirReal}` });
+    // 而非请求原始输入。updateWorkingDir 随行，供 worker 侧收敛 lastInitConfig。
+    expect(send).toHaveBeenCalledWith({ type: 'inject_command', command: `/cd ${roleDirReal}`, updateWorkingDir: roleDirReal });
     expect(repinSpy).toHaveBeenCalledWith(ds, roleDirReal);
     // 落盘重钉必须先于注入（记录 = 唯一事实源；注入只是让活进程跟上）。
     expect(repinSpy.mock.invocationCallOrder[0]).toBeLessThan(send.mock.invocationCallOrder[0]);
     expect(killSpy).not.toHaveBeenCalled();
+    // daemon 侧 ds.initConfig 同步更新，与 worker 侧收敛到同一新目录，避免下次
+    // forkWorker 用陈旧 initConfig 重建 init 消息。
+    expect(ds.initConfig.workingDir).toBe(roleDirReal);
   });
 
   it('200 mode:cold-restart — NO live worker: killWorker is STILL called (unconditional, no ds.worker guard)', async () => {

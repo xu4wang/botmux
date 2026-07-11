@@ -33,6 +33,9 @@ export function validateRoleLibraryPath(
 ): { ok: true; resolvedPath: string } | { ok: false; error: string } {
   const raw = (input ?? '').trim();
   if (!raw) return { ok: false, error: 'empty_path' };
+  // 维持「单行注入」不变量（与 slash 校验的 multiline_rejected 对称）：拒绝内嵌
+  // 控制字符，防止 /cd 路径把第二条命令伪装进注入的 text→Enter 窗口。
+  if (/[\r\n]/.test(raw)) return { ok: false, error: 'invalid_path_chars' };
   let rootReal: string;
   try { rootReal = realpathSync(rootOverride ?? roleLibraryRoot()); }
   catch { return { ok: false, error: 'role_library_missing' }; }

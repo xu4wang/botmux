@@ -341,7 +341,12 @@ ipcRoute('POST', '/api/sessions/:sessionId/cd', async (req, res, params) => {
   let canInject = false;
   try { canInject = !!(cliId && createCliAdapterSync(cliId as CliId).supportsSessionCwdMove); } catch { /* unknown cli */ }
   if (ds.worker && !ds.worker.killed && canInject) {
-    ds.worker.send({ type: 'inject_command', command: `/cd ${v.resolvedPath}` } as DaemonToWorker);
+    // updateWorkingDir 随 inject_command 带给 worker：会话内 /cd 后 worker 内部的
+    // respawn（claude_exit 自动重启 / IM /restart / dashboard restart）必须收敛到
+    // 新目录，而不是陈旧的 lastInitConfig.workingDir。daemon 侧的 ds.initConfig 同步
+    // 更新，保持与 worker 侧一致（下次 forkWorker 用它重建 init 消息）。
+    if (ds.initConfig) ds.initConfig.workingDir = v.resolvedPath;
+    ds.worker.send({ type: 'inject_command', command: `/cd ${v.resolvedPath}`, updateWorkingDir: v.resolvedPath } as DaemonToWorker);
     return jsonRes(res, 200, { ok: true, mode: 'inject', dir: v.resolvedPath });
   }
   // Unconditional (no `ds.worker` guard), matching the IM `/cd` command handler

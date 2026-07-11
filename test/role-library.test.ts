@@ -55,4 +55,11 @@ describe('validateRoleLibraryPath', () => {
     expect(validateRoleLibraryPath(join(root, 'users'), join(base, 'no-such-root')))
       .toEqual({ ok: false, error: 'role_library_missing' });
   });
+  it('拒绝内嵌控制字符（单行注入不变量，与 slash 的 multiline_rejected 对称）', () => {
+    const { root } = setup();
+    expect(validateRoleLibraryPath(`${join(root, 'users')}\nrm -rf /`, root))
+      .toEqual({ ok: false, error: 'invalid_path_chars' });
+    expect(validateRoleLibraryPath(`${join(root, 'users')}\r\nevil`, root))
+      .toEqual({ ok: false, error: 'invalid_path_chars' });
+  });
 });
