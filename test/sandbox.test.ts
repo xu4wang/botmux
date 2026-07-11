@@ -545,7 +545,12 @@ describe('sandbox landing from upper layer', () => {
     expect(readFileSync(join(target, 'b.txt'), 'utf8')).toBe('new b\n');
   });
 
-  it('a BRAND-NEW opaque dir is mkdir-only (does NOT rm -rf unrelated real files)', () => {
+  // Linux-only: this asserts overlay-landing (applySandboxDiff) behaviour, which
+  // only runs for the Linux bwrap sandbox — macOS uses a Seatbelt write-sandbox
+  // with no upper layer to land, so apply is never invoked there and its opaque-dir
+  // semantics (xattr-driven) don't hold off-Linux. The sibling landing tests are
+  // pure fs logic and stay cross-platform; only this apply-behaviour case is gated.
+  it.skipIf(process.platform !== 'linux')('a BRAND-NEW opaque dir is mkdir-only (does NOT rm -rf unrelated real files)', () => {
     // Regression #10: overlay marks BOTH new and replaced dirs opaque. apply must
     // only rm -rf an opaque dir that ALSO exists in the target; a purely-new dir
     // must not clobber concurrent real files that drifted under that path.
