@@ -2933,6 +2933,9 @@ async function flushPendingInjections(): Promise<void> {
     }
   } finally {
     injectionFlushing = false;
+    // 若注入期间有用户消息被 flushPending 的 injectionFlushing 守卫挡下、
+    // 且此刻已重新 idle，补踢一次（flushPending 自带全部守卫，最坏 no-op）。
+    if (isPromptReady && pendingMessages.length > 0) void flushPending();
   }
 }
 

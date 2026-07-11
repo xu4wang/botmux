@@ -62,4 +62,14 @@ describe('validateRoleLibraryPath', () => {
     expect(validateRoleLibraryPath(`${join(root, 'users')}\r\nevil`, root))
       .toEqual({ ok: false, error: 'invalid_path_chars' });
   });
+  it('拒绝库内符号链接解析出的含换行 resolvedPath（干净名字符号链接 → 库内含 \\n 的目录）', () => {
+    const { root } = setup();
+    // 目标目录在库内：不加 resolvedPath 复检时会通过 containment 并返回
+    // ok:true 且 resolvedPath 含 \n——正是「洗出」场景；现应被拦下。
+    const target = join(root, 'evil\ndir'); mkdirSync(target);
+    const link = join(root, 'clean-link');
+    symlinkSync(target, link);
+    expect(validateRoleLibraryPath(link, root))
+      .toEqual({ ok: false, error: 'invalid_path_chars' });
+  });
 });

@@ -42,6 +42,9 @@ export function validateRoleLibraryPath(
   let real: string;
   try { real = realpathSync(raw); }
   catch { return { ok: false, error: 'dir_not_found' }; }
+  // 库内符号链接可能指向含换行等控制字符的目录名，把 raw 处的干净校验洗掉——
+  // resolvedPath 是最终写回调用方（进而可能被注入）的值，必须同样校验。
+  if (/[\r\n]/.test(real)) return { ok: false, error: 'invalid_path_chars' };
   if (!isContainedIn(real, rootReal)) return { ok: false, error: 'outside_role_library' };
   try { if (!statSync(real).isDirectory()) return { ok: false, error: 'not_a_directory' }; }
   catch { return { ok: false, error: 'dir_not_found' }; }
