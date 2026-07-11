@@ -216,7 +216,11 @@ export async function setWorkingDirMode(
   let nextOncall: BotDefaultOncall | null = null;
   let nextWorkingDir: string | null = null;
 
-  const r = await rmwBotEntry<null>(larkAppId, (entry) => {
+  const r = await rmwBotEntry<{
+    nextOncall: BotDefaultOncall;
+    nextWorkingDir: string | null;
+    removedAutoboundChats: string[];
+  }>(larkAppId, (entry) => {
     const prior: BotDefaultOncall | undefined = entry.defaultOncall;
     if (mode === 'oncall') {
       nextOncall = { enabled: true, workingDir: dir, since: Date.now() };
@@ -226,12 +230,33 @@ export async function setWorkingDirMode(
       nextOncall = { enabled: false, workingDir: prior?.workingDir ?? '', since: prior?.since ?? 0 };
       nextWorkingDir = mode === 'default' ? dir : null;
     }
+
+    // Leaving oncall mode: any chats that were auto-bound by the defaultOncall
+    // flow must be released so they fall back to the bot-level defaultWorkingDir
+    // (or the repo-select card) instead of staying pinned to the old oncall dir.
+    // Manually bound chats (not in the autobound list) are intentionally kept.
+    const autobound: string[] = Array.isArray(entry.defaultOncallAutoboundChats)
+      ? entry.defaultOncallAutoboundChats : [];
+    let removedAutoboundChats: string[] = [];
+    if (mode !== 'oncall' && autobound.length > 0) {
+      const cur: OncallChat[] = Array.isArray(entry.oncallChats) ? entry.oncallChats : [];
+      const kept: OncallChat[] = [];
+      for (const c of cur) {
+        if (c && autobound.includes(c.chatId)) {
+          removedAutoboundChats.push(c.chatId);
+        } else {
+          kept.push(c);
+        }
+      }
+      entry.oncallChats = kept;
+    }
+
     entry.defaultOncall = nextOncall;
     if (nextWorkingDir === null) delete entry.defaultWorkingDir;
     else entry.defaultWorkingDir = nextWorkingDir;
     if (nextAutoWorktree) entry.defaultWorkingDirAutoWorktree = true;
     else delete entry.defaultWorkingDirAutoWorktree;
-    return { write: true, result: null };
+    return { write: true, result: { nextOncall, nextWorkingDir, removedAutoboundChats } };
   });
   if (!r.ok) return { ok: false, reason: r.reason };
 
@@ -239,10 +264,19 @@ export async function setWorkingDirMode(
   bot.config.defaultOncall = nextOncall!;
   bot.config.defaultWorkingDir = nextWorkingDir ?? undefined;
   bot.config.defaultWorkingDirAutoWorktree = nextAutoWorktree || undefined;
+  const removedAutoboundChats = r.result.removedAutoboundChats;
+  if (removedAutoboundChats.length > 0 && bot.config.oncallChats) {
+    bot.config.oncallChats = bot.config.oncallChats.filter(
+      c => !removedAutoboundChats.includes(c.chatId),
+    );
+  }
   logger.info(
     `[oncall:${larkAppId}] working-dir mode=${mode} ` +
     `(defaultWorkingDir=${nextWorkingDir ?? '∅'}, autoWorktree=${nextAutoWorktree}, ` +
-    `oncall.enabled=${nextOncall!.enabled}, oncall.dir=${nextOncall!.workingDir || '∅'})`,
+    `oncall.enabled=${nextOncall!.enabled}, oncall.dir=${nextOncall!.workingDir || '∅'}` +
+    (removedAutoboundChats.length > 0
+      ? `, released autobound chats=[${removedAutoboundChats.join(', ')}]`
+      : ''),
   );
   return { ok: true, defaultOncall: nextOncall!, defaultWorkingDir: nextWorkingDir, defaultWorkingDirAutoWorktree: nextAutoWorktree };
 }

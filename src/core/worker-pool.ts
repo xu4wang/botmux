@@ -165,7 +165,8 @@ function streamingCardDisabled(ds: DaemonSession): boolean {
   try {
     const cfg = getBot(ds.larkAppId).config;
     return cfg.disableStreamingCard === true
-      || (!!ds.chatId && !!cfg.noCardChats?.includes(ds.chatId));
+      || (!!ds.chatId && !!cfg.noCardChats?.includes(ds.chatId))
+      || ds.session.substituteTriggered === true;
   } catch { return false; }
 }
 

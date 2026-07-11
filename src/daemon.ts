@@ -1048,7 +1048,8 @@ function streamingCardDisabledFor(ds: DaemonSession): boolean {
   try {
     const cfg = getBot(ds.larkAppId).config;
     return cfg.disableStreamingCard === true
-      || (!!ds.chatId && !!cfg.noCardChats?.includes(ds.chatId));
+      || (!!ds.chatId && !!cfg.noCardChats?.includes(ds.chatId))
+      || ds.session.substituteTriggered === true;
   } catch { return false; }
 }
 
@@ -6736,6 +6737,7 @@ async function handleNewTopic(data: any, ctx: RoutingContext): Promise<void> {
   session.quoteTargetSenderIsBot = parsed.senderType === 'app' || parsed.senderType === 'bot';
   session.lastMessageAt = new Date(now).toISOString();
   session.scope = scope;
+  session.substituteTriggered = !!substituteTrigger;
   sessionStore.updateSession(session);
   messageQueue.ensureQueue(anchor);
   messageQueue.appendMessage(anchor, parsed);
@@ -7442,6 +7444,12 @@ async function handleThreadReply(data: any, ctx: RoutingContext): Promise<void> 
     return;
   }
 
+  // Mark sessions reached via substitute-mode mention so the streaming card / web-terminal buttons stay off.
+  if (ds && substituteTrigger && !ds.session.substituteTriggered) {
+    ds.session.substituteTriggered = true;
+    sessionStore.updateSession(ds.session);
+  }
+
   // Download attachments
   const effectiveAppId = ds?.larkAppId ?? larkAppId;
   const { attachments, needLogin } = await downloadResources(effectiveAppId, parsed.messageId, resources);
@@ -7556,6 +7564,7 @@ async function handleThreadReply(data: any, ctx: RoutingContext): Promise<void> 
     session.quoteTargetSenderIsBot = isForeignBot;
     session.lastMessageAt = new Date(now).toISOString();
     session.scope = scope;
+    session.substituteTriggered = !!substituteTrigger;
     sessionStore.updateSession(session);
 
     // Use the same layered oncall / inherit / default lookup as handleNewTopic

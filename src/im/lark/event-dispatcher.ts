@@ -2087,7 +2087,11 @@ export function startLarkEventDispatcher(larkAppId: string, larkAppSecret: strin
           routing.scope = 'chat';
           routing.anchor = chatId;
           routingSource = 'regular-group-chat';
-          if (message.root_id && message.thread_id) replyRootId = message.root_id;
+          // Top-level substitute messages need their own reply anchor so that
+          // concurrent triggers from different users in the same chat-scope
+          // session don't collapse or thread under the wrong message. Existing
+          // real threads keep their root_id.
+          replyRootId = (message.root_id && message.thread_id) ? message.root_id : messageId;
           logger.info(
             `[substitute:${larkAppId}] mention target=${substituteTrigger.target.name ?? substituteTrigger.target.openId ?? substituteTrigger.target.userId ?? substituteTrigger.target.unionId ?? 'unknown'} ` +
             `msg=${messageId.substring(0, 12)} chat=${chatId.substring(0, 12)} → chat-scope`,

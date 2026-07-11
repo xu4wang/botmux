@@ -1921,6 +1921,45 @@ describe('im.message.receive_v1 — bot-to-bot @mention routing', () => {
     expect(handlers.handleThreadReply).not.toHaveBeenCalled();
   });
 
+  it('substituteMode: top-level @substitute carries replyRootId=messageId so each trigger has its own reply anchor', async () => {
+    // Regression: without replyRootId, multiple substitute triggers in the same
+    // chat-scope session share/clear the currentReplyTarget, causing replies to
+    // land under the wrong message (or all collapse to plain chat sends).
+    setupBotState({
+      allowedUsers: [USER_OPEN_ID],
+      regularGroupReplyMode: 'new-topic',
+      substituteMode: {
+        enabled: true,
+        targets: [{ userId: 'u_sub', name: 'Sub Person' }],
+      },
+    });
+    mockGetChatMode.mockResolvedValue('group');
+    handlers.isSessionOwner.mockReturnValue(false);
+    const event = makeUserMessageEvent({
+      senderOpenId: USER_OPEN_ID,
+      content: JSON.stringify({ text: '@Sub Person help with this' }),
+      messageId: 'msg-substitute-anchor',
+      chatId: 'chat-substitute-anchor',
+      chatType: 'group',
+      mentions: [{ key: '@_sub', name: 'Sub Person', id: { user_id: 'u_sub' } }],
+    });
+
+    await capturedHandlers['im.message.receive_v1'](event);
+    await flushEventWork();
+
+    expect(handlers.handleNewTopic).toHaveBeenCalledWith(event, expect.objectContaining({
+      scope: 'chat',
+      anchor: 'chat-substitute-anchor',
+      replyRootId: 'msg-substitute-anchor',
+      larkAppId: MY_APP_ID,
+      substituteTrigger: {
+        target: { name: 'Sub Person', userId: 'u_sub' },
+        disclosure: 'prefix',
+      },
+    }));
+    expect(handlers.handleThreadReply).not.toHaveBeenCalled();
+  });
+
   it('substituteMode: @substitute from a non-canTalk sender is ignored', async () => {
     setupBotState({
       allowedUsers: ['ou_other_allowed'],

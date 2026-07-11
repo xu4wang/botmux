@@ -106,6 +106,16 @@ describe('two-phase turn reactions', () => {
     expect(ds.pendingAckReactions?.map(a => a.messageId)).toEqual(['om_sub']);
   });
 
+  it('substitute-triggered session is card-off even when streaming card is globally enabled', async () => {
+    registerWith(false);
+    const ds = makeDs({ session: { sessionId: 'sess-sub', chatId: 'oc_x', rootMessageId: 'om_root', substituteTriggered: true } });
+
+    await noteTurnReceived(ds, 'om_a');
+
+    expect(mocks.addReaction).toHaveBeenCalledWith(APP, 'om_a', 'GoGoGo');
+    expect(ds.pendingAckReactions?.map(a => a.messageId)).toEqual(['om_a']);
+  });
+
   it('silentTurnReactions suppresses receipt reactions in card-off sessions', async () => {
     registerWith(true, { silentTurnReactions: true });
     const ds = makeDs();
