@@ -25,8 +25,11 @@
 
 ### 「新建角色：<一句话描述>」
 1. 按 role-claude-md-template.md 起草人设，预览给用户确认。
-2. 确认后在 `users/<发送者open_id>/<角色名>/` 创建 CLAUDE.md（模板替换人设段），
-   然后走「切到XX」流程。角色名即目录名，限 32 字符内、不含 `/`。
+2. 确认后在 `users/<发送者open_id>/<角色名>/` 创建两个文件：
+   - `CLAUDE.md`（按模板，人设段替换为起草内容）
+   - `_role-protocol.md`（**从角色库根 `<ROLES_ROOT>/_role-protocol.md` 复制一份**——
+     协议必须是角色目录内的本地文件，否则 `@import` 会被判为外部 include 弹交互式批准框卡住会话）
+3. 然后走「切到XX」流程。角色名即目录名，限 32 字符内、不含 `/` 与空格。
 
 ### 「沉淀知识」
 按以下顺序执行（pull → merge → distill → push）：

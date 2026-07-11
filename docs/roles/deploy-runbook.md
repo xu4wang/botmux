@@ -22,6 +22,15 @@ mkdir -p ~/botmux-roles/<bot>/shared/默认助理/knowledge
 - 按 `docs/roles/role-claude-md-template.md` 写
   `~/botmux-roles/<bot>/shared/默认助理/CLAUDE.md`（人设段用模板里给的零人设一行：
   「你是通用助理，未设定特定角色人设。」）。
+- **把 `_role-protocol.md` 复制一份进默认角色目录**（每个角色目录都要有自己的副本）：
+  ```bash
+  cp ~/botmux-roles/<bot>/_role-protocol.md ~/botmux-roles/<bot>/shared/默认助理/
+  ```
+  原因：角色 CLAUDE.md 的 `@import` 若指向角色目录之外的文件，Claude Code 会判为
+  「外部 include」并弹出交互式批准框（`hasClaudeMdExternalIncludesApproved`），而 botmux
+  的信任种子只写 `hasTrustDialogAccepted`（`worker-pool.ts:1080` / `worker.ts:254`），
+  不覆盖这个标志 —— 会卡住会话。协议放进角色目录内即为本地引用，规避此类交互框。
+  「新建角色」流程同样会复制一份（见协议模板）；协议更新后需扫描各角色目录重新分发。
 
 角色库根目录固定为 `~/botmux-roles`（`src/core/role-library.ts` 的 `roleLibraryRoot()`，
 v0 硬编码约定、不接受配置），每个 bot 在其下各占一个子目录；`botmux cd` 的越界校验
