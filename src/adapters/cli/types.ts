@@ -256,6 +256,10 @@ export interface CliAdapter {
    *  silently unisolated. */
   readonly supportsReadIsolation?: boolean;
 
+  /** CLI 支持会话内移动工作目录（如 Claude Code ≥2.1.205 的 /cd）。
+   *  true → botmux cd 走 idle 注入（不重启进程）；缺省 → 杀进程冷启动兜底。 */
+  readonly supportsSessionCwdMove?: boolean;
+
   /** When true, the worker's soft first-prompt timeout keeps queued input held
    *  until this adapter's `readyPattern` appears. Use only for CLIs whose startup
    *  screens can accept and swallow stdin before the real composer exists; the

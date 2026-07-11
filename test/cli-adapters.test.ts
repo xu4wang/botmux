@@ -65,6 +65,11 @@ describe('createCliAdapterSync factory', () => {
     expect(() => createCliAdapterSync('unknown-cli' as CliId)).toThrow(/Unknown CLI adapter/);
   });
 
+  it('supportsSessionCwdMove：claude-code true，codex 缺省', () => {
+    expect(createCliAdapterSync('claude-code').supportsSessionCwdMove).toBe(true);
+    expect(createCliAdapterSync('codex').supportsSessionCwdMove).toBeUndefined();
+  });
+
   it.each(ALL_CLI_IDS)('adapter for "%s" has resolvedBin set', (id) => {
     const adapter = createCliAdapterSync(id, `/opt/${id}`);
     if (id === 'codex-app' || id === 'mira' || id === 'mir') expect(adapter.resolvedBin).toBe(process.execPath);

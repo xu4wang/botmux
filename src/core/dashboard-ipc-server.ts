@@ -32,7 +32,7 @@ import { readGlobalConfig } from '../global-config.js';
 import { normalizeChatReplyMode, type ChatReplyMode } from '../services/chat-reply-mode-store.js';
 import * as chatFirstSeenStore from '../services/chat-first-seen-store.js';
 import * as scheduler from './scheduler.js';
-import { listActiveSessions, findActiveBySessionId, closeSession, getActiveSessionsRegistry, transferSession, deliverWriteLinkCardToOwners, forkWorker, suspendWorker } from './worker-pool.js';
+import { listActiveSessions, findActiveBySessionId, closeSession, getActiveSessionsRegistry, transferSession, deliverWriteLinkCardToOwners, forkWorker, suspendWorker, killWorker } from './worker-pool.js';
 import { listOnlineDaemons } from '../utils/daemon-discovery.js';
 import { getChatMode, replyMessage, sendMessage, resolveUnionIdFromOpenId, listThreadMessages, listChatMessages, getUserProfile } from '../im/lark/client.js';
 import { parseApiMessage, cardContentHasUpgradeFallback, resolveMergedCardContent } from '../im/lark/message-parser.js';
@@ -88,6 +88,10 @@ import {
 import { getBotBrand, getBot, readBotSkillPolicy, getBotTuiSlashAllow } from '../bot-registry.js';
 import { normalizeKanbanColumn, normalizeKanbanPosition, normalizeSessionTitle } from './session-board.js';
 import { validateSlashInjection } from './slash-inject.js';
+import { validateRoleLibraryPath } from './role-library.js';
+import { repinSessionWorkingDir } from './session-cwd.js';
+import { createCliAdapterSync } from '../adapters/cli/registry.js';
+import type { CliId } from '../adapters/cli/types.js';
 import type { DaemonToWorker, ScheduledTask, ParsedSchedule, Session } from '../types.js';
 import type { DaemonSession } from './types.js';
 import { attachSkillPolicy, detachSkillPolicy } from './skills/im-command.js';
@@ -311,6 +315,45 @@ ipcRoute('POST', '/api/sessions/:sessionId/slash', async (req, res, params) => {
   if (!v.ok) return jsonRes(res, 403, { ok: false, error: v.error });
   ds.worker.send({ type: 'inject_command', command: v.command } as DaemonToWorker);
   jsonRes(res, 200, { ok: true, sessionId: params.sessionId, queued: v.command });
+});
+
+/** 会话内切换工作目录（角色切换专用）：硬校验角色库根 → 更新记录落盘（唯一事实源）
+ *  → 按能力位选择 idle 注入 /cd（进程不死）或杀进程冷启动兜底。
+ *  Loopback-trusted（同 suspend/slash）：签名所需 .dashboard-secret 被读隔离
+ *  deny，沙箱内 CLI 无法签名；安全边界由 validateRoleLibraryPath 硬校验承担
+ *  （realpath 归一 + dev/ino 包含判断，角色库根之外一律拒）。
+ *  不发话题消息（AI 自己发角色化确认）。 */
+ipcRoute('POST', '/api/sessions/:sessionId/cd', async (req, res, params) => {
+  const ds = findActiveBySessionId(params.sessionId);
+  if (!ds) return jsonRes(res, 404, { ok: false, error: 'session_not_active' });
+  // Adopt/observed 会话是收编的用户自有 pane——注入或冷重启都会打断用户自己的
+  // 终端会话。与 /suspend、/restart、/slash 同款排除。
+  if (ds.adoptedFrom || ds.initConfig?.adoptMode) {
+    return jsonRes(res, 409, { ok: false, error: 'adopt_cd_unsupported' });
+  }
+  const body = await readJsonBody<{ dir?: string }>(req).catch(() => ({} as { dir?: string }));
+  const v = validateRoleLibraryPath(body?.dir ?? '');
+  if (!v.ok) {
+    return jsonRes(res, v.error === 'outside_role_library' ? 403 : 400, { ok: false, error: v.error });
+  }
+  repinSessionWorkingDir(ds, v.resolvedPath);
+  const cliId = ds.session.cliId;
+  let canInject = false;
+  try { canInject = !!(cliId && createCliAdapterSync(cliId as CliId).supportsSessionCwdMove); } catch { /* unknown cli */ }
+  if (ds.worker && !ds.worker.killed && canInject) {
+    ds.worker.send({ type: 'inject_command', command: `/cd ${v.resolvedPath}` } as DaemonToWorker);
+    return jsonRes(res, 200, { ok: true, mode: 'inject', dir: v.resolvedPath });
+  }
+  // Unconditional (no `ds.worker` guard), matching the IM `/cd` command handler
+  // (src/core/command-handler.ts) — killWorker() already no-ops safely when there
+  // is no live worker. That "no worker" branch is exactly what must run here for a
+  // lazy-restored-after-daemon-restart or crash-stopped TmuxBackend/HerdrBackend/
+  // ZellijBackend session: the persistent backing pane survives the worker's death
+  // and still binds the OLD cwd, so it must be torn down via
+  // destroyOrphanedBackingSession (called from inside killWorker) or the next
+  // resume would silently reattach to it and ignore the just-repinned workingDir.
+  killWorker(ds);
+  jsonRes(res, 200, { ok: true, mode: 'cold-restart', dir: v.resolvedPath });
 });
 
 /** 解析 session（活跃优先，已关闭兜底）。活跃会话取 ds.session —— registry 与
