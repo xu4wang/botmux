@@ -3492,6 +3492,9 @@ async function flushPending(): Promise<void> {
   if (isFlushing) return;  // while loop in active flush will pick up new messages
   if (!backend || !cliAdapter) return;
   if (pendingMessages.length === 0) return;  // nothing to flush — keep isPromptReady
+  // 注入进行中不得并发写 PTY（用户消息留在 pendingMessages，注入完成后的下一次
+  // markPromptReady 自然排空）——防止 type-ahead 插进注入的 text→Enter 窗口。
+  if (injectionFlushing) return;
   if (bareShellLaunchBlocked) return;  // launch failed into a bare shell — don't type prompts into it
   // Ready-gate: hold the FIRST prompt until the SessionStart hook fires a true-
   // ready signal. A cjadk-style startup selector's ❯ falsely matches readyPattern
@@ -6044,6 +6047,11 @@ process.on('message', async (raw: unknown) => {
     }
 
     case 'inject_command': {
+      // 会话内 /cd 移动后，worker 内部 respawn（claude_exit 自动重启 / IM /restart /
+      // dashboard restart）必须收敛到新目录，而不是陈旧的 lastInitConfig.workingDir。
+      if (msg.updateWorkingDir && lastInitConfig) {
+        lastInitConfig.workingDir = msg.updateWorkingDir;
+      }
       pendingInjections.push(msg.command);
       void flushPendingInjections();
       break;
