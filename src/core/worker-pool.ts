@@ -659,7 +659,7 @@ export interface WriteLinkOwnerDelivery {
  * `botmux term-link`) and the single-operator delivery
  * ({@link deliverWritableTerminalCardTo}, behind the `/term` slash command).
  */
-function buildWritableTerminalCard(ds: DaemonSession): string | null {
+export function buildWritableTerminalCard(ds: DaemonSession): string | null {
   const port = ds.workerPort ?? ds.session.webPort;
   if (!port || !ds.workerToken) return null;
   const botCfg = getBot(ds.larkAppId).config;
@@ -725,6 +725,42 @@ export async function deliverWritableTerminalCardTo(
   const cardJson = buildWritableTerminalCard(ds);
   if (!cardJson) return 'not_ready';
   return deliverWriteLinkCard(ds, operatorOpenId, cardJson);
+}
+
+/**
+ * DM a writable-terminal control card to the bot's owner(s) for a substitute-mode session.
+ * Guards against duplicate sends via `session.substituteControlCardSent`.
+ */
+export async function deliverSubstituteControlCard(ds: DaemonSession): Promise<void> {
+  if (ds.session.substituteControlCardSent) return;
+  const cardJson = buildWritableTerminalCard(ds);
+  if (!cardJson) return;
+
+  const audience = resolvePrivateCardAudience(ds);
+  if (audience.length === 0) {
+    logger.debug(`[${tag(ds)}] substitute control card skipped: no owner audience`);
+    return;
+  }
+
+  let sent = 0;
+  const CONCURRENCY = 5;
+  for (let i = 0; i < audience.length; i += CONCURRENCY) {
+    const batch = audience.slice(i, i + CONCURRENCY);
+    await Promise.all(batch.map(async (openId) => {
+      try {
+        await sendUserMessage(ds.larkAppId, openId, cardJson, 'interactive');
+        sent++;
+      } catch (err) {
+        logger.warn(`[${tag(ds)}] substitute control card DM to ${openId.substring(0, 8)}… failed: ${err instanceof Error ? err.message : err}`);
+      }
+    }));
+  }
+
+  if (sent > 0) {
+    ds.session.substituteControlCardSent = true;
+    sessionStore.updateSession(ds.session);
+    logger.info(`[${tag(ds)}] substitute control card DM'd to ${sent}/${audience.length} owner(s)`);
+  }
 }
 
 /**
@@ -1932,6 +1968,12 @@ function setupWorkerHandlers(ds: DaemonSession, worker: ChildProcess): void {
             patch: { webPort: msg.port },
           },
         });
+
+        // Substitute-mode control card: DM owner(s) a writable terminal + manage buttons.
+        if (ds.pendingSubstituteControlCard) {
+          ds.pendingSubstituteControlCard = false;
+          void deliverSubstituteControlCard(ds);
+        }
 
         // Bot opted out of the streaming card: the terminal is up and the
         // final answer will still arrive via `botmux send`; just don't post the
