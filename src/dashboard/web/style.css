@@ -4004,7 +4004,7 @@ td code,
 }
 
 .form-row span,
-.bd-body .bd-row label > span {
+.bd-body .bd-row :where(label, .bd-field) > span {
   display: block;
   margin-bottom: 5px;
   color: var(--muted);
@@ -5074,7 +5074,7 @@ dialog.onboarding-dialog::backdrop {
 .bd-card header strong { font-size: 16px; }
 .bd-card header small { color: var(--muted); font-family: var(--mono); font-size: 11px; }
 .bd-body .bd-row { margin: 12px 0 8px; }
-.bd-body .bd-row label { display: block; }
+.bd-body .bd-row :where(label, .bd-field) { display: block; }
 .bd-body .bd-row input[type=text] { font-family: var(--mono); font-size: 12px; }
 .bd-meta { display: flex; gap: 16px; flex-wrap: wrap; color: var(--muted); font-size: 12px; margin: 8px 0; }
 .oncall-status.hint-ok { background: transparent; border: none; padding: 0; margin: 0; color: var(--success); }
@@ -19848,7 +19848,7 @@ dialog select[multiple]:hover:not(:disabled) {
   }
 }
 
-.bot-defaults-page .bd-body .bd-row label {
+.bot-defaults-page .bd-body .bd-row :where(label, .bd-field) {
   display: grid;
   gap: 8px;
   min-width: 0;
@@ -19866,7 +19866,7 @@ dialog select[multiple]:hover:not(:disabled) {
   margin-top: 12px;
 }
 
-.bot-defaults-page .bd-body .bd-row label > span {
+.bot-defaults-page .bd-body .bd-row :where(label, .bd-field) > span {
   margin: 0;
   color: var(--muted);
   font-size: 12px;
