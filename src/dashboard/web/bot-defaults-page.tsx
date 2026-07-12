@@ -2002,14 +2002,13 @@ function SubstituteModeSection(props: { bot: BotDefaultsRow; patchBot: PatchBot 
                     {target.resolution.avatarUrl ? (
                       <Html html={botAvatarHtml({ name: target.resolution.name, avatarUrl: target.resolution.avatarUrl, size: 'sm' })} />
                     ) : null}
-                    <input
-                      type="text"
-                      data-input={`substituteTargetName-${target.key}`}
+                    <span
+                      className="bd-substitute-target-name-chip"
+                      data-chip={`substituteTargetName-${target.key}`}
                       aria-label={`${tr('botDefaults.substituteTargetName')} ${index + 1}`}
-                      value={target.name}
-                      disabled
-                      readOnly
-                    />
+                    >
+                      {target.name}
+                    </span>
                   </>
                 ) : target.resolution?.ok === false ? (
                   <span className="bd-substitute-target-resolution-badge">{substituteReasonText(target.resolution.reason)}</span>

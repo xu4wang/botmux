@@ -20127,6 +20127,25 @@ dialog select[multiple]:hover:not(:disabled) {
   cursor: default;
 }
 
+.bot-defaults-page .bd-substitute-target-name-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  max-width: 100%;
+  min-height: 26px;
+  padding: 4px 12px;
+  border-radius: 999px;
+  background: var(--accent);
+  color: var(--on-accent);
+  font-size: 13px;
+  font-weight: 500;
+  line-height: 1;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  user-select: none;
+}
+
 .bot-defaults-page .bd-substitute-target-resolving {
   font-size: 12px;
   color: var(--muted);
