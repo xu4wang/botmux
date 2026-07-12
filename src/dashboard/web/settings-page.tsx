@@ -3,6 +3,7 @@ import { DropdownMenu, FieldTitle, LoadingState, dropdownLabel } from './dashboa
 import { useT } from './react-hooks.js';
 import { mountReactPage, type PageDisposer } from './react-mount.js';
 import { store } from './store.js';
+import { ui } from './ui.js';
 
 interface MaintenanceTaskCfg { enabled?: boolean; time?: string }
 interface MaintenanceCfg { autoUpdate?: MaintenanceTaskCfg; autoRestart?: MaintenanceTaskCfg }
@@ -226,6 +227,7 @@ function SettingsPage() {
       setFeishuLoginQr(null);
       const saved = parseSettings(body.settings);
       setSettings(saved);
+      ui.publicReadOnly = saved.publicReadOnly;
       store.setScheduleTimeZone(saved.effectiveScheduleTimeZone);
       setSettingsMsg({ text: tr('settings.saved'), cls: 'hint-ok' });
     } catch (e) {
