@@ -208,12 +208,20 @@ import {
   RELAY_ORIGIN_CAPABILITY_BASENAME,
   replaceManagedOriginCapabilityFile,
 } from './core/managed-origin-capability.js';
+import { CodexRpcEngine } from './codex-rpc-engine.js';
 
 // ─── State ───────────────────────────────────────────────────────────────────
 
 let cliAdapter: CliAdapter | null = null;
 let backend: SessionBackend | null = null;
 let intentionalRestartBackend: SessionBackend | null = null;
+// Hybrid codex RPC input mode (opt-in per bot, cfg.codexRpcInput). When active,
+// user input is delivered to codex via the app-server JSON-RPC channel
+// (turn/start) instead of a tmux paste, and the pane runs `codex --remote`
+// attached to this engine's thread. All three are set together or none.
+let codexRpcEngine: CodexRpcEngine | undefined;
+let codexRemoteWsUrl: string | undefined;
+let codexRemoteThreadId: string | undefined;
 let cliPidMarker: string | null = null;  // path to .botmux-cli-pids/<pid>
 let seatbeltProfilePath: string | null = null;       // per-session Seatbelt .sb profile to rm at exit (external-wrapper read isolation)
 let sandboxStopWatcher: (() => void) | null = null;  // stop fn for the sandbox outbox watcher
@@ -4692,9 +4700,19 @@ async function flushPending(): Promise<void> {
       // worker — exactly the failure mode this change is closing. Contain it.
       let result: Awaited<ReturnType<typeof cliAdapter.writeInput>> | undefined;
       try {
-        result = item.codexAppInput && cliAdapter.writeStructuredInput
-          ? await cliAdapter.writeStructuredInput(backend, msg, item.codexAppInput)
-          : await cliAdapter.writeInput(backend, msg);
+        if (codexRpcEngine) {
+          // RPC input mode: deliver via JSON-RPC turn/start (its ack IS the
+          // submit confirmation), which the attached `codex --remote` TUI
+          // renders. No tmux paste → the history.jsonl verify/retry/recover
+          // machinery is bypassed. A throw here falls into the catch below and
+          // surfaces as a normal submit-failure notice.
+          await codexRpcEngine.sendTurn(msg);
+          result = { submitted: true };
+        } else if (item.codexAppInput && cliAdapter.writeStructuredInput) {
+          result = await cliAdapter.writeStructuredInput(backend, msg, item.codexAppInput);
+        } else {
+          result = await cliAdapter.writeInput(backend, msg);
+        }
         scheduleBusyPatternIdleProbe(`${cliName()} post-submit`);
       } catch (err: any) {
         log(`writeInput threw: ${err?.message ?? err}`);
@@ -5909,6 +5927,11 @@ async function spawnCli(cfg: Extract<DaemonToWorker, { type: 'init' }>): Promise
     disableCliBypass: cfg.disableCliBypass === true,
     skillPluginDir: cfg.skillPluginDir,
     readIsolation: willReadIsolate,
+    // Set (as a pair) by the init handler when hybrid RPC input is engaged;
+    // makes buildArgs launch `codex --remote <ws> resume <thread>` instead of
+    // the normal paste-mode codex. Undefined for every other bot/CLI.
+    codexRemoteWsUrl,
+    codexRemoteThreadId,
   });
 
   // Extra args from env (CLI_DISABLE_DEFAULT_ARGS is removed — adapters own their defaults)
@@ -6790,6 +6813,15 @@ async function spawnCli(cfg: Extract<DaemonToWorker, { type: 'init' }>): Promise
       );
     }
     durableTurnInFlight = false;
+    // Hybrid RPC mode: the `codex --remote` viewer just died — tear down the
+    // paired app-server so it can't outlive the pane. A fresh spawn re-engages
+    // the engine from scratch (or falls back to paste mode).
+    if (codexRpcEngine) {
+      try { codexRpcEngine.stop(); } catch { /* best effort */ }
+      codexRpcEngine = undefined;
+      codexRemoteWsUrl = undefined;
+      codexRemoteThreadId = undefined;
+    }
     const logTail = recentTerminalLogTail();
     // Don't park a diagnostic shell here: most exits are immediately
     // auto-restarted by the daemon, so an inline park would just be torn down
@@ -8266,6 +8298,40 @@ process.on('message', async (raw: unknown) => {
           port = await startWebServer(config.web.workerHost, msg.webPort);
           log('Workflow worker mode: web terminal enabled; skipping screen updates and screen analyzer');
         }
+        // Hybrid codex RPC input (opt-in): stand up a per-session app-server and
+        // create the botmux-owned thread + first turn BEFORE spawnCli, so the
+        // pane launches `codex --remote <ws> resume <thread>` (see codex.ts
+        // buildArgs) and input flows via JSON-RPC instead of a drop-prone paste.
+        // Scoped to fresh, non-isolated codex sessions with a prompt; any failure
+        // cleanly falls back to normal paste mode. readIsolation is excluded
+        // because its per-bot CODEX_HOME wouldn't match this app-server's env.
+        if (
+          msg.codexRpcInput === true && msg.cliId === 'codex' &&
+          !!msg.prompt && msg.resume !== true && msg.adoptMode !== true &&
+          msg.readIsolation !== true
+        ) {
+          try {
+            const codexBin = createCliAdapterSync('codex', msg.cliPathOverride).resolvedBin;
+            const engineEnv: NodeJS.ProcessEnv = { ...redactChildEnv(process.env) };
+            engineEnv.PATH = `${join(homedir(), '.botmux', 'bin')}:${engineEnv.PATH ?? ''}`;
+            engineEnv.BOTMUX_SESSION_ID = msg.sessionId;
+            engineEnv.BOTMUX_LARK_APP_ID = msg.larkAppId;
+            const engine = new CodexRpcEngine({ codexBin, cwd: msg.workingDir, env: engineEnv, log: (m: string) => log(m) });
+            await engine.start();
+            const threadId = await engine.startThread();
+            await engine.sendTurn(msg.prompt);
+            codexRpcEngine = engine;
+            codexRemoteWsUrl = engine.wsUrl;
+            codexRemoteThreadId = threadId;
+            log(`Codex RPC input engaged: app-server ${engine.wsUrl} thread ${threadId} (first turn sent via JSON-RPC)`);
+          } catch (err: any) {
+            log(`Codex RPC input failed to start (${err?.message ?? err}); falling back to paste mode`);
+            try { codexRpcEngine?.stop(); } catch { /* best effort */ }
+            codexRpcEngine = undefined;
+            codexRemoteWsUrl = undefined;
+            codexRemoteThreadId = undefined;
+          }
+        }
         await spawnCli(msg);
 
         // Queue the initial prompt — flushed when CLI shows idle.
@@ -8298,7 +8364,9 @@ process.on('message', async (raw: unknown) => {
           // transcript file.
           codexBridgeMarkPendingTurn(msg.prompt, msg.turnId, msg.dispatchAttempt);
         }
-        if (msg.prompt && (!cliAdapter?.passesInitialPromptViaArgs || deferInitialPrompt)) {
+        if (msg.prompt && !codexRpcEngine && (!cliAdapter?.passesInitialPromptViaArgs || deferInitialPrompt)) {
+          // codexRpcEngine !== undefined → the first prompt was already delivered
+          // via JSON-RPC turn/start above; don't also queue it for a tmux paste.
           pendingMessages.push({
             content: msg.prompt,
             turnId: msg.turnId,
@@ -8306,6 +8374,7 @@ process.on('message', async (raw: unknown) => {
             vcMeetingImTurnOrigin: msg.vcMeetingImTurnOrigin,
             codexAppInput: msg.promptCodexAppInput,
           });
+        }
         }
 
         // Riff (remote HTTP backends): spawnCli already marked the prompt ready
@@ -8823,7 +8892,7 @@ function teardownSandboxBestEffort(): void {
 // and process.exit(1), killing a live session over a dropped log write. Install
 // the guard before any further stdout writes (log() writes to process.stdout).
 installStdioEpipeGuard();
-process.on('exit', () => { teardownSandboxBestEffort(); });
+process.on('exit', () => { teardownSandboxBestEffort(); try { codexRpcEngine?.stop(); } catch { /* best effort */ } });
 process.on('uncaughtException', (err: NodeJS.ErrnoException) => {
   // A broken pipe on stdout/stderr (or any socket) must not tear down a live
   // session — the stdio guard handles those it can; this is the backstop.
