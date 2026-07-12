@@ -1247,11 +1247,13 @@ export async function enforceMessageQuotaForCliInput(
   anchor: string,
   senderUnionId?: string,
   memberUnionId?: string,
+  chatType?: 'group' | 'p2p',
 ): Promise<boolean> {
   // senderUnionId（bot-locked）让 evaluateTalk 认出跨部署团队 peer bot（teamBot 腿）；
   // memberUnionId（可为真人 union）走 teamMember 腿——否则外部闸门/群闸门放进来的
   // 团队 bot 或团队成员消息会在这里复查处被静默丢弃（#332 端到端断点，人腿同理）。
-  const ev = evaluateTalk(larkAppId, chatId, senderOpenId, senderUnionId, memberUnionId);
+  // chatType 同理：不传的话，p2pOpen 放行的私聊消息会在这道复查里被丢掉（同一个断点）。
+  const ev = evaluateTalk(larkAppId, chatId, senderOpenId, senderUnionId, memberUnionId, chatType);
   if (!ev.allowed) {
     logger.debug(`[quota:${larkAppId}] dropping message ${messageId.substring(0, 12)} from non-allowed sender ${senderOpenId?.substring(0, 12) ?? '?'}`);
     return false;
@@ -2810,6 +2812,20 @@ ipcRoute('POST', '/api/asks', async (req, res) => {
 
   // 谁能答复 = 谁能在该 chat 跟 bot 说话（canTalk）。鉴权在 broker 点击时按注入的
   // canTalkChecker 判定（见下方 setAskCanTalkChecker），daemon 这里不再预解析 approver。
+  // chatType 随 ask 一起记下：p2pOpen 的 bot 在私聊里提问时，答复权靠这一腿才判得出
+  // 是 p2p（否则 checker 只有 chatId，p2pOpen 腿 fail-closed，对方点不动按钮）。
+  let askChatType: 'group' | 'p2p' | undefined;
+  for (const ds of activeSessions.values()) {
+    if (ds.larkAppId === parsed.larkAppId && ds.session.sessionId === parsed.sessionId) {
+      askChatType = ds.chatType;
+      break;
+    }
+  }
+  if (!askChatType) {
+    // 查不到会话 → chatType 缺省 → p2pOpen 腿 fail-closed（答复权退回原语义）。不致命，但
+    // p2pOpen 的 bot 在私聊里会出现「对方点不动按钮」，留痕便于排查。
+    logger.warn(`[ask:${parsed.larkAppId}] no active session for ${parsed.sessionId.substring(0, 8)}; chatType unknown (p2pOpen answer gate falls back to allowlist)`);
+  }
   const result = await registerAskBroker({
     larkAppId: parsed.larkAppId,
     chatId: parsed.chatId,
@@ -2817,6 +2833,7 @@ ipcRoute('POST', '/api/asks', async (req, res) => {
     sessionId: parsed.sessionId,
     questions: parsed.questions,
     timeoutMs: parsed.timeoutMs,
+    chatType: askChatType,
   });
 
   // CoCo 专属：它的 hook 不能用 directive 代答（hook 客户端永远 passthrough，CoCo 会
@@ -6429,7 +6446,7 @@ async function startInitialPassthroughSession(args: {
     larkAppId, chatId, chatType, scope, anchor, messageId, replyRootId,
     parsed, commandContent, senderOpenId, senderUnionId, memberUnionId, ownerOpenId, ownerUnionId, creatorOpenId,
   } = args;
-  if (!await enforceMessageQuotaForCliInput(larkAppId, chatId, senderOpenId, messageId, anchor, senderUnionId, memberUnionId)) {
+  if (!await enforceMessageQuotaForCliInput(larkAppId, chatId, senderOpenId, messageId, anchor, senderUnionId, memberUnionId, chatType)) {
     return;
   }
 
@@ -6778,7 +6795,7 @@ async function handleNewTopic(data: any, ctx: RoutingContext): Promise<void> {
     }
   }
 
-  if (!await enforceMessageQuotaForCliInput(larkAppId, chatId, senderOpenId, messageId, anchor, teamTrustUnionId, senderUnionId)) {
+  if (!await enforceMessageQuotaForCliInput(larkAppId, chatId, senderOpenId, messageId, anchor, teamTrustUnionId, senderUnionId, chatType)) {
     return;
   }
 
@@ -7543,7 +7560,7 @@ async function handleThreadReply(data: any, ctx: RoutingContext): Promise<void> 
   }
 
   const quotaSenderOpenId = threadSenderOpenId;
-  if (!await enforceMessageQuotaForCliInput(larkAppId, ctxChatId ?? data?.message?.chat_id, quotaSenderOpenId, parsed.messageId, anchor, threadTeamTrustUnionId, threadSenderUnionId)) {
+  if (!await enforceMessageQuotaForCliInput(larkAppId, ctxChatId ?? data?.message?.chat_id, quotaSenderOpenId, parsed.messageId, anchor, threadTeamTrustUnionId, threadSenderUnionId, ctxChatType)) {
     return;
   }
 
@@ -8282,7 +8299,7 @@ export async function startDaemon(botIndex?: number): Promise<void> {
   setAskCardDispatcher(createLarkAskCardDispatcher());
   // Honour the bot's canTalk gate for `botmux ask` answers: a clicker who may
   // address the bot in this chat may answer an implicit-approver ask.
-  setAskCanTalkChecker((appId, chatId, openId) => evaluateTalk(appId, chatId, openId).allowed);
+  setAskCanTalkChecker((appId, chatId, openId, chatType) => evaluateTalk(appId, chatId, openId, undefined, undefined, chatType).allowed);
 
   writePidFile();
   const memoryDiagnostics = startMemoryDiagnostics();

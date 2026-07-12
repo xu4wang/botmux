@@ -624,6 +624,19 @@ export interface BotConfig {
   /** Additional plugin ids enabled only for this bot. */
   plugins?: string[];
   /**
+   * 私聊对话全开（默认关闭）。开启后**任何人都能和本 bot 私聊**（talk-only），无需
+   * 逐个加 globalGrants —— 谁能私聊由飞书应用的「可用范围」控制，botmux 侧不再设闸。
+   *
+   * **只放行 canTalk，canOperate 绝不读它**：`/restart`、`/cd`、`/repo`、卡片按钮等
+   * 管理操作仍只认 allowedUsers。与 oncall（群维度的 talk-open，管理权仍限 owner）
+   * 是同一个安全模型，本字段只是把它补到 p2p 维度——oncall/defaultOncall 明确不绑
+   * p2p（oncall-store.ts 的 `chatType !== 'group'` 短路），故私聊此前只有「逐人白名单」
+   * 与「三张名单全空 → 人人是 admin」两个极端。
+   *
+   * 不影响群：群里仍按 allowedUsers / allowedChatGroups / oncall / grants 判定。
+   */
+  p2pOpen?: boolean;
+  /**
    * 消息额度机制（默认关闭）。`defaultLimit` 的"是否配置"本身就是开关：
    *   • 未配置（undefined）→ 关闭：无显式数字的 /grant 仍是"无限授权"（当前行为）。
    *   • 配置正整数 D    → 开启默认额度：`/grant @x`（不带数字）套用 D 条额度。
@@ -987,6 +1000,12 @@ export function registerBot(cfg: BotConfig): BotState {
     resolvedAllowedUsers: [...(cfg.allowedUsers ?? [])],
     rawAllowedUserResolution: new Map(),
   };
+  // p2pOpen 是一次显式的权限边界声明（进入限制态），但它只授 talk。没有 allowedUsers 就
+  // 没有任何人能 operate（/restart、/cd、卡片按钮全锁死），也没有 owner 可以处置授权卡 ——
+  // 这几乎肯定是配错了，明确告警而不是静默把 bot 变成谁也管不了的状态。
+  if (cfg.p2pOpen === true && (cfg.allowedUsers?.length ?? 0) === 0) {
+    logger.warn(`[bot:${cfg.larkAppId}] p2pOpen 已开启但未配 allowedUsers：任何人都能私聊，但没有人能执行管理操作（/restart、/cd、卡片按钮）。请补上 allowedUsers。`);
+  }
   bots.set(cfg.larkAppId, state);
   return state;
 }
@@ -1441,6 +1460,8 @@ export function parseBotConfigsFromText(jsonText: string): BotConfig[] {
       chatReplyModes,
       chatGrants,
       globalGrants,
+      // 只落显式 true（undefined = 关），与 restrictGrantCommands 同款，保持 bots.json 干净。
+      p2pOpen: entry.p2pOpen === true || undefined,
       messageQuota,
       quotaState,
       restrictGrantCommands: entry.restrictGrantCommands === true || undefined,

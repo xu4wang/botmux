@@ -1398,7 +1398,10 @@ export async function handleCardAction(data: CardActionData, deps: CardHandlerDe
         return { toast: { type: 'warning', content: t('card.voice.toast_session_gone', undefined, locDs) } };
       }
       // 权限：仅 canTalk / canOperate 用户可点；其他人提示需授权（无声门会让人以为按钮坏了）。
-      if (!canTalk(ds.larkAppId, ds.chatId, operatorOpenId) && !canOperate(ds.larkAppId, ds.chatId, operatorOpenId)) {
+      // 传 ds.chatType：p2pOpen 的 bot 在私聊里，对方点自己会话的卡片按钮应与其 talk 权一致
+      // （仍不给 canOperate —— 管理类按钮另有 canOperate 闸）。
+      if (!canTalk(ds.larkAppId, ds.chatId, operatorOpenId, undefined, undefined, ds.chatType)
+        && !canOperate(ds.larkAppId, ds.chatId, operatorOpenId)) {
         logger.info(`[${tag(ds)}] voice_summary blocked for unauthorized user: ${operatorOpenId ?? '?'}`);
         return { toast: { type: 'warning', content: t('card.voice.toast_need_auth', undefined, locDs) } };
       }

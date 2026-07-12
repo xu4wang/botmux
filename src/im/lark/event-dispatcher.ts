@@ -1151,6 +1151,9 @@ function mentionAppId(m: any): string | undefined {
 // access for sibling Bot B in the same deployment; Bot B must bind the same chat
 // itself, or continue using its own allowedUsers/chatGrants/globalGrants.
 
+/** 会话类型（与 daemon / DaemonSession 的 chatType 同域）。p2pOpen 腿据此判定。 */
+export type ChatKind = 'group' | 'p2p';
+
 export type TalkReason =
   | 'allowedUser'
   | 'oncall'
@@ -1161,6 +1164,7 @@ export type TalkReason =
   | 'open'
   | 'chatGrant'
   | 'globalGrant'
+  | 'p2pOpen'
   | 'none';
 
 export interface TalkEvaluation {
@@ -1204,14 +1208,19 @@ function hasGlobalGrant(larkAppId: string, openId: string | undefined): boolean 
 function hasConfiguredAllowlist(bot: ReturnType<typeof getBot>): boolean {
   return (bot.config.allowedUsers?.length ?? 0) > 0
     || (bot.config.allowedChatGroups?.length ?? 0) > 0
-    || (bot.config.globalGrants?.length ?? 0) > 0;
+    || (bot.config.globalGrants?.length ?? 0) > 0
+    // p2pOpen 也是一次显式的权限边界声明：配了它 = 进入限制态。否则「只配 p2pOpen、
+    // 没配 allowedUsers」会 fall through 到 open 模式，把**群聊**和 **canOperate** 一起
+    // 放开（陌生人能 /restart /cd），与 p2pOpen「只开私聊 talk」的语义正好相反。
+    // 此时若没配 allowedUsers → 谁都不能 operate（fail-closed），bot-registry 会告警。
+    || bot.config.p2pOpen === true;
 }
 
 export function canTalk(
   larkAppId: string, chatId: string | undefined, senderOpenId: string | undefined,
-  senderUnionId?: string, memberUnionId?: string,
+  senderUnionId?: string, memberUnionId?: string, chatType?: ChatKind,
 ): boolean {
-  return evaluateTalk(larkAppId, chatId, senderOpenId, senderUnionId, memberUnionId).allowed;
+  return evaluateTalk(larkAppId, chatId, senderOpenId, senderUnionId, memberUnionId, chatType).allowed;
 }
 
 /**
@@ -1221,10 +1230,12 @@ export function canTalk(
  * @param memberUnionId  发送方 union（teamMember 腿）——可为真人 union（未锁 bot）。
  *   仅授 chat 作用域内的 talk、不授 operate，且要求 union 在该团队的成员名单里
  *   （memberUnionIds 来自平台鉴权的团队成员，非机器自报），故喂真人 union 是安全的。
+ * @param chatType  当前会话类型。**仅 p2pOpen 腿读它**；省略时该腿不生效（fail-closed），
+ *   所以拿不到 chatType 的调用点保持原语义、不会误放行。
  */
 export function evaluateTalk(
   larkAppId: string, chatId: string | undefined, senderOpenId: string | undefined,
-  senderUnionId?: string, memberUnionId?: string,
+  senderUnionId?: string, memberUnionId?: string, chatType?: ChatKind,
 ): TalkEvaluation {
   const bot = getBot(larkAppId);
   // allowedChatGroups 是"talk-open 的 chat_id 列表"：当前消息来自其中之一即放行（仅 canTalk）。
@@ -1257,6 +1268,11 @@ export function evaluateTalk(
     return { allowed: true, reason: 'teamMember' };
   }
   if (chatId && bot.config.allowedChatGroups?.includes(chatId)) return { allowed: true, reason: 'allowedChatGroup' };
+
+  // p2pOpen：私聊维度的 talk-open，与 oncall（群维度）同一个安全模型——放行 canTalk，
+  // canOperate 一行不读它（管理仍限 allowedUsers）。谁能私聊由飞书应用「可用范围」控制。
+  // chatType 省略 → 该腿不生效（fail-closed），未接入 chatType 的调用点语义不变。
+  if (chatType === 'p2p' && bot.config.p2pOpen === true) return { allowed: true, reason: 'p2pOpen' };
 
   // globalGrants 与 allowedChatGroups 同样确立"有白名单"语义：只配 globalGrants 也算限制态，
   // 不能 fall through 到"全开放"。用原始配置判定（见 hasConfiguredAllowlist）：配了 owner
@@ -2198,7 +2214,7 @@ export function startLarkEventDispatcher(larkAppId: string, larkAppSecret: strin
         );
         // 人的路径（bot 发送方已在上面的分支 return）：union 走 memberUnionId 腿，
         // 不进 bot-trust 腿——teamBot 只认 bot-locked union。
-        const isAllowed = canTalk(larkAppId, chatId, senderOpenId, undefined, humanSenderUnionId);
+        const isAllowed = canTalk(larkAppId, chatId, senderOpenId, undefined, humanSenderUnionId, chatType);
 
         // /introduce — collaboration handshake. Intercept before any routing
         // so the command never reaches a CLI session (each @ed bot's daemon
@@ -2499,6 +2515,9 @@ export function startLarkEventDispatcher(larkAppId: string, larkAppSecret: strin
             }
           }
         } else if (!isAllowed) {
+          // 私聊被挡目前是静默丢弃：owner 不在这个 p2p 会话里，把授权申请卡 reply 回来只会
+          // 发给陌生人自己（卡上的按钮又是 owner 专属），既不可用又泄露 owner —— 所以不发。
+          // 真正的修法是把申请发到 owner 自己的 DM 并加 owner 维度节流，单独一个 PR 做。
           logger.debug(`Ignoring p2p message from non-allowed user: ${senderOpenId}`);
           return;
         }
