@@ -1723,6 +1723,7 @@ function SubstituteModeSection(props: { bot: BotDefaultsRow; patchBot: PatchBot 
     }
   }
   const [disclosure, setDisclosure] = useState<'prefix' | 'none'>(initial?.disclosure === 'none' ? 'none' : 'prefix');
+  const [replyMode, setReplyMode] = useState<'thread' | 'quote'>(initial?.replyMode === 'quote' ? 'quote' : 'thread');
   const [chatsText, setChatsText] = useState(() => formatSubstituteChats(initial?.chats));
   const [status, setStatus] = useState<StatusMessage>(null);
   const [busy, setBusy] = useState(false);
@@ -1798,12 +1799,13 @@ function SubstituteModeSection(props: { bot: BotDefaultsRow; patchBot: PatchBot 
     const next = props.bot.substituteMode ?? null;
     setEnabled(next?.enabled === true);
     setDisclosure(next?.disclosure === 'none' ? 'none' : 'prefix');
+    setReplyMode(next?.replyMode === 'quote' ? 'quote' : 'thread');
     setChatsText(formatSubstituteChats(next?.chats));
     const targets = next?.targets ?? [];
     setTargetRows(targets.length ? targets.map(target => makeTargetDraft(target)) : [makeTargetDraft()]);
   }, [props.bot.larkAppId, props.bot.substituteMode]);
 
-  async function save(body: { enabled: boolean; targets: BotSubstituteTarget[]; disclosure?: 'prefix' | 'none'; chats?: string[] }): Promise<void> {
+  async function save(body: { enabled: boolean; targets: BotSubstituteTarget[]; disclosure?: 'prefix' | 'none'; chats?: string[]; replyMode?: 'thread' | 'quote' }): Promise<void> {
     setBusy(true);
     setStatus(null);
     try {
@@ -1821,6 +1823,7 @@ function SubstituteModeSection(props: { bot: BotDefaultsRow; patchBot: PatchBot 
           .filter(Boolean);
         setEnabled(next?.enabled === true);
         setDisclosure(next?.disclosure === 'none' ? 'none' : 'prefix');
+        setReplyMode(next?.replyMode === 'quote' ? 'quote' : 'thread');
         setChatsText(formatSubstituteChats(next?.chats));
         if (resolution.length) {
           skipModeSync.current = true;
@@ -1892,12 +1895,16 @@ function SubstituteModeSection(props: { bot: BotDefaultsRow; patchBot: PatchBot 
       setStatus({ text: `✗ ${tr('botDefaults.substituteTargetsInvalid')}` });
       return;
     }
-    void save({ enabled, targets, disclosure, chats: parseSubstituteChats(chatsText) });
+    void save({ enabled, targets, disclosure, chats: parseSubstituteChats(chatsText), replyMode });
   }
 
   const disclosureOptions: DropdownFieldOption<'prefix' | 'none'>[] = [
     { value: 'prefix', label: tr('botDefaults.substituteDisclosurePrefix') },
     { value: 'none', label: tr('botDefaults.substituteDisclosureNone') },
+  ];
+  const replyModeOptions: DropdownFieldOption<'thread' | 'quote'>[] = [
+    { value: 'thread', label: tr('botDefaults.substituteReplyModeThread') },
+    { value: 'quote', label: tr('botDefaults.substituteReplyModeQuote') },
   ];
 
   return (
@@ -1921,6 +1928,19 @@ function SubstituteModeSection(props: { bot: BotDefaultsRow; patchBot: PatchBot 
             disabled={busy}
             options={disclosureOptions}
             onChange={value => setDisclosure(value)}
+          />
+        </label>
+      </div>
+      <div className="bd-row">
+        <label>
+          <FieldTitle help={tr('botDefaults.substituteReplyModeHelp')}>{tr('botDefaults.substituteReplyMode')}</FieldTitle>
+          <DropdownField<'thread' | 'quote'>
+            dataInput="substituteReplyMode"
+            ariaLabel={tr('botDefaults.substituteReplyMode')}
+            value={replyMode}
+            disabled={busy}
+            options={replyModeOptions}
+            onChange={value => setReplyMode(value)}
           />
         </label>
       </div>

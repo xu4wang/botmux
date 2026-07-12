@@ -41,4 +41,31 @@ describe('normalizeSubstituteMode', () => {
     });
     expect(cfg).not.toHaveProperty('chats');
   });
+
+  it('defaults replyMode to thread and omits it from output', () => {
+    const cfg = normalizeSubstituteMode({
+      enabled: true,
+      targets: [{ openId: 'ou_alice' }],
+    });
+    expect(cfg).toMatchObject({ enabled: true, targets: [{ openId: 'ou_alice' }] });
+    expect(cfg).not.toHaveProperty('replyMode');
+  });
+
+  it('preserves replyMode=quote', () => {
+    const cfg = normalizeSubstituteMode({
+      enabled: true,
+      targets: [{ openId: 'ou_alice' }],
+      replyMode: 'quote',
+    });
+    expect(cfg).toMatchObject({ enabled: true, replyMode: 'quote' });
+  });
+
+  it('coerces invalid replyMode to thread', () => {
+    const cfg = normalizeSubstituteMode({
+      enabled: true,
+      targets: [{ openId: 'ou_alice' }],
+      replyMode: 'invalid',
+    });
+    expect(cfg).not.toHaveProperty('replyMode');
+  });
 });

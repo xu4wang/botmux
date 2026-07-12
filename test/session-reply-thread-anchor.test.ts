@@ -43,7 +43,7 @@ const APP = 'session_reply_anchor_app';
 const CHAT = 'oc_shared_chat';
 const NOW = new Date().toISOString();
 
-type Target = { rootMessageId: string; turnId: string; updatedAt: string };
+type Target = { rootMessageId: string; turnId: string; updatedAt: string; quoteOnly?: boolean };
 
 function seedSharedSession(currentReplyTarget?: Target): DaemonSession {
   const ds = {
@@ -96,5 +96,13 @@ describe('sessionReply chat-scope chokepoint — shared fold-back anchoring', ()
     await sessionReply(CHAT, 'hello', 'text', APP);
     expect(mocks.sendMessage).toHaveBeenCalledTimes(1);
     expect(mocks.replyMessage).not.toHaveBeenCalled();
+  });
+
+  it('quoteOnly anchor replies to the trigger message without creating a Lark thread', async () => {
+    seedSharedSession({ rootMessageId: 'om_substitute_trigger', turnId: 'turn-sub', updatedAt: NOW, quoteOnly: true });
+    await sessionReply(CHAT, 'avatar reply', 'text', APP, 'turn-sub');
+    expect(mocks.replyMessage).toHaveBeenCalledTimes(1);
+    expect(mocks.replyMessage).toHaveBeenCalledWith(APP, 'om_substitute_trigger', 'avatar reply', 'text', false, undefined, expect.anything());
+    expect(mocks.sendMessage).not.toHaveBeenCalled();
   });
 });

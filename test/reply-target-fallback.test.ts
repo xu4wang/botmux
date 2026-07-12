@@ -94,4 +94,12 @@ describe('fallbackTurnId × resolveSessionReplyTarget (the leak fix)', () => {
     const target = resolveSessionReplyTarget(ds, fallbackTurnId(ds as DaemonSession, undefined));
     expect(target).toEqual({ mode: 'plain', chatId: 'oc_chat' });
   });
+
+  it('quoteOnly currentReplyTarget resolves to quote mode, not thread mode', () => {
+    const ds = makeDs({
+      currentReplyTarget: { rootMessageId: 'om_trigger', turnId: 'turn-1', updatedAt: NOW, quoteOnly: true },
+    });
+    const target = resolveSessionReplyTarget(ds, fallbackTurnId(ds as DaemonSession, undefined));
+    expect(target).toEqual({ mode: 'quote', rootMessageId: 'om_trigger' });
+  });
 });

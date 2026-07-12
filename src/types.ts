@@ -85,8 +85,11 @@ export interface Session {
    * Current turn's reply destination for chat-scope topic aliases. `turnId` is
    * the inbound message_id that opened/updated this turn, preventing a stale
    * topic target from being confused with a later group-top-level turn.
+   * `quoteOnly` means the reply should quote the target message via
+   * replyMessage(..., replyInThread=false) instead of creating a Lark thread.
+   * Used by substitute-mode mentions so avatar-style replies stay flat.
    */
-  currentReplyTarget?: { rootMessageId: string; turnId: string; updatedAt: string };
+  currentReplyTarget?: { rootMessageId: string; turnId: string; updatedAt: string; quoteOnly?: boolean };
   /**
    * 文档评论入口（/subscribe-lark-doc）：当本会话「当前这一轮」由飞书文档评论
    * 触发时，`botmux send` 的用户可见回复要回到该文档评论（而非飞书）。因 botmux

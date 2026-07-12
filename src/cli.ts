@@ -2321,7 +2321,7 @@ interface SessionData {
   lastCallerOpenId?: string;
   /** Chat-scope quote chain — see Session.quoteTargetId in types.ts. */
   quoteTargetId?: string;
-  currentReplyTarget?: { rootMessageId: string; turnId: string; updatedAt: string };
+  currentReplyTarget?: { rootMessageId: string; turnId: string; updatedAt: string; quoteOnly?: boolean };
   /** 文档评论入口当前轮回评论落点（见 Session.currentDocCommentTarget in types.ts）。 */
   currentDocCommentTarget?: { fileToken: string; fileType: string; commentId: string; replyToName?: string; replyToOpenId?: string; turnId: string };
   quoteTargetSenderOpenId?: string;
@@ -4766,11 +4766,11 @@ async function cmdSend(rest: string[]): Promise<void> {
     const { rmSync } = await import('node:fs');
     const appId = s.larkAppId!;
     const targetChatId = overrideChatId ?? s.chatId;
-    const target = resolveSendTarget({ into: sendInto, topLevel: sendTopLevel, chatScope: s.scope === 'chat', chatId: targetChatId, rootMessageId: s.rootMessageId, replyTargetRootId: s.currentReplyTarget?.rootMessageId, replyTargetTurnId: s.currentReplyTarget?.turnId, currentTurnId });
+    const target = resolveSendTarget({ into: sendInto, topLevel: sendTopLevel, chatScope: s.scope === 'chat', chatId: targetChatId, rootMessageId: s.rootMessageId, replyTargetRootId: s.currentReplyTarget?.rootMessageId, replyTargetTurnId: s.currentReplyTarget?.turnId, replyTargetQuoteOnly: s.currentReplyTarget?.quoteOnly, currentTurnId });
     const sendAudio = (fileKey: string): Promise<string> =>
       target.mode === 'plain'
         ? sendMessage(appId, target.chatId, JSON.stringify({ file_key: fileKey }), 'audio')
-        : replyMessage(appId, target.rootMessageId, JSON.stringify({ file_key: fileKey }), 'audio', true);
+        : replyMessage(appId, target.rootMessageId, JSON.stringify({ file_key: fileKey }), 'audio', target.mode === 'thread');
     let dir: string | undefined;
     try {
       const out = await synthesizeVoiceOpus(appId, content);
@@ -4957,11 +4957,13 @@ async function cmdSend(rest: string[]): Promise<void> {
   };
   // Dispatch helper: top-level / chat-scope send vs reply-in-thread, single
   // decision point. Used for file attachments (always plain in chat scope).
-  const sendTarget = resolveSendTarget({ into: sendInto, topLevel: sendTopLevel, chatScope: isChatScope, chatId: targetChatId, rootMessageId: s.rootMessageId, replyTargetRootId: s.currentReplyTarget?.rootMessageId, replyTargetTurnId: s.currentReplyTarget?.turnId, currentTurnId });
-  const dispatch = (content: string, msgType: string): Promise<string> =>
-    sendTarget.mode === 'plain'
-      ? sendMessage(appId, sendTarget.chatId, content, msgType, undefined, hookContext)
-      : replyMessage(appId, sendTarget.rootMessageId, content, msgType, true, undefined, hookContext);
+  const sendTarget = resolveSendTarget({ into: sendInto, topLevel: sendTopLevel, chatScope: isChatScope, chatId: targetChatId, rootMessageId: s.rootMessageId, replyTargetRootId: s.currentReplyTarget?.rootMessageId, replyTargetTurnId: s.currentReplyTarget?.turnId, replyTargetQuoteOnly: s.currentReplyTarget?.quoteOnly, currentTurnId });
+  const dispatch = (content: string, msgType: string): Promise<string> => {
+    if (sendTarget.mode === 'plain') {
+      return sendMessage(appId, sendTarget.chatId, content, msgType, undefined, hookContext);
+    }
+    return replyMessage(appId, sendTarget.rootMessageId, content, msgType, sendTarget.mode === 'thread', undefined, hookContext);
+  };
   const recordBridgeSendMarker = (sentAtMs: number, messageId: string, sentContent: string): void => {
     try {
       const markerDir = join(resolveDataDir(), 'turn-sends');
@@ -4978,7 +4980,7 @@ async function cmdSend(rest: string[]): Promise<void> {
   // Quote chain (普通群): the primary message replies to the turn's target so
   // Lark renders a 引用 chain. --quote overrides, --no-quote opts out. Thread
   // scope and --top-level never quote. Withdrawn target → fall back to plain.
-  const quoteTargetId = sendInto || sendTarget.mode === 'thread' ? undefined : resolveQuoteTarget({
+  const quoteTargetId = sendInto || sendTarget.mode === 'thread' || sendTarget.mode === 'quote' ? undefined : resolveQuoteTarget({
     isChatScope, sendTopLevel, noQuote, explicitQuote,
     sessionQuoteTargetId: s.quoteTargetId,
   });

@@ -3,7 +3,8 @@ import type { Session } from '../types.js';
 
 export type SessionReplyTarget =
   | { mode: 'plain'; chatId: string }
-  | { mode: 'thread'; rootMessageId: string };
+  | { mode: 'thread'; rootMessageId: string }
+  | { mode: 'quote'; rootMessageId: string };
 
 export function resolveSessionReplyTarget(
   ds: Pick<DaemonSession, 'scope' | 'chatId' | 'session' | 'currentReplyTarget'>,
@@ -12,7 +13,9 @@ export function resolveSessionReplyTarget(
   const target = ds.currentReplyTarget ?? ds.session.currentReplyTarget;
   if (ds.scope === 'chat') {
     if (target?.rootMessageId && !!turnId && target.turnId === turnId) {
-      return { mode: 'thread', rootMessageId: target.rootMessageId };
+      return target.quoteOnly
+        ? { mode: 'quote', rootMessageId: target.rootMessageId }
+        : { mode: 'thread', rootMessageId: target.rootMessageId };
     }
     return { mode: 'plain', chatId: ds.chatId };
   }
@@ -27,14 +30,18 @@ export function resolveSendTarget(opts: {
   rootMessageId: string;
   replyTargetRootId?: string;
   replyTargetTurnId?: string;
+  replyTargetQuoteOnly?: boolean;
   currentTurnId?: string;
 }): SessionReplyTarget {
   if (opts.into) return { mode: 'thread', rootMessageId: opts.into };
   if (opts.topLevel) return { mode: 'plain', chatId: opts.chatId };
   if (opts.chatScope) {
-    return opts.replyTargetRootId && opts.replyTargetTurnId && opts.replyTargetTurnId === opts.currentTurnId
-      ? { mode: 'thread', rootMessageId: opts.replyTargetRootId }
-      : { mode: 'plain', chatId: opts.chatId };
+    if (opts.replyTargetRootId && opts.replyTargetTurnId && opts.replyTargetTurnId === opts.currentTurnId) {
+      return opts.replyTargetQuoteOnly
+        ? { mode: 'quote', rootMessageId: opts.replyTargetRootId }
+        : { mode: 'thread', rootMessageId: opts.replyTargetRootId };
+    }
+    return { mode: 'plain', chatId: opts.chatId };
   }
   return { mode: 'thread', rootMessageId: opts.rootMessageId };
 }
@@ -44,6 +51,7 @@ export function beginReplyTargetTurn(
   replyRootId: string | undefined,
   turnId: string,
   nowIso = new Date().toISOString(),
+  opts?: { quoteOnly?: boolean },
 ): void {
   if (ds.scope !== 'chat') return;
   if (replyRootId) {
@@ -52,7 +60,7 @@ export function beginReplyTargetTurn(
       createdAt: aliases[replyRootId]?.createdAt ?? nowIso,
       lastUsedAt: nowIso,
     };
-    const target = { rootMessageId: replyRootId, turnId, updatedAt: nowIso };
+    const target = { rootMessageId: replyRootId, turnId, updatedAt: nowIso, quoteOnly: opts?.quoteOnly };
     ds.replyThreadAliases = aliases;
     ds.currentReplyTarget = target;
     ds.session.replyThreadAliases = aliases;

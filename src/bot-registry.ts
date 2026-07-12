@@ -381,6 +381,11 @@ export interface SubstituteModeConfig {
   disclosure?: 'prefix' | 'none';
   /** Optional allow-list of chat IDs. When provided, substitute trigger only fires in these chats. */
   chats?: string[];
+  /** How the bot replies to a substitute-mode trigger:
+   *  - 'thread' (default): reply in a Lark thread under the trigger message.
+   *  - 'quote': quote-reply the trigger message without creating a new topic.
+   */
+  replyMode?: 'thread' | 'quote';
 }
 
 export interface VcMeetingAgentConfig {
