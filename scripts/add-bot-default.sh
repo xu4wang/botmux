@@ -81,6 +81,13 @@ if (admin==="1") {
   b.readIsolation = true;
 }
 b.p2pOpen = true;
+// 群聊全开：defaultOncall 自动把 bot 进的每个新群绑成 oncall → 群里任何人都能 @ 它
+// （oncall 腿只放行 canTalk，不授 canOperate —— 管理操作仍只限 allowedUsers）。
+// ⚠️ workingDir 必须 === defaultWorkingDir：有 oncall 绑定时 pin 取 oncallEntry.workingDir，
+// 角色目录压根不会被查询（daemon.ts resolvePinnedWorkingDir）→ 两值不一致会让角色系统在群里失效。
+if (b.defaultWorkingDir) {
+  b.defaultOncall = { enabled: true, workingDir: b.defaultWorkingDir, since: Date.now() };
+}
 // 兜底：p2pOpen 没有管理员会导致群聊锁死 + 无人可管（fail-closed）
 if (!(b.allowedUsers||[]).length) b.allowedUsers = [owner];
 fs.writeFileSync(p, JSON.stringify(bots,null,2)+"\n");
@@ -137,6 +144,8 @@ ok("p2pOpen（私聊全开）", b.p2pOpen===true);
 ok("allowedUsers（管理员非空 —— p2pOpen 的前提）", (b.allowedUsers||[]).length>0);
 ok("defaultWorkingDir（角色系统）", !!b.defaultWorkingDir);
 ok("brandLabel（角色名脚注）", (b.brandLabel||"").includes("{cwdName}"));
+ok("defaultOncall（群聊全开，且 workingDir = 角色目录）",
+   b.defaultOncall?.enabled === true && b.defaultOncall.workingDir === b.defaultWorkingDir);
 ok("lark-cli 用自己的 appid", fs.existsSync(process.env.HOME+"/.lark-cli-bots/"+appId+"/config.json"));
 if (!(b.allowedUsers||[]).length) { console.error("\n❌ 管理员为空：p2pOpen 会锁死群聊且无人可管，务必修复"); process.exit(1); }
 ' "$BOTS_JSON" "$APP_ID" "$ADMIN"

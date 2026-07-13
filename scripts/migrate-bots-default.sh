@@ -130,6 +130,10 @@ for (const b of bots) {
   if (b.p2pOpen!==true)       changes.push("p2pOpen: "+JSON.stringify(b.p2pOpen)+" → true");
   if (!b.defaultWorkingDir)   changes.push("角色系统: 缺 defaultWorkingDir → 由 role-deploy 补");
   if (!(b.brandLabel||"").includes("{cwdName}")) changes.push("角色名脚注: 缺 brandLabel → 由 role-deploy 补");
+  const dw = b.defaultWorkingDir;
+  const dow = b.defaultOncall;
+  if (!dow?.enabled) changes.push("群聊全开: 缺 defaultOncall → 开启（workingDir = 角色目录）");
+  else if (dw && dow.workingDir !== dw) changes.push(`群聊全开: defaultOncall.workingDir(${dow.workingDir}) ≠ defaultWorkingDir(${dw}) —— 群里角色系统会失效，将对齐`);
   const users=b.allowedUsers||[];
   const rawOu=users.filter(u=>typeof u==="string" && u.startsWith("ou_"));
   if (rawOu.length) changes.push("allowedUsers 含裸 open_id（按 app 隔离，可能锁死）: "+rawOu.join(",")+" → 反查邮箱");
@@ -225,6 +229,12 @@ for (const b of bots) {
   if (!targets.has(b.larkAppId)) continue;
   b.readIsolation = true;
   b.p2pOpen = true;
+  // 群聊全开：oncall 腿放行 canTalk（不授 canOperate）。workingDir 必须 === defaultWorkingDir，
+  // 否则有 oncall 绑定的群会 pin 到别的目录，角色系统在群里失效。
+  // role-deploy 在下一步才写 defaultWorkingDir，所以这里先按约定的角色目录算。
+  const roleDir = b.defaultWorkingDir || `~/botmux-roles/${b.larkAppId}/shared/default`;
+  b.defaultWorkingDir = roleDir;
+  b.defaultOncall = { enabled: true, workingDir: roleDir, since: Date.now() };
   let users = (b.allowedUsers||[]).map(u => (typeof u==="string" && u.startsWith("ou_") && resolved[u]) ? resolved[u] : u);
   users = [...new Set(users)];
   if (!users.length) users = [owner];   // p2pOpen 无管理员 = 群聊锁死 + 无人可管
@@ -279,6 +289,8 @@ for (const id of targets) {
     ["allowedUsers 无裸 ou_", !(b.allowedUsers||[]).some(u=>String(u).startsWith("ou_"))],
     ["defaultWorkingDir", !!b.defaultWorkingDir],
     ["brandLabel", (b.brandLabel||"").includes("{cwdName}")],
+    ["defaultOncall 群聊全开（workingDir = 角色目录）",
+      b.defaultOncall?.enabled === true && b.defaultOncall.workingDir === b.defaultWorkingDir],
     ["lark-cli 自己的 app", fs.existsSync(process.env.HOME+"/.lark-cli-bots/"+id+"/config.json")],
   ];
   console.log(`  ${id}:`);
