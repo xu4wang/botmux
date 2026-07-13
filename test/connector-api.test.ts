@@ -309,8 +309,8 @@ describe('connector-api write routes', () => {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify({
-        name: 'Workflow room',
-        target: { mode: 'fixed', kind: 'workflow', botId: 'app1', chatId: 'oc_old', workflowId: 'wf_old' },
+        name: 'Fixed turn',
+        target: { mode: 'fixed', kind: 'turn', botId: 'app1', chatId: 'oc_old' },
         lifecycleExtractors: { dedupKey: '$.alert.id' },
       }),
     }));
