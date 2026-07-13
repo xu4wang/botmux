@@ -1153,6 +1153,12 @@ function SandboxSection(props: { bot: BotDefaultsRow; patchBot: PatchBot }) {
     }
   }
 
+  // Read isolation rides the SAME toggle: it applies additionally wherever the
+  // CLI + platform can enforce it (claude/codex on macOS/Linux, no wrapper). Show a
+  // capability line so the owner sees whether THIS bot's sandbox also read-isolates
+  // (the "labelled separately" requirement) — best-effort: write protection always
+  // applies; read isolation only where supported.
+  const readIsoSupported = bot.readIsolationSupported === true;
   return (
     <section className="bd-section">
       <h3 className="bd-section-title">{tr('botDefaults.sectionSandbox')}</h3>
@@ -1164,6 +1170,9 @@ function SandboxSection(props: { bot: BotDefaultsRow; patchBot: PatchBot }) {
         help={tr('botDefaults.sandboxHelp')}
         onChange={checked => void toggle(checked)}
       />
+      <p className="bd-section-note" data-read-iso-capability={readIsoSupported ? 'yes' : 'no'}>
+        {readIsoSupported ? `＋ ${tr('botDefaults.sandboxReadIsoOn')}` : tr('botDefaults.sandboxReadIsoOff')}
+      </p>
       <div className="actions">
         <StatusSpan status={status} attr={{ 'data-sandbox-status': '' }} />
       </div>

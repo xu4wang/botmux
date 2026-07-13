@@ -5092,6 +5092,20 @@ dialog.onboarding-dialog::backdrop {
   color: var(--muted);
 }
 .bd-section-note { margin: 6px 0 0; color: var(--muted); font-size: 12px; line-height: 1.5; }
+/* Read-isolation capability line under the file-sandbox toggle: green when this
+   bot's sandbox also read-isolates (claude/codex on macOS/Linux), muted grey when
+   it's write-protection only. Theme-safe via color-mix on the semantic tokens. */
+.bd-section-note[data-read-iso-capability] { margin-top: 8px; padding: 7px 10px; border-radius: 9px; line-height: 1.55; }
+.bd-section-note[data-read-iso-capability="yes"] {
+  color: var(--success);
+  background: color-mix(in srgb, var(--success) 9%, transparent);
+  border: 1px solid color-mix(in srgb, var(--success) 24%, transparent);
+}
+.bd-section-note[data-read-iso-capability="no"] {
+  color: var(--muted);
+  background: color-mix(in srgb, var(--muted) 6%, transparent);
+  border: 1px solid var(--border-soft);
+}
 
 /* ── Version & update card ── */
 .update-version { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; margin: 0 0 12px; }

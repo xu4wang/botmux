@@ -40,6 +40,10 @@ export type BotDefaultsRow = {
   autoboundChatCount?: number;
   brandLabel?: string | null;
   sandbox?: boolean;
+  /** Whether the unified file sandbox ALSO applies cross-bot read isolation for
+   *  this bot's sessions — true when the CLI (claude/codex) + platform (macOS/Linux)
+   *  + no wrapper can enforce it. Drives the capability label under the toggle. */
+  readIsolationSupported?: boolean;
   disableStreamingCard?: boolean;
   silentTurnReactions?: boolean;
   writableTerminalLinkInCard?: boolean;
