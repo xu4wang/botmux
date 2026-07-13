@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import { CodexBridgeQueue } from '../src/services/codex-bridge-queue.js';
-import { shouldPreMarkFirstTurn } from '../src/codex-rpc-lifecycle.js';
+import { shouldPreMarkFirstTurn, shouldQueueInitialPrompt, type EngageOutcome } from '../src/codex-rpc-lifecycle.js';
 import type { CodexBridgeEvent } from '../src/services/codex-transcript.js';
 
 // Consecutive-turn regressions against the REAL CodexBridgeQueue, locking the
@@ -57,7 +57,38 @@ describe('CodexBridgeQueue — fresh first-turn mark discipline (Codex P1 stale-
     expect(q.size()).toBe(0);
   });
 
-  it('REGRESSION GUARD: a DOUBLE mark of the same turnId (the reverted pre-mark bug) wedges the next turn', () => {
+  // Decision-level regression: drive the queue with the mark sequence the REAL
+  // worker helpers produce per outcome (pre-mark via shouldPreMarkFirstTurn +
+  // paste-flush mark via shouldQueueInitialPrompt), so this FAILS under the old
+  // "always pre-mark before sendFirstTurn" implementation, not just documents the
+  // queue. `preMarkAlways` models the reverted bug.
+  function nextTurnAfterFirst(outcome: EngageOutcome, preMarkAlways: boolean): string[] {
+    const q = new CodexBridgeQueue();
+    const engineActive = outcome === 'accepted' || outcome === 'ambiguous'; // not-engaged tears the engine down
+    const preMark = preMarkAlways ? true : shouldPreMarkFirstTurn(outcome);
+    const flushMark = shouldQueueInitialPrompt({ hasPrompt: true, rpcEngineActive: engineActive, queuePrompt: false, passesInitialPromptViaArgs: false, deferInitialPrompt: false });
+    if (preMark) q.mark('t0', T0, 1000);
+    if (flushMark) q.mark('t0', T0, 1000); // paste flush re-marks the SAME turnId
+    q.ingest([user('u0', T0, 1001), asst('a0', 'reply0', 1002)]);
+    q.drainEmittable();
+    q.mark('t1', T1, 2000);
+    q.ingest([user('u1', T1, 2001), asst('a1', 'reply1', 2002)]);
+    return q.drainEmittable().map(t => t.turnId);
+  }
+
+  it('FIXED worker: accepted / not-sent(→not-engaged) / ambiguous all let the NEXT turn emit', () => {
+    // accepted: pre-mark(1)+flush(0)=1; not-engaged: pre-mark(0)+flush(1)=1; ambiguous: 0.
+    expect(nextTurnAfterFirst('accepted', false)).toEqual(['t1']);
+    expect(nextTurnAfterFirst('not-engaged', false)).toEqual(['t1']);
+    expect(nextTurnAfterFirst('ambiguous', false)).toEqual(['t1']);
+  });
+
+  it('OLD always-pre-mark impl: not-sent(→not-engaged) double-marks → next turn WEDGED (regression fails here)', () => {
+    // pre-mark(1)+flush(1)=2 same-turnId marks → stale unstarted head → drain []
+    expect(nextTurnAfterFirst('not-engaged', true)).toEqual([]);
+  });
+
+  it('characterizes the reverted double-mark failure: a DOUBLE mark of the same turnId wedges the next turn', () => {
     const q = new CodexBridgeQueue();
     q.mark('t0', T0, 1000); // early pre-mark (old bug)
     q.mark('t0', T0, 1000); // flush re-mark, same turnId
