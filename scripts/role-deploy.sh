@@ -144,7 +144,10 @@ if [ "$CONFIGURE" -eq 1 ]; then
     for (const b of bots) {
       const id=b.larkAppId; if (!id) continue;
       if (only.length && !only.includes(id)) continue;
-      b.defaultWorkingDir = `~/botmux-roles/${id}/shared/default`;
+      // 绝对路径：`~` 只有 resolveBotDefaultWorkingDir 那条腿会 expandHome；一旦这个值被
+      // 复制进 defaultOncall / oncallChats，pin 就直接取字面量 `~`（resolvePinnedWorkingDir
+      // 不展开）→ readDirMeta 的 statSync 必然 ENOENT → 卡片脚注丢角色名。写绝对路径规避。
+      b.defaultWorkingDir = `${process.env.HOME}/botmux-roles/${id}/shared/default`;
       b.brandLabel = "[{cwdName}]({cwdUrl})";
       if (!b.tuiSlashAllow) b.tuiSlashAllow = ["/compact"];
       n++;

@@ -146,7 +146,8 @@ for (const b of bots) {
   if (!dow?.enabled) changes.push("群聊全开: 缺 defaultOncall → 开启（workingDir = 角色目录）");
   else if (dw && dow.workingDir !== dw) changes.push(`群聊全开: defaultOncall.workingDir(${dow.workingDir}) ≠ defaultWorkingDir(${dw}) —— 群里角色系统会失效，将对齐`);
   // 存量显式绑定：oncallEntry.workingDir > defaultWorkingDir，会架空角色系统
-  const roleDir = dw || `~/botmux-roles/${id}/shared/default`;
+  const absp = (x) => (typeof x === "string" && x.startsWith("~")) ? process.env.HOME + x.slice(1) : x;
+  const roleDir = absp(dw || `${process.env.HOME}/botmux-roles/${id}/shared/default`);
   const staleOncall = (b.oncallChats||[]).filter(c => c && c.workingDir !== roleDir);
   if (staleOncall.length && keepOncall !== "1") {
     changes.push(`存量 oncall 绑定 ${staleOncall.length} 条指向老目录（会架空角色系统）→ 重写为角色目录：`);
@@ -252,7 +253,10 @@ for (const b of bots) {
   // 群聊全开：oncall 腿放行 canTalk（不授 canOperate）。workingDir 必须 === defaultWorkingDir，
   // 否则有 oncall 绑定的群会 pin 到别的目录，角色系统在群里失效。
   // role-deploy 在下一步才写 defaultWorkingDir，所以这里先按约定的角色目录算。
-  const roleDir = b.defaultWorkingDir || `~/botmux-roles/${b.larkAppId}/shared/default`;
+  // `~` 不能进 defaultOncall/oncallChats —— pin 取它时不展开（resolvePinnedWorkingDir），
+  // readDirMeta 的 statSync 会 ENOENT → 卡片脚注丢角色名。统一写绝对路径。
+  const abs = (x) => (typeof x === "string" && x.startsWith("~")) ? process.env.HOME + x.slice(1) : x;
+  const roleDir = abs(b.defaultWorkingDir || `${process.env.HOME}/botmux-roles/${b.larkAppId}/shared/default`);
   b.defaultWorkingDir = roleDir;
   b.defaultOncall = { enabled: true, workingDir: roleDir, since: Date.now() };
   // 存量显式绑定会架空角色系统（oncallEntry.workingDir > defaultWorkingDir）→ 对齐

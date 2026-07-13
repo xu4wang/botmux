@@ -85,7 +85,10 @@ b.p2pOpen = true;
 // （oncall 腿只放行 canTalk，不授 canOperate —— 管理操作仍只限 allowedUsers）。
 // ⚠️ workingDir 必须 === defaultWorkingDir：有 oncall 绑定时 pin 取 oncallEntry.workingDir，
 // 角色目录压根不会被查询（daemon.ts resolvePinnedWorkingDir）→ 两值不一致会让角色系统在群里失效。
+// `~` 不能进 defaultOncall/oncallChats —— pin 取它时不展开，卡片脚注会丢角色名。统一绝对路径。
+const abs = (x) => (typeof x === "string" && x.startsWith("~")) ? process.env.HOME + x.slice(1) : x;
 if (b.defaultWorkingDir) {
+  b.defaultWorkingDir = abs(b.defaultWorkingDir);
   b.defaultOncall = { enabled: true, workingDir: b.defaultWorkingDir, since: Date.now() };
 }
 // 兜底：p2pOpen 没有管理员会导致群聊锁死 + 无人可管（fail-closed）
@@ -160,6 +163,6 @@ cat <<EOF
 3) 开一个新话题跟它说句话 —— 这次冷启动会种下角色目录的信任标记，
    否则第一次切角色可能被 Claude Code 的信任框卡死
 
-群聊放开（按需）：allowedChatGroups 加群 chat_id，或群里 /oncall bind。
-⚠️ 别开 defaultOncall —— 它与角色系统的 defaultWorkingDir 互斥。
+群聊已全开（defaultOncall）：bot 进的每个新群自动绑定，群里任何人都能 @ 它（只 talk，
+管理操作仍只限 owner）。它的 workingDir 已对齐角色目录，角色系统在群里照常生效。
 EOF
