@@ -3,7 +3,13 @@
 #
 #   ./scripts/add-bot-default.sh --app-id cli_xxx --app-secret xxx [--name 小助手] [--cli claude-code]
 #   ./scripts/add-bot-default.sh --admin --app-id cli_xxx --app-secret xxx   # 管理 bot（首次安装第一个）
-#   环境变量 BOTMUX_OWNER 可覆盖默认管理员（默认 = 王旭）
+#   环境变量 BOTMUX_OWNER 可覆盖默认管理员（默认 = 王旭的邮箱）
+#
+#   ⚠️ owner 用「邮箱」或 union_id(on_)，别用 open_id(ou_)：飞书 open_id 按 app 隔离，同一个人
+#   在不同 app 下的 ou_ 不同。把别的 app 视角的 ou_ 填进 allowedUsers → 这个 bot 认不出 owner
+#   （群里 @ 它弹「申请在本群使用我」、私聊无人可管），owner 被自己的 bot 锁死。daemon 启动时会用
+#   每个 bot 自己的 app 凭证把邮箱 / union_id 解析成该 app 的 open_id（im/lark/client.ts
+#   resolveAllowedUsersWithMap），所以邮箱是唯一到处都对的写法。
 #
 # 做完这些（每步失败即停，不留半成品）：
 #   ① botmux setup add        —— 凭证换 token 校验通过才写盘；只拉起这个 bot，不动其它
@@ -23,7 +29,7 @@ set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 BOTS_JSON="$HOME/.botmux/bots.json"
-OWNER="${BOTMUX_OWNER:-ou_052754a5b3b938d10627d818729737bf}"   # 王旭：默认唯一管理员
+OWNER="${BOTMUX_OWNER:-austin.wangxu@ksher.com}"   # 王旭：默认唯一管理员（邮箱 —— 跨 app 通用）
 
 APP_ID=""; APP_SECRET=""; NAME=""; CLI="claude-code"; ADMIN=0
 while [ $# -gt 0 ]; do
@@ -33,7 +39,8 @@ while [ $# -gt 0 ]; do
     --name) NAME="$2"; shift 2 ;;
     --cli) CLI="$2"; shift 2 ;;
     --admin) ADMIN=1; shift ;;
-    -h|--help) sed -n '2,22p' "$0"; exit 0 ;;
+    # 打印头部注释块（跳过 shebang，直到第一个非注释行）——别写死行号，改注释就会漂
+    -h|--help) awk 'NR==1{next} /^#/{print; next} {exit}' "$0"; exit 0 ;;
     *) echo "未知参数：$1" >&2; exit 1 ;;
   esac
 done
@@ -45,6 +52,12 @@ if [ "$ADMIN" -eq 0 ] && [ "$(uname -s)" != "Darwin" ]; then
   exit 1
 fi
 [ "$ADMIN" -eq 1 ] && echo "模式：管理 bot（不开读隔离；角色系统 / p2pOpen / 唯一管理员照常）" || true
+
+# open_id 按 app 隔离：别的 app 视角的 ou_ 会让这个 bot 认不出 owner（群里弹「申请在本群使用我」、
+# 私聊无人可管）。邮箱 / on_ 由 daemon 按各 bot 自己的 app 解析，才是跨 app 通用的写法。
+case "$OWNER" in
+  ou_*) echo "⚠️  owner 用了 open_id（$OWNER）——open_id 按 app 隔离，除非它确实是 $APP_ID 这个 app 视角的值，否则 bot 会认不出 owner（群里弹「申请在本群使用我」、私聊无人可管）。建议改用邮箱或 union_id(on_)：BOTMUX_OWNER=<邮箱>" >&2 ;;
+esac
 
 echo "== ① botmux setup add =="
 add_args=(setup add --app-id "$APP_ID" --app-secret "$APP_SECRET" --allowed-users "$OWNER" --cli "$CLI")
