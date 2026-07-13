@@ -56,7 +56,7 @@ fi
 # open_id 按 app 隔离：别的 app 视角的 ou_ 会让这个 bot 认不出 owner（群里弹「申请在本群使用我」、
 # 私聊无人可管）。邮箱 / on_ 由 daemon 按各 bot 自己的 app 解析，才是跨 app 通用的写法。
 case "$OWNER" in
-  ou_*) echo "⚠️  owner 用了 open_id（$OWNER）——open_id 按 app 隔离，除非它确实是 $APP_ID 这个 app 视角的值，否则 bot 会认不出 owner（群里弹「申请在本群使用我」、私聊无人可管）。建议改用邮箱或 union_id(on_)：BOTMUX_OWNER=<邮箱>" >&2 ;;
+  ou_*) echo "⚠️  owner 用了 open_id（${OWNER}）——open_id 按 app 隔离，除非它确实是 $APP_ID 这个 app 视角的值，否则 bot 会认不出 owner（群里弹「申请在本群使用我」、私聊无人可管）。建议改用邮箱或 union_id(on_)：BOTMUX_OWNER=<邮箱>" >&2 ;;
 esac
 
 echo "== ① botmux setup add =="
@@ -94,14 +94,14 @@ echo "== ④ lark-cli 身份：让这个 bot 用自己的 appid 操作飞书 =="
 LARK_CFG="$HOME/.lark-cli-bots/$APP_ID"
 if command -v lark-cli >/dev/null; then
   if [ -f "$LARK_CFG/config.json" ]; then
-    echo "  已存在：$LARK_CFG（跳过）"
+    echo "  已存在：${LARK_CFG}（跳过）"
   else
     mkdir -p "$LARK_CFG"
     # secret 走 stdin，不进 argv（免得 ps 看得见）
     printf '%s' "$APP_SECRET" | LARKSUITE_CLI_CONFIG_DIR="$LARK_CFG"       lark-cli config init --app-id "$APP_ID" --app-secret-stdin --brand feishu >/dev/null
     LARKSUITE_CLI_CONFIG_DIR="$LARK_CFG" lark-cli config default-as bot >/dev/null 2>&1 || true
     LARKSUITE_CLI_CONFIG_DIR="$LARK_CFG" lark-cli config strict-mode bot >/dev/null 2>&1 || true
-    echo "  已配置：$LARK_CFG（default-as bot + strict-mode bot，纯 bot 身份）"
+    echo "  已配置：${LARK_CFG}（default-as bot + strict-mode bot，纯 bot 身份）"
   fi
   # ~/.zshenv 的映射是全局前提（不是 .zshrc —— 非交互 shell 只 source .zshenv）
   if ! grep -q "LARKSUITE_CLI_CONFIG_DIR" "$HOME/.zshenv" 2>/dev/null; then

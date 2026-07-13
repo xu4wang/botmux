@@ -134,7 +134,7 @@ fi
 
 if [ "$CONFIGURE" -eq 1 ]; then
   echo "== ④ 配置 bots.json =="
-  [ -f "$BOTS_JSON" ] || { echo "找不到 $BOTS_JSON——先把 bot 配好再跑本步" >&2; exit 1; }
+  [ -f "$BOTS_JSON" ] || { echo "找不到 ${BOTS_JSON}——先把 bot 配好再跑本步" >&2; exit 1; }
   cp "$BOTS_JSON" "$BOTS_JSON.bak-role-$(date +%Y%m%d-%H%M%S)"
   node -e '
     const fs=require("fs"); const p=process.argv[1];

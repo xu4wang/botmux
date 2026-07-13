@@ -90,7 +90,7 @@ HEAD="$(head -2 "$OUT" 2>/dev/null)"; rm -f "$OUT"
 if [ -f "$CFG" ] && [ -f "$CFGBK" ] && [ "${CFGN0:-0}" -gt 10 ]; then
   CFGN1="$(projcount "$CFG")"
   if [ "${CFGN1:-0}" -lt $((CFGN0 / 2)) ] 2>/dev/null; then
-    cp -p "$CFGBK" "$CFG" && log "⚠️ .claude.json 项目数骤降 $CFGN0→$CFGN1,已从备份回滚(config 保住)"
+    cp -p "$CFGBK" "$CFG" && log "⚠️ .claude.json 项目数骤降 ${CFGN0}→${CFGN1},已从备份回滚(config 保住)"
   fi
 fi
 
