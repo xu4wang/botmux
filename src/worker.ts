@@ -27,6 +27,7 @@ import {
   buildV2DenyPaths,
   buildV2DenyRegexes,
   buildV2CarveOuts,
+  buildCliExecutableReadCarveOuts,
   buildWriteSandboxRules,
   buildLinuxReadIsolationMasks,
   type V2IsolationContext,
@@ -4395,7 +4396,7 @@ function spawnCli(cfg: Extract<DaemonToWorker, { type: 'init' }>): void {
   // so the probe below sees no pane and we cold-spawn fresh isolated. A pane from
   // this lifetime (suspend→resume) keeps its marker → reattaches normally (it is
   // still the isolated process). This lets isolated bots use tmux/zellij/herdr.
-  if (cfg.readIsolation === true && persistentSessionName && effectiveBackendType !== 'pty') {
+  if ((willReadIsolate || willWriteSandbox) && persistentSessionName && effectiveBackendType !== 'pty') {
     const paneLive = effectiveBackendType === 'tmux'
       ? TmuxBackend.hasSession(persistentSessionName)
       : effectiveBackendType === 'zellij'
@@ -4791,7 +4792,14 @@ function spawnCli(cfg: Extract<DaemonToWorker, { type: 'init' }>): void {
       denyPaths = buildV2DenyPaths(profileCtx).map(canonical);
       denyRegexes = buildV2DenyRegexes(profileCtx);
       const carve = buildV2CarveOuts(profileCtx);
-      allowPaths = carve.allowPaths.map(canonical);
+      allowPaths = [
+        ...carve.allowPaths.map(canonical),
+        ...buildCliExecutableReadCarveOuts({
+          homeDir: profileCtx.homeDir,
+          cliId: cliAdapter.id,
+          resolvedBin: canonical(cliAdapter.resolvedBin),
+        }),
+      ];
       finalDenyPaths = carve.finalDenyPaths.map(canonical);
       traverseDirs = carve.traverseDirs.map(canonical);
     }

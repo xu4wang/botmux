@@ -73,6 +73,30 @@ export function botHomePath(botmuxHome: string, appId: string): string {
   return `${botmuxHome.replace(/\/+$/, '')}/bots/${assertSafeAppId(appId)}`;
 }
 
+/**
+ * Minimal read carve-outs needed to launch a CLI whose executable itself lives
+ * under a globally denied data root. The standalone Codex installer exposes
+ * `~/.local/bin/codex` as a symlink through
+ * `~/.codex/packages/standalone/current`; allowing only the final canonical
+ * binary is insufficient because Seatbelt must read the intermediate `current`
+ * symlink while resolving execvp(). Re-open the executable package tree only —
+ * auth.json, config.toml, sessions and the rest of ~/.codex remain denied.
+ *
+ * Inputs must already be canonicalized by the worker (this module stays pure).
+ */
+export function buildCliExecutableReadCarveOuts(input: {
+  homeDir: string;
+  cliId: string;
+  resolvedBin: string;
+}): string[] {
+  if (input.cliId !== 'codex') return [];
+  const h = input.homeDir.replace(/\/+$/, '');
+  const bin = normalizeIsolationPath(input.resolvedBin);
+  const standaloneRoot = `${h}/.codex/packages/standalone`;
+  if (!bin || (bin !== standaloneRoot && !bin.startsWith(`${standaloneRoot}/`))) return [];
+  return [standaloneRoot];
+}
+
 export interface V2IsolationContext {
   /** The bot user's home directory. */
   homeDir: string;

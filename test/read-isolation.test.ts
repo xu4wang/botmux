@@ -7,6 +7,7 @@ import {
   buildV2DenyPaths,
   buildV2DenyRegexes,
   buildV2CarveOuts,
+  buildCliExecutableReadCarveOuts,
   buildWriteSandboxRules,
   buildLinuxReadIsolationMasks,
   sendCredFilePath,
@@ -42,6 +43,26 @@ describe('normalizeIsolationPath (path hardening)', () => {
 
   it('strips trailing slashes', () => {
     expect(normalizeIsolationPath('/a/b/')).toBe('/a/b');
+  });
+});
+
+describe('buildCliExecutableReadCarveOuts', () => {
+  it('re-opens only the standalone Codex package tree when the canonical binary lives there', () => {
+    expect(buildCliExecutableReadCarveOuts({
+      homeDir: '/Users/bot',
+      cliId: 'codex',
+      resolvedBin: '/Users/bot/.codex/packages/standalone/releases/0.144.1/bin/codex',
+    })).toEqual(['/Users/bot/.codex/packages/standalone']);
+  });
+
+  it('does not broaden reads for system/npm Codex installs or other CLIs', () => {
+    expect(buildCliExecutableReadCarveOuts({
+      homeDir: '/Users/bot', cliId: 'codex', resolvedBin: '/opt/homebrew/bin/codex',
+    })).toEqual([]);
+    expect(buildCliExecutableReadCarveOuts({
+      homeDir: '/Users/bot', cliId: 'claude-code',
+      resolvedBin: '/Users/bot/.codex/packages/standalone/releases/x/bin/claude',
+    })).toEqual([]);
   });
 });
 
