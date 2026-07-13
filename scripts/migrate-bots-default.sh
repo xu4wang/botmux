@@ -8,7 +8,21 @@
 #                           bots.json / 日志，管不了任何东西）
 #   --owner <邮箱>          管理员，默认 austin.wangxu@ksher.com
 #   --dry-run               只打印将要做的改动，不落盘
+#   --migrate-memory        顺带把旧记忆搬进 bot 的新家（默认不搬，见下）
 #   --bots-json <path>      改哪个 bots.json（默认 ~/.botmux/bots.json；仅供演练/测试）
+#
+# 记忆为什么会「丢」（其实没删，是新身份读不到）：迁移同时动了两个维度 ——
+#   ① 读隔离把 CLI 数据目录重定向到 BOT_HOME，且 Seatbelt deny 了 ~/.claude
+#      → 原来 ~/.claude/projects/** 下的记忆，隔离后物理上读不到
+#   ② 角色系统给了 defaultWorkingDir → cwd 变了 → 记忆桶（按 cwd 路径 slug 分桶）也变了
+#   旧：~/.claude/projects/<slug(旧cwd)>/memory
+#   新：~/.botmux/bots/<appId>/claude/projects/<slug(角色目录)>/memory
+#
+# --migrate-memory 的策略（**桶是按 cwd 分的，不是按 bot 分的**，所以不能无脑搬）：
+#   - bot 有自己的 workingDir  → 桶是它专属的 → 整桶 memory/ **拷贝**（不删原件）到新家
+#   - bot 回落到 `~`（没配 workingDir）→ 那是**公共桶**：所有这类 bot + 你自己在 $HOME 跑的
+#     claude 全混在一起 → **拒绝自动搬**，只列出桶里有什么，让人自己挑（否则就是跨 bot
+#     记忆串味 —— 而那正是读隔离要防的东西）
 #
 # 与 add-bot-default.sh 的分工：那个是「新建 bot」，这个是「改造已有 bot」。
 #
@@ -29,12 +43,14 @@ BOTS_JSON="$HOME/.botmux/bots.json"
 OWNER="austin.wangxu@ksher.com"
 EXCLUDE=""
 DRY=0
+MIGRATE_MEM=0
 
 while [ $# -gt 0 ]; do
   case "$1" in
     --exclude) EXCLUDE="$2"; shift 2 ;;
     --owner) OWNER="$2"; shift 2 ;;
     --dry-run) DRY=1; shift ;;
+    --migrate-memory) MIGRATE_MEM=1; shift ;;
     --bots-json) BOTS_JSON="$2"; shift 2 ;;
     -h|--help) awk 'NR==1{next} /^#/{print; next} {exit}' "$0"; exit 0 ;;
     *) echo "未知参数：$1" >&2; exit 1 ;;
@@ -148,6 +164,46 @@ for OU in $(node -e 'const p=JSON.parse(require("fs").readFileSync(process.argv[
     echo "  ⚠️  ${OU} 反查不到邮箱（可能属于别的 app）—— 保留原值，请人工确认该 bot 的 owner"
   fi
 done
+
+if [ "$MIGRATE_MEM" -eq 1 ]; then
+echo
+echo "== 记忆迁移（拷贝，不删原件）=="
+# 桶 = cwd 绝对路径把非字母数字全换成 "-"（与 role-deploy.sh 的 slug() 同构）
+for ID in $(echo "$TARGETS" | tr ',' ' '); do
+  OLD_CWD="$(node -e '
+    const b=JSON.parse(require("fs").readFileSync(process.argv[1],"utf8")).find(x=>x.larkAppId===process.argv[2]);
+    let w=b?.workingDir || "~";
+    if (w==="~" || w.startsWith("~/")) w = process.env.HOME + w.slice(1);
+    process.stdout.write(w);
+  ' "$BOTS_JSON" "$ID")"
+  NEW_CWD="$HOME/botmux-roles/$ID/shared/default"
+  SLUG_OLD="$(node -e 'process.stdout.write(process.argv[1].replace(/[^A-Za-z0-9]/g,"-"))' "$OLD_CWD")"
+  SLUG_NEW="$(node -e 'process.stdout.write(process.argv[1].replace(/[^A-Za-z0-9]/g,"-"))' "$NEW_CWD")"
+  SRC="$HOME/.claude/projects/$SLUG_OLD/memory"
+  DST="$HOME/.botmux/bots/$ID/claude/projects/$SLUG_NEW/memory"
+
+  if [ "$OLD_CWD" = "$HOME" ]; then
+    echo "  🛑 ${ID}: 旧 cwd 回落到 \$HOME —— 那是**公共桶**（所有没配 workingDir 的 bot + 你自己在 \$HOME 跑的 claude 全混在一起）"
+    echo "     拒绝自动搬（会造成跨 bot 记忆串味，正是读隔离要防的）。桶里现有的记忆："
+    if [ -d "$SRC" ]; then ls -1 "$SRC" 2>/dev/null | sed 's/^/       - /'; else echo "       （该桶没有 memory/，无事可做）"; fi
+    echo "     要搬的话人工挑文件拷到：${DST}/"
+    continue
+  fi
+
+  if [ ! -d "$SRC" ]; then
+    echo "  ⏭  ${ID}: 旧桶没有记忆（${SRC} 不存在），跳过"
+    continue
+  fi
+
+  echo "  📦 ${ID}: ${SRC}  →  ${DST}"
+  ls -1 "$SRC" | sed 's/^/       - /'
+  if [ "$DRY" -eq 0 ]; then
+    mkdir -p "$DST"
+    cp -R "$SRC/." "$DST/"
+    echo "     ✅ 已拷贝（原件保留在 ${SRC}）"
+  fi
+done
+fi
 
 if [ "$DRY" -eq 1 ]; then
   echo
