@@ -46,8 +46,13 @@ export function readDirMeta(workingDir: string): DirMeta {
  */
 function safeName(v: unknown): string | undefined {
   if (typeof v !== 'string') return undefined;
-  const s = v.replace(/[\r\n]+/g, ' ').replace(/[[\]]/g, '').trim();
+  const s = safeText(v).trim();
   return s ? s.slice(0, 64) : undefined;
+}
+
+/** 链接文本位的通用消毒：剥离 `[` `]` 与换行（两者都能击穿 `[text](url)`）。 */
+function safeText(s: string): string {
+  return s.replace(/[\r\n]+/g, ' ').replace(/[[\]]/g, '');
 }
 
 /** 只放行 http/https，且不得含空白或 `)`（会提前闭合 markdown 链接）。其余一律丢弃 → 链接降级成纯文本。 */
@@ -73,9 +78,12 @@ export function renderBrandTemplate(
   const meta = wd ? readDirMeta(wd) : {};
   // 单趟替换：避免已替换进去的值（如 name 含 '{cwd}' 字面量）被后续 pass 二次替换。
   // 交替顺序 {cwdName} 在 {cwd} 之前，防前缀吞噬。
+  // {cwdName}/{cwd} 落在链接的**文本位**，而它们的 fallback 来自**目录路径** —— 目录名本身
+  // 就可以含 `]`（`mkdir 'a]b'` 完全合法），照样能击穿 `[...](...)`。所以路径派生的值也要消毒，
+  // 不能只消毒 .botmux-dir.json 里的 name。
   const rendered = brand.replace(/\{cwdName\}|\{cwdUrl\}|\{cwd\}/g, (m) =>
-    m === '{cwdName}' ? (wd ? (meta.name ?? basename(wd)) : '')
-    : m === '{cwd}' ? wd
+    m === '{cwdName}' ? (wd ? (meta.name ?? safeText(basename(wd))) : '')
+    : m === '{cwd}' ? safeText(wd)
     : (meta.url ?? ''));
   return rendered.replace(/\[([^\]]*)\]\(\)/g, '$1');
 }

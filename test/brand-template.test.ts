@@ -52,6 +52,16 @@ describe('renderBrandTemplate', () => {
     expect(out).toBe('role **伪造正文**');          // url 非法 → 丢弃 → 空链接降级成纯文本
   });
 
+  it('目录名本身含 ] 时也要消毒（basename fallback / {cwd} 同样落在链接文本位）', () => {
+    // `mkdir 'a]b'` 完全合法 —— 没有 .botmux-dir.json 时 {cwdName} 回落到 basename(wd)，
+    // 目录名里的 ] 照样能击穿 [text](url)。
+    const dir = mkdtempSync(join(tmpdir(), 'brand-]evil-'));
+    const out = renderBrandTemplate('[{cwdName}](https://x.example/)', dir)!;
+    expect(out).toContain('](https://x.example/)');       // 链接结构完好
+    expect(out.split('](https://x.example/)')[0]).not.toContain(']');  // 文本位没有裸 ]
+    expect(renderBrandTemplate('{cwd}', dir)).not.toContain(']');
+  });
+
   it('javascript: 等危险 scheme 一律丢弃', () => {
     const dir = mkdtempSync(join(tmpdir(), 'brand-js-'));
     writeFileSync(join(dir, '.botmux-dir.json'), JSON.stringify({ name: 'x', url: 'javascript:alert(1)' }));
