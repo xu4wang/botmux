@@ -358,6 +358,7 @@ interface ResolvedDashboardSettings {
    *  `recommendedSource`/`recommendedRef` are a non-default, author-recommended
    *  source the SPA can offer as a one-click fill; never persisted unless picked. */
   herdrTraexPlugin: { enabled: boolean; source: string; ref: string; recommendedSource: string; recommendedRef: string };
+  codexRpcInput: boolean;
   /** Machine-wide VC meeting listener kill-switch. Default ON. */
   vcMeetingAgent: {
     enabled: boolean;
@@ -813,6 +814,7 @@ function resolveDashboardSettings(): ResolvedDashboardSettings {
       recommendedSource: TRAEX_RECOMMENDED_SOURCE,
       recommendedRef: TRAEX_RECOMMENDED_REF,
     },
+    codexRpcInput: dashboard.codexRpcInput !== false, // default ON
     vcMeetingAgent: {
       enabled: global.vcMeetingAgent?.enabled !== false,
       listenerBotAppId: global.vcMeetingAgent?.listenerBotAppId ?? null,
