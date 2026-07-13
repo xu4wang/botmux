@@ -9,7 +9,8 @@
 #   ① botmux setup add        —— 凭证换 token 校验通过才写盘；只拉起这个 bot，不动其它
 #   ② 角色库骨架 + 三件套      —— defaultWorkingDir / brandLabel / tuiSlashAllow
 #   ③ bots.json 补字段         —— p2pOpen: true；readIsolation: true（--admin 时为 false）
-#   ④ botmux restart + 自检
+#   ④ lark-cli 身份 —— 建 ~/.lark-cli-bots/<appId>/，让它用自己的飞书 app
+#   ⑤ botmux restart + 自检
 #
 # --admin（管理 bot）：**关闭读隔离**，其余（角色系统、p2pOpen、唯一管理员）不变。
 #   为什么不能隔离：读隔离会 deny 掉 ~/.botmux/bots.json、daemon logs、其它 bot 的 BOT_HOME
@@ -73,7 +74,39 @@ fs.writeFileSync(p, JSON.stringify(bots,null,2)+"\n");
 console.log("readIsolation="+(admin==="1"?"false（管理 bot）":"true")+", p2pOpen=true, allowedUsers=["+b.allowedUsers.join(",")+"]");
 ' "$BOTS_JSON" "$APP_ID" "$OWNER" "$ADMIN"
 
-echo "== ④ 重启 + 自检 =="
+echo "== ④ lark-cli 身份：让这个 bot 用自己的 appid 操作飞书 =="
+# 每个 bot 必须用**自己的**飞书 app 调 lark-cli，否则会以别人的身份读写文档/发消息，
+# 数据权限也没法按 bot 管。机制：botmux 给每个会话注入 BOTMUX_LARK_APP_ID，~/.zshenv 据此把
+# LARKSUITE_CLI_CONFIG_DIR 指到 ~/.lark-cli-bots/<appId>/ —— 这里就是把那个配置目录建出来。
+LARK_CFG="$HOME/.lark-cli-bots/$APP_ID"
+if command -v lark-cli >/dev/null; then
+  if [ -f "$LARK_CFG/config.json" ]; then
+    echo "  已存在：$LARK_CFG（跳过）"
+  else
+    mkdir -p "$LARK_CFG"
+    # secret 走 stdin，不进 argv（免得 ps 看得见）
+    printf '%s' "$APP_SECRET" | LARKSUITE_CLI_CONFIG_DIR="$LARK_CFG"       lark-cli config init --app-id "$APP_ID" --app-secret-stdin --brand feishu >/dev/null
+    LARKSUITE_CLI_CONFIG_DIR="$LARK_CFG" lark-cli config default-as bot >/dev/null 2>&1 || true
+    LARKSUITE_CLI_CONFIG_DIR="$LARK_CFG" lark-cli config strict-mode bot >/dev/null 2>&1 || true
+    echo "  已配置：$LARK_CFG（default-as bot + strict-mode bot，纯 bot 身份）"
+  fi
+  # ~/.zshenv 的映射是全局前提（不是 .zshrc —— 非交互 shell 只 source .zshenv）
+  if ! grep -q "LARKSUITE_CLI_CONFIG_DIR" "$HOME/.zshenv" 2>/dev/null; then
+    echo "  ⚠️  ~/.zshenv 里没有 BOTMUX_LARK_APP_ID → LARKSUITE_CLI_CONFIG_DIR 的映射，追加中…"
+    cat >> "$HOME/.zshenv" <<'ZE'
+
+# botmux: 每个 bot 用自己的飞书 app 操作 lark-cli（必须放 .zshenv —— 非交互 shell 只 source 它）
+if [ -n "$BOTMUX_LARK_APP_ID" ]; then
+  export LARKSUITE_CLI_CONFIG_DIR="$HOME/.lark-cli-bots/$BOTMUX_LARK_APP_ID"
+fi
+ZE
+    echo "  已追加到 ~/.zshenv"
+  fi
+else
+  echo "  ⚠️ 没装 lark-cli —— 该 bot 将无法操作飞书文档/消息。装好后手动补这一步。"
+fi
+
+echo "== ⑤ 重启 + 自检 =="
 # 首次安装时 daemon 还没起来，restart 会失败 —— 退化成 start。
 if ! botmux restart >/dev/null 2>&1; then
   echo "  （restart 失败，按首次安装处理：botmux start）"
@@ -91,6 +124,7 @@ ok("p2pOpen（私聊全开）", b.p2pOpen===true);
 ok("allowedUsers（管理员非空 —— p2pOpen 的前提）", (b.allowedUsers||[]).length>0);
 ok("defaultWorkingDir（角色系统）", !!b.defaultWorkingDir);
 ok("brandLabel（角色名脚注）", (b.brandLabel||"").includes("{cwdName}"));
+ok("lark-cli 用自己的 appid", fs.existsSync(process.env.HOME+"/.lark-cli-bots/"+appId+"/config.json"));
 if (!(b.allowedUsers||[]).length) { console.error("\n❌ 管理员为空：p2pOpen 会锁死群聊且无人可管，务必修复"); process.exit(1); }
 ' "$BOTS_JSON" "$APP_ID" "$ADMIN"
 
