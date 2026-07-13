@@ -154,6 +154,21 @@ if [ "$CONFIGURE" -eq 1 ]; then
   ' "$BOTS_JSON" "$BOTS"
 fi
 
+# cron 刷 token 需要的网络前提：cron 环境不继承 shell 的 proxy 变量。这里按 cron 的空环境探一次，
+# 探不通就必须在 crontab 里显式写 http_proxy/https_proxy（外加 no_proxy 放行 loopback，否则
+# botmux suspend all 的 IPC 会被代理劫持）。
+echo "== 网络自检（模拟 cron 空环境访问 Anthropic）=="
+if env -i PATH=/usr/bin:/bin:/opt/homebrew/bin curl -s -o /dev/null -w "" --max-time 12 \
+     https://api.anthropic.com/v1/messages 2>/dev/null; then
+  echo "  ✅ 空环境可直连 Anthropic —— crontab 不需要配代理"
+else
+  echo "  ⚠️  空环境连不上 Anthropic（本机大概率靠 shell 里的 proxy 变量上网）。"
+  echo "     cron 不继承这些变量 → 刷 token 会静默失败 → 掉线。crontab 里必须加："
+  echo "       http_proxy=http://<host>:<port>"
+  echo "       https_proxy=http://<host>:<port>"
+  echo "       no_proxy=localhost,127.0.0.1,::1     # 放行 loopback，否则 botmux 的 IPC 被代理劫持"
+fi
+
 cat <<EOF
 
 == 还剩两步要人工做 ==
