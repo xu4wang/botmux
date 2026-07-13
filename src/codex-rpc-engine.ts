@@ -8,13 +8,19 @@
 // entirely, which is where codex drops bracketed pastes during its startup /
 // settings-churn terminal re-init (see codex-0144 investigation).
 //
-// Coordination (verified by spike): thread events do NOT broadcast across
-// connections, so the engine must OWN the thread — `thread/start`, run the
-// first turn (persists a rollout within ~0.2s), then the TUI `resume`s it.
-// Subsequent turns are injected by the engine and render live in the TUI.
-// On a botmux resume (daemon restart / re-fork), the engine `thread/resume`s
-// the persisted thread id so RPC mode survives reconnects instead of falling
-// back to the drop-prone paste path (P0).
+// Coordination (verified — raw-WS repro + real `codex --remote` TUI): the
+// app-server BROADCASTS a thread's turn/item events to EVERY connection that has
+// the thread open (engine `thread/start`/`resume` + TUI `resume`), and the real
+// TUI renders events for a turn another connection issued. So the engine owns the
+// thread (`thread/start`, then the first turn — an empty thread has no rollout so
+// the TUI can't resume it, hence the first turn persists the rollout BEFORE the
+// TUI attaches), the TUI `resume`s it, and every engine turn thereafter renders
+// live in the TUI via that broadcast. On a botmux resume (daemon restart /
+// re-fork), the engine `thread/resume`s the persisted thread id AND the pane is
+// respawned as a fresh `--remote resume` against the CURRENT app-server (a new
+// port each incarnation) — reattaching the prior pane would leave it pointed at
+// the now-dead prior app-server (that lifecycle bug, not any non-broadcast, is
+// what froze the Web terminal). See codex-rpc-lifecycle + worker engageCodexRpc.
 import { spawn, type ChildProcess } from 'node:child_process';
 import { createServer } from 'node:net';
 import { get as httpGet } from 'node:http';
@@ -62,6 +68,9 @@ export interface CodexRpcEngineOpts {
   /** Optional model + reasoning effort forwarded to thread config (P1). */
   model?: string;
   reasoningEffort?: string;
+  /** Override the per-request JSON-RPC timeout (default REQUEST_TIMEOUT_MS).
+   *  Mainly for tests that assert the wedged-app-server recovery path. */
+  requestTimeoutMs?: number;
   /** Called once if the app-server dies unexpectedly (not via stop()). The
    *  worker uses it to kill the now-orphaned `codex --remote` pane so the normal
    *  exit→daemon-refork→resume path re-engages RPC on a fresh app-server (P1). */
@@ -82,11 +91,19 @@ function autoApproval(method: string): unknown {
 
 const MARKER_DIR = join(homedir(), '.botmux', 'data', 'codex-rpc-app-servers');
 
+/** Per JSON-RPC request timeout. Without it, a connected-but-wedged app-server
+ *  (never answers turn/start / initialize / thread/*) would leave the caller
+ *  awaiting forever — flushPending would stick in isFlushing and silently drop
+ *  every later message (P1-5). A rejected request unblocks the caller, which
+ *  fails-closed (engage) or surfaces a resync (sendTurn). Generous because the
+ *  FIRST turn on a cold app-server pays MCP/model-list startup latency. */
+const REQUEST_TIMEOUT_MS = 60_000;
+
 export class CodexRpcEngine {
   private child?: ChildProcess;
   private ws?: WebSocket;
   private nextId = 1;
-  private pending = new Map<number, { resolve: (v: any) => void; reject: (e: Error) => void }>();
+  private pending = new Map<number, { resolve: (v: any) => void; reject: (e: Error) => void; timer: ReturnType<typeof setTimeout> }>();
   private port = 0;
   private threadId?: string;
   private closed = false;
@@ -261,12 +278,23 @@ export class CodexRpcEngine {
     });
   }
 
-  private request(method: string, params: unknown): Promise<any> {
+  private request(method: string, params: unknown, timeoutMs: number = this.opts.requestTimeoutMs ?? REQUEST_TIMEOUT_MS): Promise<any> {
     const id = this.nextId++;
     return new Promise((resolve, reject) => {
-      this.pending.set(id, { resolve, reject });
+      const timer = setTimeout(() => {
+        if (!this.pending.has(id)) return;
+        // A connected-but-wedged app-server is FATAL, not a one-off: rejecting
+        // just this request would leave the engine + pane alive and every later
+        // turn/start would time out again. Route through failAll so ALL inflight
+        // requests reject AND onDead fires — the worker then kills the pane →
+        // exit → restart → re-engage on a fresh app-server, and the inflight turn
+        // enters the existing restart/re-queue path (P1-5, Codex delta point 3).
+        this.failAll(new Error(`codex app-server request '${method}' timed out after ${timeoutMs}ms`));
+      }, timeoutMs);
+      timer.unref?.();
+      this.pending.set(id, { resolve, reject, timer });
       try { this.send({ jsonrpc: '2.0', id, method, params }); }
-      catch (e) { this.pending.delete(id); reject(e as Error); }
+      catch (e) { this.pending.delete(id); clearTimeout(timer); reject(e as Error); }
     });
   }
 
@@ -291,6 +319,7 @@ export class CodexRpcEngine {
       const p = this.pending.get(msg.id);
       if (!p) return;
       this.pending.delete(msg.id);
+      clearTimeout(p.timer);
       if (msg.error) p.reject(new Error(typeof msg.error === 'object' ? JSON.stringify(msg.error) : String(msg.error)));
       else p.resolve(msg.result);
       return;
@@ -306,7 +335,7 @@ export class CodexRpcEngine {
 
   private failAll(err: Error): void {
     if (this.pending.size) this.log(`[codex-rpc] ${err.message}`);
-    for (const p of this.pending.values()) p.reject(err);
+    for (const p of this.pending.values()) { clearTimeout(p.timer); p.reject(err); }
     this.pending.clear();
     if (!this.closed && !this.deadNotified) {
       this.deadNotified = true;

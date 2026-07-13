@@ -284,7 +284,10 @@ export const config = {
   // sessions without a daemon restart. Default ON (absent ⇒ enabled); set false
   // to disable fleet-wide. The daemon ORs this with each bot's own `codexRpcInput`
   // flag when building the worker init message.
-  get codexRpcInputDefault(): boolean { return readGlobalConfig().dashboard?.codexRpcInput !== false; },
+  // Default OFF: the hybrid RPC pane lifecycle (resume respawn + ready-gate) must
+  // be live-verified before the fleet default flips ON. A per-bot codexRpcInput:true
+  // still force-enables; the dashboard toggle sets this global explicitly.
+  get codexRpcInputDefault(): boolean { return readGlobalConfig().dashboard?.codexRpcInput === true; },
 };
 
 // allowedUsers is mutable — daemon resolves email prefixes to open_ids at startup
