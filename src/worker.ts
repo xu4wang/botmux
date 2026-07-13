@@ -28,6 +28,7 @@ import {
   buildV2DenyRegexes,
   buildV2CarveOuts,
   buildWriteSandboxRules,
+  buildLinuxReadIsolationMasks,
   type V2IsolationContext,
 } from './adapters/cli/read-isolation.js';
 import { killPersistentSession, type PersistentBackendType } from './core/persistent-backend.js';
@@ -4309,14 +4310,29 @@ function spawnCli(cfg: Extract<DaemonToWorker, { type: 'init' }>): void {
   // wrapper are applied at spawn time further down. This gate is the SINGLE
   // decision point: configured-but-unenforceable fail-closes HERE (never run a
   // session unisolated that asked for isolation).
+  // UNIFIED file sandbox: read isolation engages with the same toggle as write
+  // isolation. On darwin the legacy standalone `readIsolation` flag ALSO engages it
+  // (Seatbelt can read-deny without a write overlay). On Linux read isolation RIDES
+  // the bwrap sandbox (its masks go into the same bwrap plan), so it requires the
+  // sandbox to be on — hence the trigger is the sandbox toggle there, never the bare
+  // legacy flag (which would redirect the data dir but apply no masks → a hole).
+  const wantsFileSandbox = cfg.sandbox === true || sandboxEnabled();
+  // Legacy EXPLICIT read-isolation opt-in (macOS only — Linux read-iso rides the
+  // bwrap sandbox, so it's driven solely by the sandbox toggle there). Keeps
+  // FAIL-CLOSED semantics: you asked for read isolation → refuse to start without it.
+  const explicitLegacyReadIso = process.platform === 'darwin' && cfg.readIsolation === true;
   const readIsolationGate = evaluateReadIsolationGate({
-    configured: cfg.readIsolation === true,
+    configured: wantsFileSandbox || explicitLegacyReadIso,
     adapterSupports: cliAdapter.supportsReadIsolation === true,
     wrapperCliSet: !!cfg.wrapperCli,
     platform: process.platform,
     sessionDataDirSet: !!process.env.SESSION_DATA_DIR,
   });
-  if (readIsolationGate.failClosedReason) {
+  // Fail-closed ONLY for the explicit legacy flag. Under the UNIFIED sandbox toggle
+  // read isolation is BEST-EFFORT: a CLI/platform that can't enforce the read-deny
+  // (e.g. a non-supporting adapter) still runs WRITE-isolated — it just doesn't get
+  // the read masks. Never brick a sandboxed session just because read-iso is N/A.
+  if (readIsolationGate.failClosedReason && explicitLegacyReadIso) {
     throw new Error(`[read-isolation] refusing to start session ${cfg.sessionId}: ${readIsolationGate.failClosedReason}`);
   }
   const willReadIsolate = readIsolationGate.enabled;
@@ -4328,7 +4344,7 @@ function spawnCli(cfg: Extract<DaemonToWorker, { type: 'init' }>): void {
   // profile. Like bwrap this is FAIL-SAFE: a requested sandbox that can't be
   // established (unsandboxable backend, no SESSION_DATA_DIR) is a hard error at the
   // spawn site below, never a silent unconfined run.
-  const willWriteSandbox = process.platform === 'darwin' && (cfg.sandbox === true || sandboxEnabled());
+  const willWriteSandbox = process.platform === 'darwin' && wantsFileSandbox;
   // Every bot — isolated OR not — gets its own BOT_HOME dir as a ready-made private-
   // storage slot. An isolated sibling denies this path regardless of whether the owner
   // is isolated (deny uses the full bots.json), so a non-isolated bot can drop private
@@ -4744,11 +4760,12 @@ function spawnCli(cfg: Extract<DaemonToWorker, { type: 'init' }>): void {
   let spawnArgs = args;
   let spawnCwd = cfg.workingDir;
 
-  // Read isolation: wrap the whole CLI process in a macOS Seatbelt sandbox that
+  // Read isolation (macOS): wrap the whole CLI process in a Seatbelt sandbox that
   // denies reads of the sensitive paths (blocklist). The CLI bypasses its OWN
-  // sandbox (see adapter) so the outer wrapper is the sole enforcer. Non-darwin
-  // platforms already fail-closed at the gate above (Linux bwrap is a TODO).
-  if (readIsolationCtx || writeSandboxRules) {
+  // sandbox (see adapter) so the outer wrapper is the sole enforcer. DARWIN ONLY —
+  // on Linux read isolation is enforced by bwrap masks fed into the overlay sandbox
+  // below (see readIsoLinuxMasks), NOT sandbox-exec (which doesn't exist there).
+  if (process.platform === 'darwin' && (readIsolationCtx || writeSandboxRules)) {
     // Seatbelt matches CANONICAL paths (it resolves symlinks), so realpath every
     // deny/allow before emitting the profile — otherwise a sensitive root reached
     // through a symlinked prefix (e.g. a symlinked home / SESSION_DATA_DIR) would
@@ -4816,6 +4833,41 @@ function spawnCli(cfg: Extract<DaemonToWorker, { type: 'init' }>): void {
   // Linux ONLY — on macOS the same `sandbox: true` is enforced by the Seatbelt
   // write-sandbox above (willWriteSandbox), so bwrap must not run here.
   const sandboxOn = process.platform !== 'darwin' && (cfg.sandbox === true || sandboxEnabled());
+  // Linux read isolation: build the bwrap MASK set (the Seatbelt read-deny twin) and
+  // fold it into the SAME overlay sandbox plan below. Enumerate sibling bots from the
+  // FILESYSTEM (the worker runs unsandboxed on the host; bots.json may be denied) —
+  // spawn-time-static, so a bot added after this spawn is covered on its next cold
+  // start (the accepted Linux tradeoff vs the macOS regex). Only when read isolation
+  // is enforceable here (willReadIsolate ⇒ readIsolationCtx set) AND on Linux.
+  let readIsoLinuxMasks: { hidePaths: string[]; ownReadWritePaths: string[]; ownReadOnlyPaths: string[] } | undefined;
+  if (readIsolationCtx && process.platform === 'linux') {
+    const canon = (p: string) => { try { return realpathSync(p); } catch { return p; } };
+    // Canonicalize the root prefixes FIRST so every derived mask path is symlink-safe
+    // (bwrap masks resolve symlinks — a symlinked home/data root would else fail-open).
+    const ctxReal: V2IsolationContext = {
+      ...readIsolationCtx,
+      homeDir: canon(readIsolationCtx.homeDir),
+      botmuxHome: canon(readIsolationCtx.botmuxHome),
+      sessionDataDir: canon(readIsolationCtx.sessionDataDir),
+    };
+    const ids = new Set<string>();
+    const scan = (dir: string, pick: (name: string) => string | null) => {
+      try { for (const name of readdirSync(dir)) { const id = pick(name); if (id) ids.add(id); } } catch { /* dir absent → no siblings there */ }
+    };
+    scan(join(ctxReal.botmuxHome, 'bots'), n => n);                                    // sibling BOT_HOME dirs
+    scan(join(ctxReal.homeDir, '.lark-cli-bots'), n => n);                             // sibling lark configs
+    scan(ctxReal.sessionDataDir, n => { const m = /^sessions-(.+)\.json$/.exec(n); return m ? m[1] : null; });
+    ids.delete(cfg.larkAppId);                                                          // never mask own
+    let sidecars: string[] = [];
+    try { sidecars = readdirSync(ctxReal.botmuxHome).filter(n => n.startsWith('bots.json.')).map(n => join(ctxReal.botmuxHome, n)); } catch { /* */ }
+    const m = buildLinuxReadIsolationMasks({ ctx: ctxReal, siblingAppIds: [...ids], botsJsonSidecars: sidecars });
+    readIsoLinuxMasks = {
+      hidePaths: m.hidePaths.map(canon),
+      ownReadWritePaths: m.ownReadWritePaths.map(canon),
+      ownReadOnlyPaths: m.ownReadOnlyPaths.map(canon),
+    };
+    log(`[read-isolation] linux bwrap masks: ${m.hidePaths.length} hide, ${[...ids].length} siblings enumerated`);
+  }
   if (sandboxOn) {
     // FAIL-SAFE (not fail-open): when the sandbox is requested, a missing
     // precondition (no SESSION_DATA_DIR, or a backend we can't wrap) must be a
@@ -4865,10 +4917,13 @@ function spawnCli(cfg: Extract<DaemonToWorker, { type: 'init' }>): void {
           dataDir,
           cliBin: cliAdapter.resolvedBin,
           cliArgs: args,
-          hidePaths: cfg.sandboxHidePaths ?? [],
-          authPaths: cliAdapter.authPaths,
+          // Read-isolation masks (Linux) fold into the same plan: hide the cross-bot
+          // sensitive set, keep the own BOT_HOME real+writable (authPaths), and re-
+          // expose the own attachments bucket read-only after the masks (readonlyRoots).
+          hidePaths: [...(cfg.sandboxHidePaths ?? []), ...(readIsoLinuxMasks?.hidePaths ?? [])],
+          authPaths: [...(cliAdapter.authPaths ?? []), ...(readIsoLinuxMasks?.ownReadWritePaths ?? [])],
           extraExecPaths: cliAdapter.sandboxExtraExecPaths?.(),
-          readonlyRoots: cfg.skillReadonlyRoots ?? [],
+          readonlyRoots: [...(cfg.skillReadonlyRoots ?? []), ...(readIsoLinuxMasks?.ownReadOnlyPaths ?? [])],
           userReadonlyPaths: cfg.sandboxReadonlyPaths ?? [],
           net: cfg.sandboxNetwork !== false,
         });

@@ -479,8 +479,10 @@ export function evaluateReadIsolationGate(opts: {
   configured: boolean;
   adapterSupports: boolean;
   wrapperCliSet: boolean;
-  /** process.platform — the Seatbelt wrapper exists on macOS only (Linux bwrap
-   *  is unimplemented; fail-closed rather than run unisolated). */
+  /** process.platform — read isolation is enforced by macOS Seatbelt (sandbox-exec)
+   *  OR Linux bwrap masks; unsupported elsewhere (fail-closed rather than run
+   *  unisolated). NOTE: on Linux the masks ride the bwrap file sandbox, so the caller
+   *  must ensure the sandbox is on (see readIsoConfigured in worker.ts). */
   platform: string;
   /** SESSION_DATA_DIR present (BOT_HOME + profile paths derive from it). */
   sessionDataDirSet: boolean;
@@ -490,14 +492,8 @@ export function evaluateReadIsolationGate(opts: {
     return { enabled: false, failClosedReason: 'the CLI adapter does not support read isolation' };
   if (opts.wrapperCliSet)
     return { enabled: false, failClosedReason: 'wrapperCli strips the CLI spawn args, read isolation cannot be enforced' };
-  if (opts.platform !== 'darwin')
-    return {
-      enabled: false,
-      failClosedReason:
-        opts.platform === 'linux'
-          ? 'Linux external-wrapper isolation not yet implemented (bwrap TODO)'
-          : `external-wrapper isolation unsupported on ${opts.platform}`,
-    };
+  if (opts.platform !== 'darwin' && opts.platform !== 'linux')
+    return { enabled: false, failClosedReason: `read isolation unsupported on ${opts.platform}` };
   if (!opts.sessionDataDirSet)
     return { enabled: false, failClosedReason: 'missing SESSION_DATA_DIR' };
   return { enabled: true };

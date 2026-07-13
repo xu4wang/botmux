@@ -312,10 +312,12 @@ describe('evaluateReadIsolationGate (fail-closed, single decision point)', () =>
     expect(r.failClosedReason).toMatch(/wrapperCli/i);
   });
 
-  it('fail-closed on Linux (bwrap wrapper unimplemented) and other platforms', () => {
+  it('ENABLED on Linux (bwrap masks) as well as macOS; unsupported elsewhere', () => {
     const linux = evaluateReadIsolationGate({ ...ok, platform: 'linux' });
-    expect(linux.enabled).toBe(false);
-    expect(linux.failClosedReason).toMatch(/linux/i);
+    expect(linux.enabled).toBe(true);           // Linux read-iso now enforced via bwrap masks
+    expect(linux.failClosedReason).toBeUndefined();
+    const darwin = evaluateReadIsolationGate({ ...ok, platform: 'darwin' });
+    expect(darwin.enabled).toBe(true);
     const win = evaluateReadIsolationGate({ ...ok, platform: 'win32' });
     expect(win.enabled).toBe(false);
     expect(win.failClosedReason).toMatch(/unsupported/i);
