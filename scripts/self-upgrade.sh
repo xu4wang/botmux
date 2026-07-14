@@ -34,9 +34,14 @@ if [ "${BOTMUX_SELF_UPGRADE_DETACHED:-}" = "1" ]; then
     BR="$(git rev-parse --abbrev-ref HEAD)"
     RMT="$(git config --get "branch.${BR}.remote" || echo origin)"
     echo "--- 跟随 ${RMT}/${BR}（硬重置，本地提交会被丢弃）"
+    # ⚠️ 必须显式 install：`switch:here` = `build && use:here`，**它不装依赖**。
+    # 追上游时 package.json / lockfile 常有变动（这次就 +182/-78），只 build 会用陈旧
+    # node_modules，轻则编译失败，重则跑起来才炸。
+    #
     # && 链：任一步失败即停，绝不半途 restart（daemon 会继续跑旧代码，安全）
     git fetch "$RMT" "$BR" \
       && git reset --hard FETCH_HEAD \
+      && npx pnpm@9 install \
       && npx pnpm@9 switch:here \
       && botmux restart \
       && botmux autostart \
@@ -53,6 +58,16 @@ CK="$(resolve_checkout)"
   exit 1
 }
 cd "$CK"
+
+# Node 版本闸：上游已要求 node >=22（package.json engines）。停在旧 Node 的机器必须在**动手前**
+# 就停下——否则 reset --hard 已经把代码换成新版，build 才炸，机器卡在「新代码 + 老 dist」的半吊子
+# 状态。宁可不升，也不要升一半。
+NODE_MAJOR="$(node -p 'process.versions.node.split(".")[0]' 2>/dev/null || echo 0)"
+if [ "${NODE_MAJOR:-0}" -lt 22 ]; then
+  echo "🛑 Node 版本过低：当前 v${NODE_MAJOR}.x，上游要求 >=22。先升 Node 再来。" >&2
+  echo "   （现在就停，代码还没动。若已 reset 才发现，会卡在新代码+老 dist 的半吊子状态）" >&2
+  exit 3
+fi
 
 # 本地改动检查：阶段 ② 会 `reset --hard`，任何本地提交/改动都会被抹掉——所以这道闸是唯一防线。
 # 只有未提交的 brand-template 改动能自动丢（正式修复是它的超集）；
