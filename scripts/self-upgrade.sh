@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# botmux daemon 自升级（macOS；bot 自己跑也安全）：pull → build → restart，全程脱离进程树。
+# botmux daemon 自升级（macOS；bot 自己跑也安全）：跟随部署分支 → build → restart，全程脱离进程树。
 #
 #   ./scripts/self-upgrade.sh
 #
@@ -26,8 +26,17 @@ if [ "${BOTMUX_SELF_UPGRADE_DETACHED:-}" = "1" ]; then
   {
     echo "=== 自升级开始 checkout=${CK} ==="
     cd "$CK"
+    # 部署分支是「产物」不是「源」：deploy/all 按公式（上游 master + 仍开着的 PR + ops/local）
+    # 重建后 force-push，`git pull --ff-only` 必然失败。机器只「跟随」不「合并」——硬重置。
+    #
+    # 不用 `@{u}`：tracking 可能被配错（本机就出现过 deploy/all 的 upstream 指向 origin/master），
+    # 那样一 reset 就把部署分支拉成了上游主线、丢掉所有未合入的 PR。改成按「同名分支」取，自洽。
+    BR="$(git rev-parse --abbrev-ref HEAD)"
+    RMT="$(git config --get "branch.${BR}.remote" || echo origin)"
+    echo "--- 跟随 ${RMT}/${BR}（硬重置，本地提交会被丢弃）"
     # && 链：任一步失败即停，绝不半途 restart（daemon 会继续跑旧代码，安全）
-    git pull --ff-only \
+    git fetch "$RMT" "$BR" \
+      && git reset --hard FETCH_HEAD \
       && npx pnpm@9 switch:here \
       && botmux restart \
       && botmux autostart \
@@ -45,7 +54,8 @@ CK="$(resolve_checkout)"
 }
 cd "$CK"
 
-# 本地改动检查：只有未提交的 brand-template 改动能自动丢（正式修复是它的超集）；
+# 本地改动检查：阶段 ② 会 `reset --hard`，任何本地提交/改动都会被抹掉——所以这道闸是唯一防线。
+# 只有未提交的 brand-template 改动能自动丢（正式修复是它的超集）；
 # 动了别的文件 → 停下来让人判断，绝不擅自 checkout。
 DIRTY="$(git status --porcelain)"
 if [ -n "$DIRTY" ]; then
