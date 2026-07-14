@@ -317,7 +317,7 @@ type VcMeetingConsumerInjectResult = {
 };
 
 type VcMeetingOutputChannel = 'text' | 'voice';
-type VcMeetingOutputDecision = 'approve_voice' | 'send_text' | 'allow_text_and_send' | 'reject';
+type VcMeetingOutputDecision = 'approve_voice' | 'allow_voice_and_approve' | 'send_text' | 'allow_text_and_send' | 'reject';
 type VcMeetingOutputSubmitResult =
   | { ok: true; status: 'sent' | 'pending'; requestId?: string; merged?: boolean }
   | { ok: false; error: string };
@@ -4611,6 +4611,26 @@ async function rejectVcMeetingOutputRequest(
   }
 }
 
+function enqueueVcMeetingOutputOperation<T>(
+  session: VcMeetingDaemonSession,
+  channel: VcMeetingOutputChannel,
+  operation: () => Promise<T>,
+): Promise<T> {
+  session.outputSubmitPromises ??= {};
+  const prior = session.outputSubmitPromises[channel] ?? Promise.resolve();
+  const run = prior
+    .catch(() => undefined)
+    .then(operation);
+  const tracked = run.catch(() => undefined);
+  session.outputSubmitPromises[channel] = tracked;
+  tracked.finally(() => {
+    if (session.outputSubmitPromises?.[channel] === tracked) {
+      delete session.outputSubmitPromises[channel];
+    }
+  });
+  return run;
+}
+
 async function submitVcMeetingOutputRequest(input: {
   larkAppId: string;
   meetingId: string;
@@ -4621,19 +4641,11 @@ async function submitVcMeetingOutputRequest(input: {
 }): Promise<VcMeetingOutputSubmitResult> {
   const session = vcMeetingSessions.get(vcMeetingSessionKey(input.larkAppId, input.meetingId));
   if (!session) return submitVcMeetingOutputRequestImpl(input);
-  session.outputSubmitPromises ??= {};
-  const prior = session.outputSubmitPromises[input.channel] ?? Promise.resolve();
-  const run = prior
-    .catch(() => undefined)
-    .then(() => submitVcMeetingOutputRequestImpl(input));
-  const tracked = run.catch(() => undefined);
-  session.outputSubmitPromises[input.channel] = tracked;
-  tracked.finally(() => {
-    if (session.outputSubmitPromises?.[input.channel] === tracked) {
-      delete session.outputSubmitPromises[input.channel];
-    }
-  });
-  return run;
+  return enqueueVcMeetingOutputOperation(
+    session,
+    input.channel,
+    () => submitVcMeetingOutputRequestImpl(input),
+  );
 }
 
 async function submitVcMeetingOutputRequestImpl(input: {
@@ -4843,17 +4855,24 @@ async function reviewVcMeetingOutputRequest(input: {
         : '你的会中弹幕输出请求已由授权人同意并发送。').catch(() => { /* best effort */ });
       return vcMeetingOutputReviewCardForRequest(session, req, 'sentText');
     }
-    if (input.decision === 'approve_voice') {
-      if (channel !== 'voice') throw new Error('approve_voice only applies to voice requests');
+    if (input.decision === 'approve_voice' || input.decision === 'allow_voice_and_approve') {
+      if (channel !== 'voice') throw new Error('voice approval only applies to voice requests');
+      const allowFutureVoice = input.decision === 'allow_voice_and_approve';
+      if (allowFutureVoice) {
+        setVcMeetingOutputPolicyForChannel(session, 'voice', 'allow');
+        persistVcMeetingRuntimeSession(session, cfg);
+      }
       keepApplying = true;
-      void (async () => {
+      const applyVoiceApproval = async () => {
         try {
           await speakVcMeetingOutput(session, cfg, req);
           if (session.pendingOutputRequests[channel]?.id === req.id) delete session.pendingOutputRequests[channel];
           await patchVcMeetingOutputReviewCard(session, req, 'sentVoice').catch((err) => {
             logger.warn(`[vc-agent] output review card patch failed meeting=${session.state.meeting.id}: ${err instanceof Error ? err.message : String(err)}`);
           });
-          void notifyVcMeetingConsumerAgent(session, '你的语音输出请求已由授权人同意并播报。').catch(() => { /* best effort */ });
+          void notifyVcMeetingConsumerAgent(session, allowFutureVoice
+            ? '你的语音输出请求已播报；本场会议后续语音输出将自动执行，无需逐条审批。'
+            : '你的语音输出请求已由授权人同意并播报。').catch(() => { /* best effort */ });
         } catch (err) {
           const message = err instanceof Error ? err.message : String(err);
           logger.warn(`[vc-agent] approved voice output failed meeting=${input.meetingId} request=${input.requestId}: ${message}`);
@@ -4864,7 +4883,12 @@ async function reviewVcMeetingOutputRequest(input: {
         } finally {
           req.applying = false;
         }
-      })();
+      };
+      if (allowFutureVoice) {
+        void enqueueVcMeetingOutputOperation(session, channel, applyVoiceApproval);
+      } else {
+        void applyVoiceApproval();
+      }
       return vcMeetingOutputReviewCardForRequest(session, req, 'processing');
     }
     throw new Error('unknown output decision');
@@ -5769,6 +5793,7 @@ async function handleVcMeetingCardAction(data: CardActionData, larkAppId: string
     const decision = value.decision;
     if (
       decision !== 'approve_voice'
+      && decision !== 'allow_voice_and_approve'
       && decision !== 'send_text'
       && decision !== 'allow_text_and_send'
       && decision !== 'reject'
