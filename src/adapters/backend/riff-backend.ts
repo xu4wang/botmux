@@ -1,4 +1,5 @@
 import { readFileSync } from 'node:fs';
+import { execFileSync } from 'node:child_process';
 import type { SessionBackend, SpawnOpts } from './types.js';
 import { logger } from '../../utils/logger.js';
 
@@ -63,6 +64,18 @@ export interface RiffBackendConfig {
   sandboxCluster?: string;
   defaultRepo?: string;
   defaultBranch?: string;
+  /**
+   * Repos to clone into the riff sandbox, in the API's native shape
+   * ({ repoName: 'group/repo', repoBranch? }). Takes precedence over
+   * defaultRepo/defaultBranch. Typically derived by the worker from the
+   * session's local workingDir (复用本地仓库+分支) — see
+   * deriveRiffRepoFromWorkingDir.
+   */
+  repos?: RiffRepoRef[];
+  /** Human-readable notes about the derived repo state (dirty tree, unpushed
+   *  commits). Printed as status lines on task creation so the user knows the
+   *  sandbox may not see their latest local changes. */
+  repoWarnings?: string[];
   injectStatusLines?: boolean;
   logLevel?: string;
   /**
@@ -89,6 +102,88 @@ export interface RiffBackendConfig {
    * after the mandatory botmux install commands.
    */
   setupCommands?: string[];
+}
+
+export interface RiffRepoRef {
+  /** Internal repo name, e.g. 'webinfra/agent-monorepo' (code.byted.org). */
+  repoName: string;
+  /** Branch to pin. Omitted → the repo's default branch. (The riff API
+   *  ignores unknown fields like `branch`; `repoBranch` is the real one —
+   *  verified empirically: it normalizes to gitRef/gitRefType/gitCommitId.) */
+  repoBranch?: string;
+}
+
+/**
+ * Normalize a git origin URL / repo spec to riff's internal repoName.
+ * Accepts `git@code.byted.org:group/repo.git`, `https://code.byted.org/group/repo(.git)`
+ * and bare `group/repo`. Returns null for non-internal hosts (github.com etc.) —
+ * the riff API validates repoName against the internal registry and cannot
+ * clone external repos.
+ */
+export function parseRiffRepoName(spec: string): string | null {
+  const s = spec.trim();
+  if (!s) return null;
+  let m = /^git@code\.byted\.org:([^/\s]+\/[^/\s]+?)(?:\.git)?$/.exec(s);
+  if (m) return m[1]!;
+  m = /^https?:\/\/code\.byted\.org\/([^/\s]+\/[^/\s]+?)(?:\.git)?(?:\/)?$/.exec(s);
+  if (m) return m[1]!;
+  // Bare group/repo (no scheme, no host) — pass through as-is.
+  if (/^[\w.-]+\/[\w.-]+$/.test(s)) return s;
+  return null;
+}
+
+/**
+ * Derive the riff repo ref from a local checkout so a riff task executes
+ * against the same repo + branch the botmux session works in (复用本地仓库).
+ * All git calls are local (no network). Returns null when the workingDir is
+ * not a git repo or its origin is not an internal repo riff can clone.
+ * `warnings` surface states the sandbox cannot see (dirty tree, unpushed
+ * commits, never-pushed branch) — callers inject them as status lines.
+ */
+export function deriveRiffRepoFromWorkingDir(
+  workingDir: string,
+  runGit: (args: string[]) => string | null = defaultRunGit(workingDir),
+): { repo: RiffRepoRef; warnings: string[] } | null {
+  const origin = runGit(['remote', 'get-url', 'origin']);
+  if (!origin) return null;
+  const repoName = parseRiffRepoName(origin);
+  if (!repoName) return null;
+
+  const warnings: string[] = [];
+  const branch = runGit(['rev-parse', '--abbrev-ref', 'HEAD']);
+  const repo: RiffRepoRef = { repoName };
+
+  if (branch && branch !== 'HEAD') {
+    const remoteRef = runGit(['rev-parse', '--verify', '--quiet', `refs/remotes/origin/${branch}`]);
+    if (remoteRef) {
+      repo.repoBranch = branch;
+      const ahead = runGit(['rev-list', '--count', `refs/remotes/origin/${branch}..HEAD`]);
+      if (ahead && ahead !== '0') {
+        warnings.push(`本地分支 ${branch} 领先远端 ${ahead} 个未推送提交，沙箱只能看到已推送内容`);
+      }
+    } else {
+      warnings.push(`本地分支 ${branch} 未推送到远端，沙箱将使用默认分支`);
+    }
+  }
+  const dirty = runGit(['status', '--porcelain']);
+  if (dirty) {
+    warnings.push('本地工作区有未提交改动，沙箱只能看到已推送内容');
+  }
+  return { repo, warnings };
+}
+
+function defaultRunGit(cwd: string): (args: string[]) => string | null {
+  return (args: string[]) => {
+    try {
+      const out = execFileSync('git', ['-C', cwd, ...args], {
+        encoding: 'utf-8', timeout: 5000, stdio: ['ignore', 'pipe', 'ignore'],
+      });
+      const trimmed = out.trim();
+      return trimmed.length > 0 ? trimmed : null;
+    } catch {
+      return null;
+    }
+  };
 }
 
 interface RiffAttachment {
@@ -317,8 +412,20 @@ export class RiffBackend implements SessionBackend {
     };
     if (this.config.model) config.model = this.config.model;
     if (this.config.sandboxCluster) config.sandboxCluster = this.config.sandboxCluster;
-    if (this.config.defaultRepo) {
-      config.repos = [{ repo: this.config.defaultRepo, branch: this.config.defaultBranch ?? 'main' }];
+    // Repos: explicit config.repos (e.g. derived from the session's local
+    // workingDir by the worker) wins over defaultRepo/defaultBranch. The API's
+    // native shape is { repoName, repoBranch } — it silently ignores unknown
+    // fields, so anything else never pins the branch.
+    const repos = this.buildRepos();
+    if (repos.length > 0) {
+      config.repos = repos;
+      if (this.config.injectStatusLines !== false) {
+        const desc = repos.map(r => r.repoBranch ? `${r.repoName}@${r.repoBranch}` : `${r.repoName}(默认分支)`).join(', ');
+        const warn = (this.config.repoWarnings ?? []).map(w => `\n[riff] ⚠️ ${w}`).join('');
+        const line = `\n[riff] 仓库: ${desc}${warn}\n`;
+        this.outputBuffer += line;
+        this.dataCb?.(line);
+      }
     }
     // Inject env into the riff sandbox so the agent can use `botmux send` etc.
     // Merged from: per-bot env (bots.json `env`) + botmux session context vars +
@@ -455,6 +562,22 @@ export class RiffBackend implements SessionBackend {
     return new Blob([buf]);
   }
 
+  /** Build the repos payload: explicit repos > defaultRepo/defaultBranch. */
+  private buildRepos(): RiffRepoRef[] {
+    if (this.config.repos && this.config.repos.length > 0) return this.config.repos;
+    if (this.config.defaultRepo) {
+      const repoName = parseRiffRepoName(this.config.defaultRepo);
+      if (!repoName) {
+        logger.warn(`[riff] defaultRepo 无法解析为内部仓库名，已忽略: ${this.config.defaultRepo}`);
+        return [];
+      }
+      const ref: RiffRepoRef = { repoName };
+      if (this.config.defaultBranch) ref.repoBranch = this.config.defaultBranch;
+      return [ref];
+    }
+    return [];
+  }
+
   private async cancelTask(taskId: string): Promise<void> {
     const url = `${this.config.baseUrl}/api/task-cancel`;
     const headers: Record<string, string> = { 'Content-Type': 'application/json' };
@@ -463,7 +586,8 @@ export class RiffBackend implements SessionBackend {
     await fetch(url, {
       method: 'POST',
       headers,
-      body: JSON.stringify({ taskId }),
+      // The API expects { id } — { taskId } is silently rejected ("id Required").
+      body: JSON.stringify({ id: taskId }),
     }).catch(() => { /* best effort */ });
   }
 

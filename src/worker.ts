@@ -117,6 +117,7 @@ import { ZellijObserveBackend } from './adapters/backend/zellij-observe-backend.
 import { zellijEnv } from './setup/ensure-zellij.js';
 import { isObserveBackend, type ObserveBackend } from './adapters/backend/types.js';
 import { selectSessionBackend, decideBackendGate, backendGateUserMessage } from './adapters/backend/session-backend-selector.js';
+import { deriveRiffRepoFromWorkingDir } from './adapters/backend/riff-backend.js';
 import { prepareSandbox, attachSandboxOutbox, startOutboxWatcher, sandboxEnabled, sandboxedClaudeDataDir } from './adapters/backend/sandbox.js';
 import type { BackendType, SessionBackend } from './adapters/backend/types.js';
 import { tmuxEnv, probeTmuxFunctionalWithRetry } from './setup/ensure-tmux.js';
@@ -4419,6 +4420,19 @@ function spawnCli(cfg: Extract<DaemonToWorker, { type: 'init' }>): void {
     // explicit riff config.env takes precedence over both.
     const mergedEnv: Record<string, string> = { ...sessionEnv, ...sanitizePerBotEnv(cfg.env), ...cfg.backendConfig.env };
     riffBackendConfig = Object.assign({}, cfg.backendConfig, { env: mergedEnv });
+    // 复用本地仓库+分支：bot 没有显式仓库配置时，从会话 workingDir 推导内部
+    // repoName + 当前分支，riff 沙箱据此克隆同一份代码。显式 repos/defaultRepo
+    // 始终优先；workingDir 不是 git 仓或 origin 非内部仓时静默跳过。
+    if ((!cfg.backendConfig.repos || cfg.backendConfig.repos.length === 0) && !cfg.backendConfig.defaultRepo) {
+      const derived = deriveRiffRepoFromWorkingDir(cfg.workingDir);
+      if (derived) {
+        riffBackendConfig = Object.assign({}, riffBackendConfig, {
+          repos: [derived.repo],
+          repoWarnings: derived.warnings,
+        });
+        log(`Riff local repo reuse: ${derived.repo.repoName}${derived.repo.repoBranch ? `@${derived.repo.repoBranch}` : ' (default branch)'}${derived.warnings.length ? ` — ${derived.warnings.join('；')}` : ''}`);
+      }
+    }
   }
 
   const selectedBackend = selectSessionBackend({ sessionId: cfg.sessionId, backendType: effectiveBackend, backendConfig: riffBackendConfig });

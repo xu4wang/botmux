@@ -11,7 +11,7 @@ vi.mock('../src/utils/logger.js', () => ({
   logger: { debug: vi.fn(), info: vi.fn(), warn: vi.fn(), error: vi.fn() },
 }));
 
-import { RiffBackend } from '../src/adapters/backend/riff-backend.js';
+import { RiffBackend, parseRiffRepoName, deriveRiffRepoFromWorkingDir } from '../src/adapters/backend/riff-backend.js';
 
 const BASE = 'https://riff-infra-boe.bytedance.net';
 
@@ -151,6 +151,78 @@ describe('RiffBackend', () => {
       be.write('hello');
       await flush();
       expect(done).toHaveBeenCalledTimes(1);
+    });
+  });
+
+  describe('repo reuse (复用本地仓库+分支)', () => {
+    it('parseRiffRepoName normalizes internal specs and rejects external hosts', () => {
+      expect(parseRiffRepoName('git@code.byted.org:webinfra/agent-monorepo.git')).toBe('webinfra/agent-monorepo');
+      expect(parseRiffRepoName('https://code.byted.org/webinfra/agent-monorepo.git')).toBe('webinfra/agent-monorepo');
+      expect(parseRiffRepoName('https://code.byted.org/webinfra/agent-monorepo/')).toBe('webinfra/agent-monorepo');
+      expect(parseRiffRepoName('webinfra/agent-monorepo')).toBe('webinfra/agent-monorepo');
+      expect(parseRiffRepoName('git@github.com:deepcoldy/botmux.git')).toBeNull();
+      expect(parseRiffRepoName('https://github.com/deepcoldy/botmux')).toBeNull();
+      expect(parseRiffRepoName('')).toBeNull();
+    });
+
+    it('derives repoName + pinned branch when the branch exists on the remote', () => {
+      const git = (answers: Record<string, string | null>) => (args: string[]) =>
+        answers[args.join(' ')] ?? null;
+      const derived = deriveRiffRepoFromWorkingDir('/repo', git({
+        'remote get-url origin': 'git@code.byted.org:webinfra/agent-monorepo.git',
+        'rev-parse --abbrev-ref HEAD': 'feat/x',
+        'rev-parse --verify --quiet refs/remotes/origin/feat/x': 'abc123',
+        'rev-list --count refs/remotes/origin/feat/x..HEAD': '0',
+        'status --porcelain': null,
+      }));
+      expect(derived).toEqual({ repo: { repoName: 'webinfra/agent-monorepo', repoBranch: 'feat/x' }, warnings: [] });
+    });
+
+    it('warns on unpushed branch (falls back to default branch) and dirty tree', () => {
+      const git = (answers: Record<string, string | null>) => (args: string[]) =>
+        answers[args.join(' ')] ?? null;
+      const derived = deriveRiffRepoFromWorkingDir('/repo', git({
+        'remote get-url origin': 'git@code.byted.org:g/r.git',
+        'rev-parse --abbrev-ref HEAD': 'local-only',
+        'status --porcelain': ' M src/a.ts',
+      }));
+      expect(derived!.repo).toEqual({ repoName: 'g/r' });
+      expect(derived!.warnings.some(w => w.includes('未推送到远端'))).toBe(true);
+      expect(derived!.warnings.some(w => w.includes('未提交改动'))).toBe(true);
+    });
+
+    it('returns null for non-internal origins and non-git dirs', () => {
+      const git = (answers: Record<string, string | null>) => (args: string[]) =>
+        answers[args.join(' ')] ?? null;
+      expect(deriveRiffRepoFromWorkingDir('/repo', git({ 'remote get-url origin': 'git@github.com:a/b.git' }))).toBeNull();
+      expect(deriveRiffRepoFromWorkingDir('/repo', git({}))).toBeNull();
+    });
+
+    it('sends config.repos in the API-native shape and a status line', async () => {
+      const be = makeBackend({ repos: [{ repoName: 'g/r', repoBranch: 'dev' }], repoWarnings: ['本地工作区有未提交改动，沙箱只能看到已推送内容'] });
+      const lines: string[] = [];
+      be.onData(d => lines.push(d));
+      be.spawn('', [], {} as any);
+      be.write('hi');
+      await flush();
+      resolvers.shift()!(taskResponse('task-1'));
+      await flush();
+      const exec = calls.find(c => c.url.includes('/api/task-execute'))!;
+      const body = JSON.parse(String(exec.init?.body));
+      expect(body.config.repos).toEqual([{ repoName: 'g/r', repoBranch: 'dev' }]);
+      expect(lines.join('')).toContain('[riff] 仓库: g/r@dev');
+      expect(lines.join('')).toContain('⚠️ 本地工作区有未提交改动');
+    });
+
+    it('maps defaultRepo URL form to repoName', async () => {
+      const be = makeBackend({ defaultRepo: 'https://code.byted.org/g/r.git', defaultBranch: 'dev', injectStatusLines: false });
+      be.spawn('', [], {} as any);
+      be.write('hi');
+      await flush();
+      resolvers.shift()!(taskResponse('task-1'));
+      await flush();
+      const exec = calls.find(c => c.url.includes('/api/task-execute'))!;
+      expect(JSON.parse(String(exec.init?.body)).config.repos).toEqual([{ repoName: 'g/r', repoBranch: 'dev' }]);
     });
   });
 

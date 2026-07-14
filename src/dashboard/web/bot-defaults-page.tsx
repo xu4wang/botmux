@@ -2359,7 +2359,7 @@ function RiffSection(props: { bot: BotDefaultsRow; patchBot: PatchBot }) {
       </div>
       <div className="bd-row">
         <label>
-          <span>{tr('botDefaults.riffDefaultRepo')}</span>
+          <span><FieldTitle help={tr('botDefaults.riffDefaultRepoHelp')}>{tr('botDefaults.riffDefaultRepo')}</FieldTitle></span>
           <input type="text" data-input="riff-default-repo" placeholder={tr('botDefaults.riffDefaultRepoPlaceholder')} value={defaultRepo} disabled={busy} onChange={e => setDefaultRepo(e.currentTarget.value)} />
         </label>
       </div>
