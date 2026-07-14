@@ -29,6 +29,7 @@ const DEFAULT_RIFF_SYSTEM_PROMPT = [
   '@ decision (mandatory): every `botmux send` MUST explicitly pick one or it errors — `--mention <open_id>` (use the open_id from the <sender> tag of the message you are answering, or another explicit target) / `--mention-back` (@ the sender recorded in the session, may be unavailable here) / `--no-mention` (none). Prefer `--mention <sender open_id>` for substantive conclusions; `--no-mention` for low-priority notes.',
   '',
   'When to send: key conclusions, plans (wait for user approval before acting), final results, progress updates. A bare `print`/`echo` does NOT count as a reply.',
+  'COMPLETION CONTRACT: a turn is complete ONLY after `botmux send` actually ran and printed ✓ success. Writing the answer solely in your final report/output does NOT reach the user — always run `botmux send` first, then summarize in the report.',
   'Keep final answers concise. For images/files: write them to disk then send via `botmux send --images/--files`.',
   '',
   'LAST-RESORT fallback (only if the npm install itself fails): call the Feishu Open API directly with the injected BOTMUX_LARK_APP_ID/SECRET — fetch a tenant_access_token, then POST im/v1/messages?receive_id_type=chat_id to BOTMUX_CHAT_ID. Still never use non-BOTMUX credentials.',
