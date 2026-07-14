@@ -1,5 +1,8 @@
 import { createRequire } from 'node:module';
+import { existsSync, readFileSync, unlinkSync } from 'node:fs';
 import { readBotsJsonOrEmpty, writeBotsJsonAtomic } from '../setup/bots-store.js';
+import { atomicWriteFileSync } from '../utils/atomic-write.js';
+import { logger } from '../utils/logger.js';
 import { normalizeBotConfig, findInvalidAllowedUserEntries, hasOwnerEntry } from '../setup/bot-config-editor.js';
 import { tryRegisterApp, type RegisterAppOptions, type RegisterAppResult } from '../setup/register-app.js';
 import { validateCredentials, buildRemainingSteps, type CredentialValidation, type RemainingStep } from '../setup/verify-permissions.js';
@@ -126,6 +129,11 @@ type AutomateOpenPlatformFn = (opts: OpenPlatformAutomationOptions) => Promise<O
 
 export interface BotOnboardingManagerOptions {
   botsJsonPath: string;
+  /**
+   * needs_owner 的私有恢复文件。默认与 bots.json 同目录，权限固定 0600；仅用于
+   * Dashboard 进程重启后继续完成已经创建、但尚未写入 bots.json 的应用。
+   */
+  pendingStorePath?: string;
   /** 单次 Feishu Web 登录建应用主路径；测试可注入。 */
   createApp?: CreateAppFn;
   inspectSession?: InspectSessionFn;
@@ -150,6 +158,16 @@ export interface BotOnboardingManagerOptions {
 export interface BotOnboardingJob {
   id: string;
   done: Promise<void>;
+}
+
+interface PersistedPendingOnboardingJob {
+  snapshot: BotOnboardingSnapshot;
+  bot: Record<string, any>;
+}
+
+interface PersistedPendingOnboardingStore {
+  version: 1;
+  jobs: PersistedPendingOnboardingJob[];
 }
 
 export type BotOnboardingSessionStatus =
@@ -200,6 +218,7 @@ export class BotOnboardingManager {
   private readonly renderQrDataUrl: (url: string) => string;
   private readonly now: () => number;
   private readonly startBotLive?: (appId: string) => Promise<{ ok: boolean; message?: string }>;
+  private readonly pendingStorePath: string;
 
   constructor(private readonly opts: BotOnboardingManagerOptions) {
     // 生产默认走单次 Web session；旧单测/外部注入若只给 registerApp，则明确
@@ -212,6 +231,68 @@ export class BotOnboardingManager {
     this.renderQrDataUrl = opts.renderQrDataUrl ?? renderQrSvgDataUrl;
     this.now = opts.now ?? (() => Date.now());
     this.startBotLive = opts.startBotLive;
+    this.pendingStorePath = opts.pendingStorePath ?? `${opts.botsJsonPath}.onboarding-pending.json`;
+    this.restorePendingJobs();
+  }
+
+  /**
+   * 恢复 owner 待确认任务。凭证只存在 0600 私有文件和内存中，公开 job snapshot
+   * 仍不包含 secret；bot 也仍未进入 bots.json，因此重启不会把空 allowlist bot
+   * 启起来。若上次进程在写入 bots.json 后、清理恢复文件前退出，则把该 job 恢复
+   * 为 completed，避免前端得到 unknown_onboarding_job。
+   */
+  private restorePendingJobs(): void {
+    if (!existsSync(this.pendingStorePath)) return;
+    let parsed: PersistedPendingOnboardingStore;
+    try {
+      parsed = JSON.parse(readFileSync(this.pendingStorePath, 'utf-8')) as PersistedPendingOnboardingStore;
+    } catch {
+      return;
+    }
+    if (parsed?.version !== 1 || !Array.isArray(parsed.jobs)) return;
+
+    const persistedBots = readBotsJsonOrEmpty(this.opts.botsJsonPath);
+    for (const record of parsed.jobs) {
+      const snapshot = record?.snapshot;
+      const bot = record?.bot;
+      if (!snapshot || snapshot.status !== 'needs_owner' || typeof snapshot.id !== 'string') continue;
+      if (!bot || typeof bot.larkAppId !== 'string' || typeof bot.larkAppSecret !== 'string') continue;
+      if (snapshot.appId && snapshot.appId !== bot.larkAppId) continue;
+
+      const existingIndex = persistedBots.findIndex((entry: any) => entry?.larkAppId === bot.larkAppId);
+      if (existingIndex >= 0) {
+        this.jobs.set(snapshot.id, { ...snapshot, status: 'completed', addedBotIndex: existingIndex, updatedAt: this.now() });
+        continue;
+      }
+      this.jobs.set(snapshot.id, { ...snapshot });
+      this.pendingBots.set(snapshot.id, { ...bot });
+    }
+    // 丢弃损坏项，以及「bot 已落盘但恢复文件尚未来得及清理」的旧凭证。
+    this.savePendingJobs();
+  }
+
+  /** 原子保存所有 needs_owner 任务；文件不为空时始终是 0600。 */
+  private savePendingJobs(): void {
+    const jobs: PersistedPendingOnboardingJob[] = [];
+    for (const [id, bot] of this.pendingBots) {
+      const snapshot = this.jobs.get(id);
+      if (snapshot?.status === 'needs_owner') jobs.push({ snapshot: { ...snapshot }, bot: { ...bot } });
+    }
+    if (jobs.length === 0) {
+      try {
+        unlinkSync(this.pendingStorePath);
+      } catch (err: any) {
+        if (err?.code !== 'ENOENT') logger.warn(`[bot-onboarding] 无法清理 owner 待确认恢复文件: ${err?.message ?? String(err)}`);
+      }
+      return;
+    }
+    const store: PersistedPendingOnboardingStore = { version: 1, jobs };
+    try {
+      atomicWriteFileSync(this.pendingStorePath, `${JSON.stringify(store, null, 2)}\n`, { mode: 0o600 });
+    } catch (err: any) {
+      // 保留内存态继续让当前页面完成；仅失去进程重启恢复能力，不把已创建应用误报失败。
+      logger.warn(`[bot-onboarding] 无法持久化 owner 待确认任务: ${err?.message ?? String(err)}`);
+    }
   }
 
   /**
@@ -388,6 +469,7 @@ export class BotOnboardingManager {
       // owner 没法自动确认：bot 先不落盘, 暂存内存等用户手动填 owner 校验通过后再写。
       this.pendingBots.set(id, bot);
       this.finalizePermissions(id, result.appId, result.brand, undefined, auto, 'needs_owner');
+      this.savePendingJobs();
     }
   }
 
@@ -464,6 +546,7 @@ export class BotOnboardingManager {
     this.pendingBots.delete(id);
     await this.runLiveStart(id, appId);
     this.patch(id, { status: 'completed', addedBotIndex });
+    this.savePendingJobs();
     return { ok: true };
   }
 

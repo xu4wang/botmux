@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { BotOnboardingManager } from '../src/dashboard/bot-onboarding.js';
@@ -316,6 +316,60 @@ describe('BotOnboardingManager', () => {
     const bots = JSON.parse(readFileSync(join(dir, 'bots.json'), 'utf-8'));
     expect(bots).toHaveLength(1);
     expect(bots[0]).toMatchObject({ larkAppId: 'cli_new', cliId: 'claude-code', allowedUsers: ['owner@corp.com'] });
+
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  it('restores a needs_owner job after a dashboard restart and then completes it', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'botmux-onboard-restart-'));
+    const botsJsonPath = join(dir, 'bots.json');
+    const pendingStorePath = `${botsJsonPath}.onboarding-pending.json`;
+    const firstManager = new BotOnboardingManager({
+      botsJsonPath,
+      registerApp: async () => ({
+        ok: true,
+        appId: 'cli_restart',
+        appSecret: 'restart-secret',
+        brand: 'feishu',
+      }),
+      validateCredentials: async () => ({ ok: true }),
+      automateOpenPlatform: async () => autoOk(),
+      renderQrDataUrl: () => 'data:image/svg+xml;base64,qr',
+    });
+    const job = firstManager.start({ cliId: 'codex', workingDir: dir });
+    await job.done;
+
+    expect(firstManager.get(job.id)?.status).toBe('needs_owner');
+    expect(existsSync(botsJsonPath)).toBe(false);
+    expect(statSync(pendingStorePath).mode & 0o777).toBe(0o600);
+
+    // 模拟 Dashboard 进程重启：新 manager 从私有恢复文件拿回同一个 job 与待落盘配置。
+    const restartedManager = new BotOnboardingManager({
+      botsJsonPath,
+      registerApp: async () => ({ ok: false, error: 'unknown', message: 'must not create again' }),
+      validateCredentials: async () => ({ ok: true }),
+      automateOpenPlatform: async () => autoOk(),
+    });
+    expect(restartedManager.get(job.id)).toMatchObject({
+      status: 'needs_owner',
+      appId: 'cli_restart',
+      cliId: 'codex',
+      workingDir: dir,
+    });
+
+    batchGetIdMock.mockResolvedValueOnce({
+      code: 0,
+      data: { user_list: [{ email: 'owner@corp.com', user_id: 'ou_owner' }] },
+    });
+    expect(await restartedManager.submitOwner(job.id, ['owner@corp.com'])).toEqual({ ok: true });
+    expect(restartedManager.get(job.id)?.status).toBe('completed');
+    expect(existsSync(pendingStorePath)).toBe(false);
+    expect(JSON.parse(readFileSync(botsJsonPath, 'utf-8'))[0]).toMatchObject({
+      larkAppId: 'cli_restart',
+      cliId: 'codex',
+      workingDir: dir,
+      allowedUsers: ['owner@corp.com'],
+    });
 
     rmSync(dir, { recursive: true, force: true });
   });

@@ -5683,6 +5683,8 @@ dialog.onboarding-dialog::backdrop {
   padding: 0 var(--button-padding-x);
   display: inline-flex;
   align-items: center;
+  justify-content: center;
+  justify-self: center;
   width: fit-content;
   max-width: 100%;
   border: 1px solid var(--border-soft);
@@ -5691,6 +5693,7 @@ dialog.onboarding-dialog::backdrop {
   color: var(--muted);
   font-size: 12px;
   font-weight: 800;
+  text-align: center;
 }
 
 .onboarding-meta {
