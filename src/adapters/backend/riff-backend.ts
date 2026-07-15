@@ -16,7 +16,7 @@ const DEFAULT_RIFF_SYSTEM_PROMPT = [
   'The user reads on Lark and cannot see your terminal output.',
   '',
   'STEP 0 — ensure botmux is installed (the riff API has no native setup hook, so do this FIRST, before anything else):',
-  '  which botmux >/dev/null 2>&1 || npm install -g botmux@canary',
+  '  which botmux >/dev/null 2>&1 || npm install -g botmux',
   '',
   'IMPORTANT — identity: reply ONLY with the botmux session identity injected via the BOTMUX_* environment variables (BOTMUX_LARK_APP_ID / BOTMUX_LARK_APP_SECRET / BOTMUX_CHAT_ID / BOTMUX_SESSION_ID). NEVER reply through other Feishu apps / bots / credentials you may find on this machine (e.g. cjadk / aiden integrations) — they impersonate the wrong bot and fail in groups they are not in. `botmux send` picks up the BOTMUX_* env automatically.',
   '',
@@ -50,7 +50,10 @@ const MANDATORY_SETUP_COMMANDS = [
   // install when the sandbox image preinstalls an older botmux, freezing the
   // sandbox on a version without riff-aware `botmux send`. Falls back to any
   // preinstalled botmux only when the install itself fails (e.g. npm offline).
-  'npm install -g botmux@canary >/dev/null 2>&1 || which botmux >/dev/null 2>&1',
+  // Tracks the npm `latest` dist-tag — riff-aware `botmux send` ships in
+  // v2.109.0+; pinning a prerelease dist-tag here would let any future
+  // unrelated canary publish break riff sandboxes.
+  'npm install -g botmux >/dev/null 2>&1 || which botmux >/dev/null 2>&1',
 ];
 
 export interface RiffBackendConfig {
