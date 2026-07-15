@@ -127,9 +127,36 @@ describe('RiffBackend', () => {
       const be = makeBackend({ injectStatusLines: false });
       const done = vi.fn();
       be.onTaskDone(done);
+      (be as any).currentTaskId = 'task-1';
       (be as any).handleSseEvent('event:done\ndata:{"status":"completed"}', 'task-1');
       (be as any).handleSseEvent('event:done\ndata:{"status":"completed"}', 'task-1');
       expect(done).toHaveBeenCalledTimes(1);
+    });
+
+    it('cross-turn duplicate done: A done → B write → A duplicate done must not fire mid-B', async () => {
+      const be = makeBackend({ injectStatusLines: false });
+      const done = vi.fn();
+      be.onTaskDone(done);
+      be.spawn('', [], {} as any);
+      be.write('first');
+      await flush();
+      resolvers.shift()!(taskResponse('task-A'));
+      await flush();
+      // A completes → boundary fires once, queued follow-up becomes task B.
+      (be as any).handleSseEvent('event:done\ndata:{"status":"completed"}', 'task-A');
+      expect(done).toHaveBeenCalledTimes(1);
+      be.write('second');
+      await flush();
+      resolvers.shift()!(taskResponse('task-B'));
+      await flush();
+      expect((be as any).taskDone).toBe(false); // B is running
+      // A's duplicate done arrives ~500ms later (observed live): must be inert.
+      (be as any).handleSseEvent('event:done\ndata:{"status":"completed"}', 'task-A');
+      expect(done).toHaveBeenCalledTimes(1);
+      expect((be as any).taskDone).toBe(false); // B must not be marked done
+      // B's own done still fires the boundary normally.
+      (be as any).handleSseEvent('event:done\ndata:{"status":"completed"}', 'task-B');
+      expect(done).toHaveBeenCalledTimes(2);
     });
   });
 
@@ -138,6 +165,7 @@ describe('RiffBackend', () => {
       const be = makeBackend({ injectStatusLines: false });
       const done = vi.fn();
       be.onTaskDone(done);
+      (be as any).currentTaskId = 'task-1';
       (be as any).handleSseEvent('event:done\ndata:{"status":"completed","exitCode":0}', 'task-1');
       expect(done).toHaveBeenCalledTimes(1);
       expect((be as any).taskDone).toBe(true);

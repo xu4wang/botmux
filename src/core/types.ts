@@ -78,6 +78,7 @@ export interface DaemonSession {
   streamCardNonce?: string;       // unique nonce for the current streaming card — embedded in button values to distinguish old vs current card
   streamCardPending?: boolean;    // true when a new turn started, next screen_update creates a new card
   pendingLocalCliButtonRefresh?: boolean; // true when cli_session_id arrived while the streaming card POST was in flight
+  pendingRiffUrlCardRefresh?: boolean; // true when riff_access_url arrived while the streaming card POST was in flight
   /** Set on sessions restored after a daemon restart: suppresses the automatic
    *  card post/patch from the recovery re-fork so a restart stays silent in the
    *  group (the owner gets a private DM summary instead). Cleared on the first

@@ -837,6 +837,34 @@ export function BotAgentSection(props: {
     }
   }
 
+  /**
+   * Persist the CLI selection as riff before saving riff config. Selecting
+   * riff in the dropdown hides the「保存 Agent」button (model/skill rows are
+   * replaced by RiffSection), so without this the cliId change would never
+   * reach PUT /agent — the bot would stay on its old CLI and backendType
+   * would never auto-flip to riff. Returns false when persisting failed.
+   */
+  async function persistRiffCliSelection(): Promise<boolean> {
+    if (bot.cliId === 'riff') return true; // already persisted
+    try {
+      const res = await sendJson('PUT', `/api/bots/${encodeURIComponent(bot.larkAppId)}/agent`, { cliId: 'riff', model: '' });
+      if (res.ok && res.body.ok) {
+        patchBot(bot.larkAppId, {
+          cliId: res.body.cliId,
+          wrapperCli: res.body.wrapperCli ?? null,
+          model: res.body.model ?? '',
+          agentSelectionKey: res.body.selectionKey ?? 'riff',
+        });
+        return true;
+      }
+      setAgentStatus({ text: `✗ ${responseErrorText(res)}` });
+      return false;
+    } catch (e: any) {
+      setAgentStatus({ text: `✗ ${caughtErrorText(e)}` });
+      return false;
+    }
+  }
+
   async function saveSkillInjection(next: string): Promise<void> {
     setSkillValue(next);
     setSkillStatus(null);
@@ -909,7 +937,7 @@ export function BotAgentSection(props: {
           </label>
         </div>
       )}
-      {isRiff && <RiffSection bot={bot} patchBot={patchBot} />}
+      {isRiff && <RiffSection bot={bot} patchBot={patchBot} persistCliSelection={persistRiffCliSelection} />}
       {!isRiff && siSupport === 'dynamic' ? (
         <div className="bd-row">
           <div className="bd-field">
@@ -2256,7 +2284,7 @@ function EnvSection(props: { bot: BotDefaultsRow; patchBot: PatchBot }) {
 /** Agents supported by the riff runner (free text still allowed for new ones). */
 const RIFF_AGENT_SUGGESTIONS = ['aiden', 'aiden-claude', 'codex', 'opencode'];
 
-function RiffSection(props: { bot: BotDefaultsRow; patchBot: PatchBot }) {
+function RiffSection(props: { bot: BotDefaultsRow; patchBot: PatchBot; persistCliSelection?: () => Promise<boolean> }) {
   const tr = useT();
   const riff = props.bot.riff && typeof props.bot.riff === 'object' ? props.bot.riff : {};
   const [baseUrl, setBaseUrl] = useState(typeof riff.baseUrl === 'string' ? riff.baseUrl : '');
@@ -2288,6 +2316,12 @@ function RiffSection(props: { bot: BotDefaultsRow; patchBot: PatchBot }) {
     setStatus(null);
     setBusy(true);
     try {
+      // Persist the CLI switch to riff first — the regular「保存 Agent」button
+      // is hidden while riff is selected, so this save is the only entry point.
+      if (props.persistCliSelection && !(await props.persistCliSelection())) {
+        setStatus({ text: `✗ ${tr('botDefaults.riffCliPersistFailed')}` });
+        return;
+      }
       const config: Record<string, unknown> = {};
       if (baseUrl.trim()) config.baseUrl = baseUrl.trim();
       if (agent.trim()) config.agent = agent.trim();

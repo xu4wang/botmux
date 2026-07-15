@@ -280,6 +280,10 @@ export class RiffBackend implements SessionBackend {
   private abortController: AbortController | null = null;
   private killed = false;
   private taskDone = false;
+  /** Tasks whose done event already fired the turn boundary — a duplicate
+   *  done (observed live) or a stale stream must never re-fire it. Bounded:
+   *  cleared past 64 entries (a session rarely exceeds a few dozen turns). */
+  private completedTaskIds = new Set<string>();
   private reconnectAttempts = 0;
   private maxReconnectAttempts = 3;
   /** Serializes write() → createTask/followUp. Without this, a second message
@@ -690,6 +694,10 @@ export class RiffBackend implements SessionBackend {
       }
     } catch (err) {
       if ((err as Error).name === 'AbortError') return;
+      // Stale stream: a follow-up already replaced this task (or its done was
+      // processed) — its stream dying is expected; never reconnect or surface
+      // an error for it, that belongs to the current task's stream only.
+      if (taskId !== this.currentTaskId || this.completedTaskIds.has(taskId)) return;
       logger.warn(`[riff] SSE stream error: ${err}`);
 
       // Attempt reconnect if task is still running
@@ -758,11 +766,18 @@ export class RiffBackend implements SessionBackend {
           break;
         }
         case 'done': {
-          // Idempotency: streams can deliver done more than once (observed
-          // ~500ms apart live). A duplicate must not re-fire the turn-boundary
-          // callback — it would mark the session ready mid-way through the
-          // NEXT task's execution.
-          if (this.taskDone) break;
+          // Idempotency & staleness — per TASK, not per backend: streams can
+          // deliver done more than once (observed ~500ms apart live), and by
+          // the time the duplicate arrives a queued follow-up may already be
+          // running as the NEXT task (write() reset the global taskDone). A
+          // plain boolean guard would re-fire the turn-boundary callback mid-
+          // way through that next task and falsely mark it done, so gate on:
+          //   1) the done must belong to the CURRENT task (stale streams no-op)
+          //   2) each task fires the boundary at most once (completedTaskIds)
+          if (taskId !== this.currentTaskId) break;
+          if (this.completedTaskIds.has(taskId)) break;
+          this.completedTaskIds.add(taskId);
+          if (this.completedTaskIds.size > 64) this.completedTaskIds.clear();
           this.taskDone = true;
           const status = data['status'] as string | undefined;
           const exitCode = data['exitCode'] as number | undefined;

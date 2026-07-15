@@ -244,6 +244,56 @@ function flushPendingLocalCliOpenReadinessPatch(ds: DaemonSession): void {
   scheduleLocalCliOpenReadinessPatch(ds);
 }
 
+/**
+ * PATCH the live streaming card with the freshest riff sandbox URL. Mirrors
+ * {@link scheduleLocalCliOpenReadinessPatch}: when the card POST is still
+ * in-flight (streamCardId === sentinel) the refresh is parked on
+ * `pendingRiffUrlCardRefresh` and flushed once the POST lands — the riff
+ * accessUrl typically arrives inside exactly that window (task-execute returns
+ * within ~1s of the initial card POST), and without the pending flag the
+ * in-card writable link would stay stale until the next status-edge PATCH.
+ */
+export function scheduleRiffAccessUrlPatch(ds: DaemonSession): void {
+  if (streamingCardDisabled(ds) || ds.suppressRecoveryCard) {
+    ds.pendingRiffUrlCardRefresh = undefined;
+    return;
+  }
+  if (ds.streamCardId === CARD_POSTING_SENTINEL) {
+    ds.pendingRiffUrlCardRefresh = true;
+    return;
+  }
+  if (!ds.streamCardId || !ds.riffAccessUrl) return;
+  ds.pendingRiffUrlCardRefresh = undefined;
+  const botCfg = getBot(ds.larkAppId).config;
+  const effectiveCliId = sessionCliId(ds, botCfg);
+  const status = ds.usageLimit ? 'limited' : (ds.lastScreenStatus ?? 'starting');
+  const cardJson = buildStreamingCard(
+    ds.session.sessionId,
+    sessionAnchorId(ds),
+    buildTerminalUrl(ds),
+    ds.currentTurnTitle || ds.session.title || getCliDisplayName(effectiveCliId),
+    ds.lastScreenContent ?? '',
+    status,
+    effectiveCliId,
+    ds.displayMode ?? 'hidden',
+    ds.streamCardNonce,
+    ds.currentImageKey,
+    !!ds.adoptedFrom,
+    false,
+    localeForBot(ds.larkAppId),
+    status === 'limited' ? ds.usageLimit : undefined,
+    writableTerminalLinkFor(ds),
+    isLocalCliOpenReady(ds, { cliId: effectiveCliId }),
+  );
+  scheduleCardPatch(ds, cardJson);
+}
+
+function flushPendingRiffUrlPatch(ds: DaemonSession): void {
+  if (!ds.pendingRiffUrlCardRefresh) return;
+  ds.pendingRiffUrlCardRefresh = undefined;
+  scheduleRiffAccessUrlPatch(ds);
+}
+
 function clearPendingLocalCliOpenReadinessPatch(ds: DaemonSession): void {
   ds.pendingLocalCliButtonRefresh = undefined;
 }
@@ -586,6 +636,7 @@ export async function postFreshStreamingCard(
     persistStreamCardState(ds);
     recallFrozenCards(ds);
     flushPendingLocalCliOpenReadinessPatch(ds);
+    flushPendingRiffUrlPatch(ds);
     logger.info(`[${tag(ds)}] Posted streaming card via /card`);
     return true;
   } catch (err) {
@@ -593,6 +644,7 @@ export async function postFreshStreamingCard(
     ds.streamCardNonce = prevNonce;
     ds.streamCardPending = prevPending;
     flushPendingLocalCliOpenReadinessPatch(ds);
+    flushPendingRiffUrlPatch(ds);
     logger.warn(`[${tag(ds)}] /card POST failed: ${err}`);
     return false;
   }
@@ -2029,6 +2081,7 @@ function setupWorkerHandlers(ds: DaemonSession, worker: ChildProcess): void {
           // card without a successor visible to the user.
           recallFrozenCards(ds);
           flushPendingLocalCliOpenReadinessPatch(ds);
+          flushPendingRiffUrlPatch(ds);
         } catch (err) {
           if (err instanceof MessageWithdrawnError) {
             logger.warn(`[${t}] Root message withdrawn, closing stale session`);
@@ -2247,6 +2300,7 @@ function setupWorkerHandlers(ds: DaemonSession, worker: ChildProcess): void {
               // thread.
               recallFrozenCards(ds);
               flushPendingLocalCliOpenReadinessPatch(ds);
+          flushPendingRiffUrlPatch(ds);
             })
             .catch(err => {
               if (err instanceof MessageWithdrawnError) {
@@ -2521,31 +2575,9 @@ function setupWorkerHandlers(ds: DaemonSession, worker: ChildProcess): void {
           type: 'session.update',
           body: { sessionId: ds.session.sessionId, patch: { riffAccessUrl: msg.accessUrl } },
         });
-        // Refresh the live streaming card so its "打开 Web 终端" button picks up
-        // the sandbox URL now — the URL often lands between status changes, and
-        // waiting for the next status-edge PATCH can leave the button pointing
-        // at the local worker terminal for the whole turn.
-        if (!streamingCardDisabled(ds) && !ds.suppressRecoveryCard
-            && ds.streamCardId && ds.streamCardId !== CARD_POSTING_SENTINEL) {
-          const cardJson = buildStreamingCard(
-            ds.session.sessionId,
-            sessionAnchorId(ds),
-            buildTerminalUrl(ds),
-            ds.currentTurnTitle || ds.session.title || getCliDisplayName(effectiveCliId),
-            ds.lastScreenContent ?? '',
-            ds.lastScreenStatus ?? 'starting',
-            effectiveCliId,
-            ds.displayMode ?? 'hidden',
-            ds.streamCardNonce,
-            ds.currentImageKey,
-            isAdopt,
-            showTakeover,
-            loc,
-            cardUsageLimit(ds),
-            writableTerminalLinkFor(ds),
-          );
-          scheduleCardPatch(ds, cardJson);
-        }
+        // Refresh the live streaming card (writable/AIO link) — parks a pending
+        // flag when the card POST is still in-flight and flushes once it lands.
+        scheduleRiffAccessUrlPatch(ds);
         break;
       }
 
