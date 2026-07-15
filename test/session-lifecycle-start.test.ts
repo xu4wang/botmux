@@ -1,5 +1,6 @@
 import { EventEmitter } from 'node:events';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { applyQueuedCodexAppLegacyFallback } from '../src/core/session-create.js';
 
 const { emitHookEventMock, forkMock, execSyncMock } = vi.hoisted(() => ({
   emitHookEventMock: vi.fn(),
@@ -234,6 +235,30 @@ describe('Codex App clean-input feature gate', () => {
     expect(init.prompt).toBe(payload.content);
     expect(init.promptCodexAppInput).toEqual({ text: 'clean', clientUserMessageId: 'om_on' });
     expect(init.turnId).toBe('om_on');
+  });
+
+  it('starts an old queued activation without a sidecar and a modern one with exactly one', () => {
+    vi.mocked(getBot).mockImplementation(() => defaultBot({ cliId: 'codex-app', codexAppCleanInput: true }));
+    const oldPayload = applyQueuedCodexAppLegacyFallback({
+      content: '<user_message>QUEUED_OLD\n\nCURRENT_OLD</user_message>',
+      codexAppInput: { text: 'CURRENT_OLD' },
+    }, { queued: true, queuedText: undefined });
+    forkWorker(makeDs(), oldPayload, { turnId: 'om_old_queued' });
+    const oldWorker = forkMock.mock.results.at(-1)!.value;
+    const oldInit = vi.mocked(oldWorker.send).mock.calls[0][0];
+    expect(oldInit.prompt.match(/QUEUED_OLD/g)).toHaveLength(1);
+    expect(oldInit.prompt.match(/CURRENT_OLD/g)).toHaveLength(1);
+    expect(oldInit).not.toHaveProperty('promptCodexAppInput');
+
+    const modernPayload = applyQueuedCodexAppLegacyFallback({
+      content: '<user_message>QUEUED_NEW\n\nCURRENT_NEW</user_message>',
+      codexAppInput: { text: 'QUEUED_NEW\n\nCURRENT_NEW' },
+    }, { queued: true, queuedText: 'QUEUED_NEW' });
+    forkWorker(makeDs(), modernPayload, { turnId: 'om_new_queued' });
+    const modernWorker = forkMock.mock.results.at(-1)!.value;
+    const modernInit = vi.mocked(modernWorker.send).mock.calls[0][0];
+    expect(modernInit.promptCodexAppInput.text.match(/QUEUED_NEW/g)).toHaveLength(1);
+    expect(modernInit.promptCodexAppInput.text.match(/CURRENT_NEW/g)).toHaveLength(1);
   });
 
   it('uses the session-frozen CLI and freezes each live turn at send time', () => {

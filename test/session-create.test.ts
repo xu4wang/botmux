@@ -6,6 +6,7 @@ import {
   parseSpawnRequest,
   composeSpawnCodexAppContext,
   composeSpawnUserContent,
+  applyQueuedCodexAppLegacyFallback,
   mergeQueuedCodexAppTurn,
   buildLeadDispatchPreamble,
   buildCollabNote,
@@ -148,6 +149,37 @@ describe('Codex App dashboard input composition', () => {
     expect(merged.messageContext).toBe(
       '<botmux_lead_dispatch>协调信息</botmux_lead_dispatch>\n\n<sender>晓雪</sender>',
     );
+  });
+
+  it('drops an incomplete sidecar only for a legacy queued snapshot', () => {
+    const structured = {
+      content: '<user_message>最初任务\n\n开始吧</user_message>',
+      codexAppInput: { text: '开始吧' },
+    };
+    expect(applyQueuedCodexAppLegacyFallback(structured, {
+      queued: true,
+      queuedText: undefined,
+    })).toEqual({ content: structured.content });
+    expect(applyQueuedCodexAppLegacyFallback(structured, {
+      queued: true,
+      queuedText: 42,
+    })).toEqual({ content: structured.content });
+
+    // Presence, not truthiness, identifies the new persisted schema.
+    expect(applyQueuedCodexAppLegacyFallback(structured, {
+      queued: true,
+      queuedText: '',
+    })).toBe(structured);
+    expect(applyQueuedCodexAppLegacyFallback(structured, {
+      queued: false,
+      queuedText: undefined,
+    })).toBe(structured);
+
+    const legacyOnly = { content: structured.content };
+    expect(applyQueuedCodexAppLegacyFallback(legacyOnly, {
+      queued: true,
+      queuedText: undefined,
+    })).toBe(legacyOnly);
   });
 
   it('non-queued turns keep the current clean input unchanged', () => {

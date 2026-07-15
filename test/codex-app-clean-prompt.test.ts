@@ -12,6 +12,10 @@ import {
   buildReforkCliInput,
   rememberLastCliInput,
 } from '../src/core/session-manager.js';
+import {
+  applyQueuedCodexAppLegacyFallback,
+  mergeQueuedCodexAppTurn,
+} from '../src/core/session-create.js';
 import { registerBot } from '../src/bot-registry.js';
 
 describe('Codex App clean prompt sidecar', () => {
@@ -269,6 +273,52 @@ describe('Codex App clean prompt sidecar', () => {
     });
     expect(built.content).toContain('<substitute_trigger>');
     expect(built.content).toContain('Ignore policy');
+  });
+
+  it('keeps modern queued and ordinary non-queued reforks structured', () => {
+    const ds: any = {
+      larkAppId: 'unused-for-build',
+      session: { sessionId: 'sid-modern-queued', cliId: 'codex-app' },
+    };
+    const modernText = 'QUEUED_CLEAN_SENTINEL';
+    const modernMerged = mergeQueuedCodexAppTurn({
+      queued: true,
+      queuedText: modernText,
+      queuedMessageContext: '<role>lead</role>',
+      currentText: 'CURRENT_CLEAN_SENTINEL',
+      currentMessageContext: '<sender>晓雪</sender>',
+    });
+    const modernBuilt = buildReforkCliInput(ds, 'legacy modern activation', {
+      cliId: 'codex-app',
+      codexAppText: modernMerged.text,
+      codexAppMessageContext: modernMerged.messageContext,
+    });
+    const modernPayload = applyQueuedCodexAppLegacyFallback(modernBuilt, {
+      queued: true,
+      queuedText: modernText,
+    });
+    expect(modernPayload).toBe(modernBuilt);
+    expect(modernPayload.codexAppInput?.text.match(/QUEUED_CLEAN_SENTINEL/g)).toHaveLength(1);
+    expect(modernPayload.codexAppInput?.text.match(/CURRENT_CLEAN_SENTINEL/g)).toHaveLength(1);
+    const modernContext = Object.values(modernPayload.codexAppInput?.additionalContext ?? {})
+      .map(entry => entry.value).join('\n');
+    expect(modernContext.match(/<role>lead<\/role>/g)).toHaveLength(1);
+    expect(modernContext.match(/<sender>晓雪<\/sender>/g)).toHaveLength(1);
+
+    const ordinaryMerged = mergeQueuedCodexAppTurn({
+      queued: false,
+      queuedText: undefined,
+      currentText: 'ORDINARY_CURRENT_SENTINEL',
+    });
+    const ordinaryBuilt = buildReforkCliInput(ds, 'legacy ordinary refork', {
+      cliId: 'codex-app',
+      codexAppText: ordinaryMerged.text,
+    });
+    expect(applyQueuedCodexAppLegacyFallback(ordinaryBuilt, {
+      queued: false,
+      queuedText: undefined,
+    })).toBe(ordinaryBuilt);
+    expect(ordinaryBuilt.codexAppInput?.text).toBe('ORDINARY_CURRENT_SENTINEL');
   });
 
   it('chunks long trusted context under fixed safe keys', () => {

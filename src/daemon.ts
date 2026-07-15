@@ -110,7 +110,7 @@ import {
   ensureSessionWhiteboard,
 } from './core/session-manager.js';
 import { triggerSessionTurn } from './core/trigger-session.js';
-import { mergeQueuedCodexAppTurn } from './core/session-create.js';
+import { applyQueuedCodexAppLegacyFallback, mergeQueuedCodexAppTurn } from './core/session-create.js';
 import { findOnlineDaemon, listOnlineDaemons } from './utils/daemon-discovery.js';
 import { beginReplyTargetTurn, fallbackTurnId, resolveSessionReplyTarget, syncReplyTargetState } from './core/reply-target.js';
 import { sweepOrphanSandboxes } from './adapters/backend/sandbox.js';
@@ -7898,14 +7898,15 @@ async function handleThreadReply(data: any, ctx: RoutingContext): Promise<void> 
     const reforkContent = queuedDashboardTurn
       ? `${ds.session.queuedPrompt}\n\n${promptContent}`
       : promptContent;
+    const queuedCodexAppText = ds.session.queuedCodexAppText ?? ds.pendingCodexAppText;
     const reforkCodexApp = mergeQueuedCodexAppTurn({
       queued: queuedDashboardTurn,
-      queuedText: ds.session.queuedCodexAppText ?? ds.pendingCodexAppText,
+      queuedText: queuedCodexAppText,
       queuedMessageContext: ds.session.queuedCodexAppMessageContext ?? ds.pendingCodexAppMessageContext,
       currentText: parsed.content,
       currentMessageContext: codexAppMessageContext,
     });
-    const wrappedInput = buildReforkCliInput(ds, reforkContent, {
+    const builtReforkInput = buildReforkCliInput(ds, reforkContent, {
       attachments,
       mentions: parsed.mentions,
       cliId: ds.session.cliId ?? dsBotCfgForFork.cliId,
@@ -7916,6 +7917,17 @@ async function handleThreadReply(data: any, ctx: RoutingContext): Promise<void> 
       codexAppText: reforkCodexApp.text,
       codexAppMessageContext: reforkCodexApp.messageContext,
     });
+    const wrappedInput = applyQueuedCodexAppLegacyFallback(builtReforkInput, {
+      queued: queuedDashboardTurn,
+      queuedText: queuedCodexAppText,
+    });
+    if (wrappedInput !== builtReforkInput && dsBotCfgForFork.codexAppCleanInput === true) {
+      // Backlog sessions persisted before clean-input have no raw queued text.
+      // Keep this activation entirely legacy: reforkContent already contains
+      // queuedPrompt + the current reply, whereas a structured turn could only
+      // contain the reply and would silently discard the original task.
+      logger.warn(`[${tag(ds)}] Legacy queued dashboard task has no clean-input text; using the full legacy activation prompt`);
+    }
     await noteTurnReceived(ds, parsed.messageId, parsed.content, await getThreadSender(), parsed.messageId, substituteTrigger ? SUBSTITUTE_RECEIVED_REACTION_EMOJI_TYPE : undefined);
     rememberLastCliInput(ds, promptContent, wrappedInput);
     sessionStore.updateSession(ds.session);

@@ -2,6 +2,7 @@
 // 协作提示的 prompt 组装、会话标题推导。与 DOM / Lark API / 进程管理解耦，便于
 // 单测。daemon 侧 /api/sessions/spawn 与 session-manager 的 spawn/activate 复用。
 import { t, type Locale } from '../i18n/index.js';
+import type { CliTurnPayload } from '../types.js';
 
 /** 协作模式：
  *  - 'all'  「一起开工」——每个被选 bot 各起一条会话、拿同一份内容。
@@ -128,6 +129,24 @@ export function mergeQueuedCodexAppTurn(args: {
   const text = [args.queuedText, args.currentText].filter(Boolean).join('\n\n') || args.currentText;
   const messageContext = [args.queuedMessageContext, args.currentMessageContext].filter(Boolean).join('\n\n');
   return { text, ...(messageContext ? { messageContext } : {}) };
+}
+
+/** Final compatibility gate for a queued dashboard task activated by a topic
+ * reply. Sessions parked before clean-input was introduced have queuedPrompt
+ * but no queuedCodexAppText. Their legacy content already contains both the
+ * queued task and the current reply, while the newly-built structured sidecar
+ * can only contain the current reply. Remove that incomplete sidecar so Codex
+ * App consumes the complete legacy prompt instead.
+ *
+ * A valid string field (including an explicitly stored empty string) identifies
+ * the new schema. Missing, null, or malformed persisted values fail closed to
+ * legacy content. Non-Codex payloads have no sidecar and remain unchanged. */
+export function applyQueuedCodexAppLegacyFallback(
+  payload: CliTurnPayload,
+  args: { queued: boolean; queuedText?: unknown },
+): CliTurnPayload {
+  if (!args.queued || typeof args.queuedText === 'string' || !payload.codexAppInput) return payload;
+  return { content: payload.content };
 }
 
 export interface SpawnRequest {

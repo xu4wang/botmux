@@ -5,7 +5,7 @@ import { describe, expect, it } from 'vitest';
 describe('daemon stopped-worker substitute refork wiring', () => {
   it('passes the resolved substitute trigger into the refork builder and preserves its reaction', () => {
     const source = readFileSync(resolve('src/daemon.ts'), 'utf8');
-    const start = source.indexOf('const wrappedInput = buildReforkCliInput(ds, reforkContent');
+    const start = source.indexOf('const builtReforkInput = buildReforkCliInput(ds, reforkContent');
     const end = source.indexOf('forkWorker(ds, wrappedInput, ds.hasHistory);', start);
 
     expect(start).toBeGreaterThan(-1);
@@ -13,6 +13,11 @@ describe('daemon stopped-worker substitute refork wiring', () => {
     const reforkBlock = source.slice(start, end);
     expect(reforkBlock).toMatch(/\n\s+substituteTrigger,\n/);
     expect(reforkBlock).toContain('substituteTrigger ? SUBSTITUTE_RECEIVED_REACTION_EMOJI_TYPE : undefined');
+    expect(reforkBlock).toContain('applyQueuedCodexAppLegacyFallback(builtReforkInput');
+    expect(reforkBlock).toContain('Legacy queued dashboard task has no clean-input text');
+    expect(reforkBlock).toContain('wrappedInput !== builtReforkInput && dsBotCfgForFork.codexAppCleanInput === true');
+    expect(reforkBlock.indexOf('applyQueuedCodexAppLegacyFallback(builtReforkInput'))
+      .toBeLessThan(reforkBlock.indexOf('rememberLastCliInput(ds, promptContent, wrappedInput)'));
   });
 
   it('clears stale multi-Riff repo state when doc-watch replaces a stopped session cwd', () => {

@@ -88,11 +88,20 @@ vi.mock('../src/services/whiteboard-store.js', () => ({
   ensureDefaultWhiteboard: vi.fn(),
 }));
 
-import { spawnDashboardSession, activateQueuedSession, restoreActiveSessions } from '../src/core/session-manager.js';
+import {
+  activateQueuedSession,
+  buildReforkCliInput,
+  rememberLastCliInput,
+  restoreActiveSessions,
+  spawnDashboardSession,
+} from '../src/core/session-manager.js';
 import { sessionKey } from '../src/core/types.js';
 import { dashboardEventBus } from '../src/core/dashboard-events.js';
 import { getBot } from '../src/bot-registry.js';
-import { mergeQueuedCodexAppTurn } from '../src/core/session-create.js';
+import {
+  applyQueuedCodexAppLegacyFallback,
+  mergeQueuedCodexAppTurn,
+} from '../src/core/session-create.js';
 
 const APP = 'cli_app_test';
 const CHAT = 'oc_newgroup';
@@ -207,6 +216,94 @@ describe('spawnDashboardSession — backlog (待办池) parks without starting t
       ]));
     expect(restored.session.queuedCodexAppText).toBeUndefined();
     expect(restored.session.queuedCodexAppMessageContext).toBeUndefined();
+  });
+
+  it('starts a restored pre-clean-input backlog task safely from the Dashboard button', async () => {
+    vi.mocked(getBot).mockReturnValue({
+      config: {
+        cliId: 'codex-app', cliPathOverride: undefined, defaultWorkingDir: '/tmp',
+        codexAppCleanInput: true,
+      },
+      botName: 'TestBot',
+      botOpenId: 'ou_bot',
+    } as any);
+
+    const beforeRestart = new Map<string, DaemonSession>();
+    await spawnDashboardSession(beforeRestart, undefined, {
+      larkAppId: APP, chatId: CHAT, content: 'LEGACY_BUTTON_TASK', column: 'backlog', role: 'lead',
+      coworkers: [{ name: 'Coder' }],
+    });
+    const parked = beforeRestart.get(sessionKey(CHAT, APP))!;
+    // Simulate a record persisted before queuedCodexApp* fields existed.
+    delete parked.session.queuedCodexAppText;
+    delete parked.session.queuedCodexAppMessageContext;
+
+    const afterRestart = new Map<string, DaemonSession>();
+    await restoreActiveSessions(afterRestart);
+    const restored = afterRestart.get(sessionKey(CHAT, APP))!;
+    expect(restored.pendingCodexAppText).toBeUndefined();
+    expect(restored.pendingCodexAppMessageContext).toBeUndefined();
+
+    forkWorkerMock.mockClear();
+    expect(await activateQueuedSession(restored)).toMatchObject({ ok: true });
+    const [, prompt] = forkWorkerMock.mock.calls[0];
+    expect(prompt.content.match(/LEGACY_BUTTON_TASK/g)).toHaveLength(1);
+    expect(prompt.codexAppInput.text.match(/LEGACY_BUTTON_TASK/g)).toHaveLength(1);
+    expect(prompt.codexAppInput.text).toContain('<botmux_lead_dispatch>');
+  });
+
+  it('restores a pre-clean-input backlog record and makes a topic reply legacy-only', async () => {
+    vi.mocked(getBot).mockReturnValue({
+      config: {
+        cliId: 'codex-app', cliPathOverride: undefined, defaultWorkingDir: '/tmp',
+        codexAppCleanInput: true,
+      },
+      botName: 'TestBot',
+      botOpenId: 'ou_bot',
+    } as any);
+
+    const beforeRestart = new Map<string, DaemonSession>();
+    await spawnDashboardSession(beforeRestart, undefined, {
+      larkAppId: APP, chatId: CHAT, content: 'QUEUED_TASK_SENTINEL', column: 'backlog', role: 'lead',
+      coworkers: [{ name: 'Coder' }],
+    });
+    const parked = beforeRestart.get(sessionKey(CHAT, APP))!;
+    delete parked.session.queuedCodexAppText;
+    delete parked.session.queuedCodexAppMessageContext;
+
+    const afterRestart = new Map<string, DaemonSession>();
+    await restoreActiveSessions(afterRestart);
+    const restored = afterRestart.get(sessionKey(CHAT, APP))!;
+    const queuedText = restored.session.queuedCodexAppText ?? restored.pendingCodexAppText;
+    expect(queuedText).toBeUndefined();
+    expect(restored.pendingCodexAppMessageContext).toBeUndefined();
+
+    const merged = mergeQueuedCodexAppTurn({
+      queued: true,
+      queuedText,
+      currentText: 'CURRENT_REPLY_SENTINEL',
+      currentMessageContext: '<sender>晓雪</sender>',
+    });
+    const built = buildReforkCliInput(
+      restored,
+      `${restored.session.queuedPrompt}\n\nCURRENT_REPLY_SENTINEL`,
+      {
+        cliId: 'codex-app',
+        codexAppText: merged.text,
+        codexAppMessageContext: merged.messageContext,
+      },
+    );
+    expect(built.codexAppInput?.text).toBe('CURRENT_REPLY_SENTINEL');
+
+    const payload = applyQueuedCodexAppLegacyFallback(built, { queued: true, queuedText });
+    expect(payload.content.match(/QUEUED_TASK_SENTINEL/g)).toHaveLength(1);
+    expect(payload.content.match(/CURRENT_REPLY_SENTINEL/g)).toHaveLength(1);
+    expect(payload).not.toHaveProperty('codexAppInput');
+
+    rememberLastCliInput(restored, 'CURRENT_REPLY_SENTINEL', payload);
+    expect(restored.lastCliInput).toBe(payload.content);
+    expect(restored.lastCodexAppInput).toBeUndefined();
+    expect(restored.session.lastCodexAppInput).toBeUndefined();
   });
 });
 
