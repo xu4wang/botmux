@@ -76,6 +76,10 @@ describe('desktop dashboard shell mode', () => {
       fileURLToPath(new URL('../../src/dashboard/web/sessions-page.tsx', import.meta.url)),
       'utf-8',
     );
+    const createSessionEntrySource = readFileSync(
+      fileURLToPath(new URL('../../src/dashboard/web/create-session-entry.ts', import.meta.url)),
+      'utf-8',
+    );
 
     // Dashboard topbar is hidden in the Electron webview, so Desktop must keep
     // the user-visible entry points that master moved into that topbar.
@@ -83,10 +87,13 @@ describe('desktop dashboard shell mode', () => {
     expect(html).toContain('id="docs-link"');
     expect(rendererSource).toContain("#/sessions?open=create-session");
     expect(rendererSource).toContain('openCreateSession');
-    expect(dashboardSource).toContain('OPEN_CREATE_SESSION_EVENT');
+    expect(dashboardSource).toContain('requestOpenCreateSession');
     expect(dashboardSource).toContain("open !== 'create-session'");
-    expect(sessionsSource).toContain("const OPEN_CREATE_SESSION_EVENT = 'botmux:open-create-session'");
+    expect(createSessionEntrySource).toContain("OPEN_CREATE_SESSION_EVENT = 'botmux:open-create-session'");
+    expect(createSessionEntrySource).toContain('consumePendingCreateSession');
+    expect(sessionsSource).toContain("from './create-session-entry.js'");
     expect(sessionsSource).toContain('window.addEventListener(OPEN_CREATE_SESSION_EVENT');
+    expect(sessionsSource).not.toContain("const OPEN_CREATE_SESSION_EVENT = 'botmux:open-create-session'");
   });
 
   it('lets the embedded dashboard honor the desktop locale from hash params', () => {

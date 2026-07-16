@@ -23,6 +23,7 @@ import {
 } from './route-lifecycle.js';
 import { buildBotCards, loadGroupsSnapshot } from './overview.js';
 import { BotOnboardingDialog, OPEN_BOT_ONBOARDING_EVENT } from './bot-onboarding.js';
+import { requestOpenCreateSession } from './create-session-entry.js';
 import { InfoTip } from './dashboard-components.js';
 import { initFloatingScrollbars } from './floating-scrollbars.js';
 import { PLUGIN_PINS_CHANGED_EVENT } from './plugin-events.js';
@@ -147,7 +148,6 @@ const routeState = createDashboardRouteState();
 const OWNER_AVATAR_KEY = 'botmux.ownerAvatar.v1';
 const BUSY_STATUSES = new Set(['working', 'analyzing', 'active', 'starting']);
 const AUTH_EXPIRED_EVENT = 'botmux:auth-expired';
-const OPEN_CREATE_SESSION_EVENT = 'botmux:open-create-session';
 
 function icon(children: ReactNode): ReactNode {
   return <svg viewBox="0 0 16 16" aria-hidden="true">{children}</svg>;
@@ -244,7 +244,7 @@ function consumeDesktopShellRouteAction(): boolean {
   if (open === 'bot-onboarding') {
     window.dispatchEvent(new Event(OPEN_BOT_ONBOARDING_EVENT));
   } else {
-    window.setTimeout(() => window.dispatchEvent(new Event(OPEN_CREATE_SESSION_EVENT)), 0);
+    requestOpenCreateSession();
   }
   return true;
 }

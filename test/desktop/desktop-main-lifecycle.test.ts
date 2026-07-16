@@ -20,6 +20,7 @@ describe('desktop main lifecycle', () => {
 
   it('disables desktop system permission prompts at the Electron boundary', () => {
     const source = readFileSync('src/desktop/main.ts', 'utf-8');
+    const html = readFileSync('src/desktop/renderer/index.html', 'utf-8');
     const permissionsIndex = source.indexOf('configureDesktopSessionPermissions()');
     const createWindowIndex = source.indexOf('const win = createMainWindow');
 
@@ -29,6 +30,10 @@ describe('desktop main lifecycle', () => {
     expect(source).toContain("app.commandLine.appendSwitch('disable-features'");
     expect(source).toContain('ScreenCaptureKitPickerScreen');
     expect(source).toContain('ScreenCaptureKitStreamPickerSonoma');
+    expect(html).toContain('partition="persist:botmux-dashboard"');
+    expect(source).toContain("session.fromPartition(dashboardWebviewPartition)");
+    expect(source).toContain("const dashboardWebviewPartition = 'persist:botmux-dashboard'");
+    expect(source).toContain('configureDesktopSessionPermissionHandlers(desktopSession)');
     expect(source).toContain('setPermissionCheckHandler');
     expect(source).toContain('setPermissionRequestHandler');
     expect(source).toContain('setDevicePermissionHandler(() => false)');

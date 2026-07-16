@@ -1,4 +1,4 @@
-import { app, session, shell, type BrowserWindow, type Tray } from 'electron';
+import { app, session, shell, type BrowserWindow, type Session, type Tray } from 'electron';
 import { existsSync, readFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
@@ -12,6 +12,7 @@ import { createDesktopTray } from './main/tray.js';
 import { createMainWindow } from './main/window.js';
 import { normalizeBotmuxVersion, resolveEffectiveBotmuxVersion } from '../utils/version-info.js';
 
+const dashboardWebviewPartition = 'persist:botmux-dashboard';
 let quitting = false;
 let mainWindow: BrowserWindow | null = null;
 let tray: Tray | null = null;
@@ -127,7 +128,16 @@ function configureDesktopCommandLine(): void {
 }
 
 function configureDesktopSessionPermissions(): void {
-  const desktopSession = session.defaultSession;
+  const desktopSessions = [
+    session.defaultSession,
+    session.fromPartition(dashboardWebviewPartition),
+  ];
+  for (const desktopSession of desktopSessions) {
+    configureDesktopSessionPermissionHandlers(desktopSession);
+  }
+}
+
+function configureDesktopSessionPermissionHandlers(desktopSession: Session): void {
   desktopSession.setPermissionCheckHandler((_webContents, permission) => {
     return isAllowedDesktopPermission(permission);
   });

@@ -34,6 +34,7 @@ import {
   writeStoredSessionsShowUnknownChats,
   writeStoredSessionsViewMode,
 } from './preferences.js';
+import { OPEN_CREATE_SESSION_EVENT, consumePendingCreateSession } from './create-session-entry.js';
 import {
   BOARD_COLUMNS,
   CLI_FILTER_OPTIONS,
@@ -82,8 +83,6 @@ import {
   type SessionsKanbanTeam,
   type SessionsKanbanTeamBoardData,
 } from './sessions-kanban.js';
-
-const OPEN_CREATE_SESSION_EVENT = 'botmux:open-create-session';
 
 type SessionRow = Record<string, any> & { sessionId: string; status: string };
 
@@ -2446,9 +2445,12 @@ function SessionsPage(): JSX.Element {
   }, []);
 
   useEffect(() => {
-    const open = () => { void openCreateSession(); };
-    window.addEventListener(OPEN_CREATE_SESSION_EVENT, open);
-    return () => window.removeEventListener(OPEN_CREATE_SESSION_EVENT, open);
+    const maybeOpenFromEntry = () => {
+      if (consumePendingCreateSession() && ui.authed) void openCreateSession();
+    };
+    maybeOpenFromEntry();
+    window.addEventListener(OPEN_CREATE_SESSION_EVENT, maybeOpenFromEntry);
+    return () => window.removeEventListener(OPEN_CREATE_SESSION_EVENT, maybeOpenFromEntry);
   }, [openCreateSession]);
 
   return (
