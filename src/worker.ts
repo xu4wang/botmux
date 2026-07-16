@@ -108,6 +108,7 @@ import { dirname } from 'node:path';
 import { createServer as createHttpServer, type IncomingMessage } from 'node:http';
 import { WebSocketServer, WebSocket } from 'ws';
 import { listenWebTerminalWithFallback } from './utils/web-terminal-listen.js';
+import { HerdrWebTerminalBinding } from './utils/herdr-web-terminal-binding.js';
 import { TERMINAL_FAVICON_DATA_URI } from './utils/terminal-favicon.js';
 import type {
   CodexAppTurnInput,
@@ -139,7 +140,7 @@ import { sessionReadyHookCommand } from './adapters/hook-command.js';
 import { mtrSessionIdForBotmuxSession } from './adapters/cli/mtr.js';
 import type { CliAdapter, PtyHandle, SubmitRecheckResult, CliId } from './adapters/cli/types.js';
 import { PtyBackend } from './adapters/backend/pty-backend.js';
-import { HerdrBackend } from './adapters/backend/herdr-backend.js';
+import { HerdrBackend, type HerdrWebTerminalCursor } from './adapters/backend/herdr-backend.js';
 import { TmuxBackend } from './adapters/backend/tmux-backend.js';
 import { TmuxPipeBackend } from './adapters/backend/tmux-pipe-backend.js';
 import { ZellijBackend, ZELLIJ_CONFIG_KDL } from './adapters/backend/zellij-backend.js';
@@ -157,6 +158,12 @@ import { ScreenAnalyzer } from './utils/screen-analyzer.js';
 import { captureToPng } from './utils/screenshot-renderer.js';
 import { snapshotToPng, snapshotToText, shouldCaptureScreen, isScreenSelfDriven } from './utils/transient-snapshot.js';
 import { chooseWebTerminalSeed } from './utils/web-terminal-seed.js';
+import {
+  mergeHerdrWebSnapshot,
+  renderHerdrWebHistory,
+  type HerdrWebHistoryState,
+  type HerdrWebScrollDirection,
+} from './utils/herdr-web-history.js';
 import { parseWorkerRequestUrl } from './utils/worker-http.js';
 import { detectCliUsageLimit, usageLimitStateKey, type CliUsageLimitState } from './utils/cli-usage-limit.js';
 import { uploadImageBuffer } from './utils/lark-upload.js';
@@ -417,6 +424,8 @@ const wsClients = new Set<WebSocket>();
 const authedClients = new WeakSet<WebSocket>();
 /** Per-WS-client tmux/zellij attach PTYs. */
 const clientPtys = new Map<WebSocket, pty.IPty>();
+/** Managed-Herdr viewers survive an in-worker /restart while backend changes. */
+const herdrWebBindings = new Map<WebSocket, HerdrWebTerminalBinding>();
 const writeToken = randomBytes(16).toString('hex');
 // Standalone/test fallback. Production replaces this after init with a stable
 // per-session HMAC derived from the host-only dashboard secret.
@@ -3089,6 +3098,9 @@ const SCREEN_UPDATE_INTERVAL_MS = 2_000;
 
 const MAX_SCROLLBACK = 1_000_000; // chars (~1MB)
 let scrollback = '';
+let herdrWebHistory: HerdrWebHistoryState | null = null;
+let herdrWebScrollDirection: HerdrWebScrollDirection = null;
+let herdrWebCursor: HerdrWebTerminalCursor | null = null;
 const WORKFLOW_TRANSCRIPT_MAX = 2_000_000; // chars (~2MB)
 const WORKFLOW_OUTPUT_END_MARKER = '</WORKFLOW_OUTPUT>';
 const CRASH_DIAGNOSTIC_RAW_MAX = 200_000; // enough scrollback for the web terminal without huge temp files
@@ -3104,6 +3116,80 @@ let workflowFinalOutputSent = false;
 let altBufferActive = false;
 const ALT_ENTER_RE = /\x1b\[\?(1049|1047|47)h/g;
 const ALT_EXIT_RE = /\x1b\[\?(1049|1047|47)l/g;
+
+function usesHerdrSnapshotWebHistory(): boolean {
+  return backend instanceof HerdrBackend;
+}
+
+function herdrWebCursorSequence(cursor = herdrWebCursor): string {
+  return cursor ? `\x1b[${cursor.row + 1};${cursor.col + 1}H` : '';
+}
+
+function relayHerdrWebCursor(cursor: HerdrWebTerminalCursor): void {
+  herdrWebCursor = cursor;
+  const sequence = herdrWebCursorSequence(cursor);
+  for (const ws of wsClients) {
+    if (ws.readyState === WebSocket.OPEN) ws.send(sequence);
+  }
+}
+
+function relayHerdrWebSnapshot(snapshot: string): void {
+  const merged = mergeHerdrWebSnapshot(
+    herdrWebHistory,
+    snapshot,
+    herdrWebScrollDirection,
+    MAX_SCROLLBACK,
+  );
+  herdrWebHistory = merged.state;
+  herdrWebScrollDirection = null;
+  scrollback = renderHerdrWebHistory(merged.state);
+  const payload = `\x1b]1989;history;${merged.addedLines}\x07${scrollback}${herdrWebCursorSequence()}`;
+  for (const ws of wsClients) {
+    if (ws.readyState === WebSocket.OPEN) ws.send(payload);
+  }
+}
+
+function applyHerdrWebBindingResult(
+  ws: WebSocket,
+  result: ReturnType<HerdrWebTerminalBinding['resize']>,
+): void {
+  if (ws.readyState !== WebSocket.OPEN) return;
+  const { backend: herdrWebBackend, initialSize, size } = result;
+  if (initialSize) {
+    ws.send(`\x1b]1989;follower;${initialSize.cols};${initialSize.rows}\x07`);
+  }
+  if (!herdrWebBackend || !size) return;
+  for (const client of wsClients) {
+    if (
+      client.readyState === WebSocket.OPEN &&
+      !herdrWebBackend.isWebTerminalOwner(client)
+    ) {
+      client.send(`\x1b]1989;follower;${size.cols};${size.rows}\x07`);
+    }
+  }
+}
+
+/**
+ * /restart replaces a managed Herdr backend without closing browser sockets.
+ * Restore every viewer in connection order so the previous oldest surviving
+ * owner remains authoritative, then re-apply its last browser grid.
+ */
+function restoreHerdrWebBindings(): void {
+  if (!(backend instanceof HerdrBackend) || lastInitConfig?.adoptMode) return;
+  for (const [ws, binding] of herdrWebBindings) {
+    if (ws.readyState !== WebSocket.OPEN) {
+      binding.release();
+      herdrWebBindings.delete(ws);
+      continue;
+    }
+    applyHerdrWebBindingResult(ws, binding.restore());
+  }
+}
+
+function wireHerdrWebTerminalRelays(be: HerdrBackend): void {
+  be.onSnapshot(relayHerdrWebSnapshot);
+  be.onWebTerminalCursor(relayHerdrWebCursor);
+}
 
 function recentTerminalLogTail(): string | undefined {
   const plain = stripAnsiForLog(tailChars(scrollback, CRASH_DIAGNOSTIC_RAW_MAX));
@@ -3826,7 +3912,7 @@ function onPtyData(data: string): void {
   // no relay needed. In non-tmux mode AND in pipe mode (adopt-bridge),
   // broadcast through the shared scrollback so all connected web clients
   // render the same byte stream.
-  if (!isTmuxMode || isPipeMode) {
+  if ((!isTmuxMode || isPipeMode) && !usesHerdrSnapshotWebHistory()) {
     // Track alt-buffer state so we can restore it in the scrollback prefix.
     // Scan for the *last* toggle in this chunk — that's the current state.
     let lastToggleIdx = -1;
@@ -4806,7 +4892,12 @@ function setupAdoptIdleDetection(cfg: Extract<DaemonToWorker, { type: 'init' }>,
 function seedBackendScreen(source: string, be: Pick<SessionBackend, 'captureCurrentScreen'>): void {
   try {
     const initial = be.captureCurrentScreen?.() ?? '';
-    if (initial.length > 0) onPtyData(initial);
+    if (initial.length > 0) {
+      onPtyData(initial);
+      if (be instanceof HerdrBackend) {
+        relayHerdrWebSnapshot(initial);
+      }
+    }
   } catch (err: any) {
     log(`${source} captureCurrentScreen failed: ${err.message}`);
   }
@@ -4934,6 +5025,7 @@ function spawnCli(cfg: Extract<DaemonToWorker, { type: 'init' }>): void {
       env: process.env as Record<string, string>,
     });
 
+    wireHerdrWebTerminalRelays(herdrBe);
     seedBackendScreen('herdr adopt', herdrBe);
 
     setupAdoptTranscriptBridges(cfg);
@@ -6290,6 +6382,10 @@ function spawnCli(cfg: Extract<DaemonToWorker, { type: 'init' }>): void {
   backend.onTaskId?.((taskId) => {
     send({ type: 'riff_task_id', taskId });
   });
+  if (backend instanceof HerdrBackend) {
+    wireHerdrWebTerminalRelays(backend);
+    restoreHerdrWebBindings();
+  }
   backend.onExit((code, signal) => {
     const intentionalRestart = intentionalRestartBackend === observedBackend;
     if (intentionalRestart) intentionalRestartBackend = null;
@@ -6483,6 +6579,9 @@ function killCli(opts: { preservePending?: boolean } = {}): void {
   // Preserve them across restart; unlike an in-flight raw command, replaying
   // these cannot duplicate a side effect.
   scrollback = '';
+  herdrWebHistory = null;
+  herdrWebScrollDirection = null;
+  herdrWebCursor = null;
   altBufferActive = false;
   trustHandled = false;
   codexUpdateDialogGuard.reset();
@@ -6595,8 +6694,13 @@ function startWebServer(host: string, preferredPort?: number): Promise<number> {
       }
       const loginHdr = req.headers['x-botmux-login-url'];
       const loginUrl = typeof loginHdr === 'string' && /^https?:\/\/[^"'<>\s]+$/.test(loginHdr) ? loginHdr : '';
+      // Herdr snapshots contain screen cells but not terminal mode state. On a
+      // refreshed page an alt-screen CLI would otherwise look like an empty
+      // normal buffer until resize causes a redraw. Preserve that mode so
+      // scroll gestures continue to target the CLI's own transcript.
+      const forceRemoteScroll = effectiveBackendType === 'herdr' && cliAdapter?.altScreen === true;
       res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
-      res.end(getTerminalHtml(hasWrite, platformReadonly, loginUrl));
+      res.end(getTerminalHtml(hasWrite, platformReadonly, loginUrl, forceRemoteScroll));
     });
 
     wss = new WebSocketServer({
@@ -6793,6 +6897,14 @@ function startWebServer(host: string, preferredPort?: number): Promise<number> {
         });
       } else {
         // ── Shared relay (PtyBackend OR tmux pipe mode) ──
+        const herdrWebBinding = new HerdrWebTerminalBinding(ws, () => (
+          backend instanceof HerdrBackend && !lastInitConfig?.adoptMode ? backend : null
+        ));
+        herdrWebBindings.set(ws, herdrWebBinding);
+        const initialHerdrSize = herdrWebBinding.sync().initialSize;
+        if (initialHerdrSize) {
+          ws.send(`\x1b]1989;follower;${initialHerdrSize.cols};${initialHerdrSize.rows}\x07`);
+        }
         // History seed: prefer tmux's authoritative capture-pane in pipe mode
         // (clean grid + scrollback) over replaying the raw cumulative byte
         // stream, which scrolls stale Ink redraw/spinner frames into scrollback
@@ -6809,23 +6921,35 @@ function startWebServer(host: string, preferredPort?: number): Promise<number> {
           const sz = (backend as ObserveBackend).getPaneSize();
           if (sz && sz.cols > 0 && sz.rows > 0) ws.send(`\x1b]1989;${sz.cols};${sz.rows}\x07`);
         }
-        const seed = chooseWebTerminalSeed({
-          canCapture: isPipeMode && isObserveBackend(backend),
-          capture: () => (backend as ObserveBackend).captureCurrentScreen(),
-          scrollback,
-          onError: log,
-        });
+        const seed = usesHerdrSnapshotWebHistory() && scrollback.length > 0
+          ? scrollback
+          : chooseWebTerminalSeed({
+            canCapture: isPipeMode && isObserveBackend(backend),
+            capture: () => (backend as ObserveBackend).captureCurrentScreen(),
+            scrollback,
+            onError: log,
+          });
         if (seed.length > 0) {
-          ws.send(seed);
+          ws.send(seed + herdrWebCursorSequence());
         }
 
         ws.on('message', (raw) => {
           try {
             const msg = JSON.parse(String(raw));
             if (msg.type === 'resize' && msg.cols > 0 && msg.rows > 0) {
-              backend?.resize(msg.cols, msg.rows);
+              const result = herdrWebBinding.resize(msg.cols, msg.rows);
+              applyHerdrWebBindingResult(ws, result);
+              if (!result.backend) {
+                backend?.resize(msg.cols, msg.rows);
+              }
             } else if (msg.type === 'input' && typeof msg.data === 'string') {
+              // Mouse protocols can encode approvals/actions as well as wheel input.
+              // A read-only view capability must never forward bytes to the backend.
               if (!authedClients.has(ws)) return;
+              if (usesHerdrSnapshotWebHistory()) {
+                if (msg.data.includes('\x1b[<64;')) herdrWebScrollDirection = 'up';
+                else if (msg.data.includes('\x1b[<65;')) herdrWebScrollDirection = 'down';
+              }
               backend?.write(msg.data);
             }
           } catch { /* ignore non-JSON or bad messages */ }
@@ -6833,6 +6957,11 @@ function startWebServer(host: string, preferredPort?: number): Promise<number> {
 
         ws.on('close', () => {
           wsClients.delete(ws);
+          herdrWebBindings.delete(ws);
+          const promoted = herdrWebBinding.release() as WebSocket | null;
+          if (promoted?.readyState === WebSocket.OPEN) {
+            promoted.send('\x1b]1989;owner\x07');
+          }
         });
       }
     });
@@ -6847,7 +6976,12 @@ function startWebServer(host: string, preferredPort?: number): Promise<number> {
   });
 }
 
-function getTerminalHtml(hasWrite: boolean, platformReadonly = false, loginUrl = ''): string {
+function getTerminalHtml(
+  hasWrite: boolean,
+  platformReadonly = false,
+  loginUrl = '',
+  forceRemoteScroll = false,
+): string {
   const label = sessionId.substring(0, 8);
   return `<!DOCTYPE html>
 <html>
@@ -6859,8 +6993,8 @@ function getTerminalHtml(hasWrite: boolean, platformReadonly = false, loginUrl =
 <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@xterm/xterm@5/css/xterm.min.css">
 <style>
 *{margin:0;padding:0;box-sizing:border-box}
-html,body{height:100%;background:#1a1b26;overflow:hidden;overscroll-behavior:none}
-body{display:flex;flex-direction:column}
+html,body{width:100%;height:100%;background:#1a1b26;overflow:hidden;overscroll-behavior:none}
+body{display:flex;flex-direction:column;height:100vh;height:100dvh}
 #safe-area-probe{position:fixed;visibility:hidden;pointer-events:none;
   padding:env(safe-area-inset-top,0px) env(safe-area-inset-right,0px) env(safe-area-inset-bottom,0px) env(safe-area-inset-left,0px)}
 #toolbar-shell{--toolbar-scale:1;display:none;position:fixed;z-index:100;
@@ -6915,7 +7049,7 @@ body{display:flex;flex-direction:column}
   background:rgba(36,40,59,0.74)!important;touch-action:none}
 #toolbar.idle{opacity:.82}
 @media(prefers-reduced-motion:reduce){#toolbar,#toolbar.collapsed{transition:opacity .12s linear}}
-#terminal{flex:1;min-height:0}
+#terminal{flex:1;min-width:0;min-height:0;width:100%;height:100%}
 #terminal .xterm{height:100%}
 /* Real scroll container is xterm's own viewport — kill iOS rubber-band bounce
    and momentum here (not just on body), and reserve gestures for pinch-zoom so
@@ -6980,9 +7114,10 @@ ${loginUrl ? `<a id="login-banner" href="${loginUrl}" target="_top" rel="noopene
 <script src="https://cdn.jsdelivr.net/npm/@xterm/addon-canvas@0/lib/addon-canvas.min.js"></script>
 <script>
 var isTouch='ontouchstart'in window||navigator.maxTouchPoints>0;
-if(isTouch){document.getElementById('vp').content='width=1100,viewport-fit=cover';document.body.classList.add('touch');}
+if(isTouch){document.body.classList.add('touch');}
 var hasToken=${hasWrite};
 var platformReadonly=${platformReadonly};
+var remoteScroll=${forceRemoteScroll};
 if(!hasToken){
   if(platformReadonly){var _lb=document.getElementById('login-banner');_lb.classList.add('show');}
   else{var _rb=document.getElementById('readonly-banner');_rb.classList.add('show');_rb.addEventListener('click',function(){_rb.classList.remove('show')});}
@@ -7132,6 +7267,36 @@ window.addEventListener('resize',onViewportResize);
   ws.onopen=function(){el.textContent='connected';el.className='ok';_lastC=_lastR=0;sendResize()};
   ws.onmessage=function(e){
     var data=typeof e.data==='string'?e.data:new TextDecoder().decode(e.data);
+    // Snapshot-aware Herdr history replaces the buffer instead of appending a
+    // mostly-overlapping full screen. Preserve the reader's anchor when older
+    // rows were prepended; otherwise preserve their current position/follow.
+    var _hh=data.match(/^\x1b\]1989;history;([0-9]+)\x07/);
+    if(_hh){
+      var _ha=+_hh[1],_hb=term.buffer.active,_hy=_hb.viewportY,_hBottom=_hy===_hb.baseY;
+      data=data.slice(_hh[0].length);_cancelInitialFollow();term.reset();term.clear();
+      data='\\x1b[2J\\x1b[H'+data;
+      term.write(data,function(){
+        if(_ha>0)term.scrollToLine(_hy+_ha);
+        else if(_hBottom)term.scrollToBottom();
+        else term.scrollToLine(_hy);
+      });
+      return;
+    }
+    // Managed Herdr has one authoritative pane grid shared by every viewer.
+    // Followers render at the owner's grid; a promoted owner re-fits to its
+    // own viewport and reports the new size back to the worker.
+    var _hf=data.match(/\\x1b\\]1989;follower;(\\d+);(\\d+)\\x07/);
+    if(_hf){
+      fixedSize=true;var _hc=+_hf[1],_hr=+_hf[2];
+      if(_hc>0&&_hr>0){try{term.resize(_hc,_hr)}catch(ex){}_lastC=_hc;_lastR=_hr}
+      data=data.replace(_hf[0],'');
+    }
+    var _ho=data.match(/\\x1b\\]1989;owner\\x07/);
+    if(_ho){
+      fixedSize=false;data=data.replace(_ho[0],'');
+      try{fit.fit()}catch(ex){}
+      _lastC=_lastR=0;sendResize();
+    }
     // botmux OSC 1989: pin the xterm to the adopted pane's fixed size (the pane
     // can't be resized, so FitAddon-to-browser would wrap the snapshot lines).
     var _fs=data.match(/\\x1b\\]1989;(\\d+);(\\d+)\\x07/);
@@ -7155,12 +7320,25 @@ window.addEventListener('resize',onViewportResize);
 // stopPropagation pre-empts xterm's own handler. Skipped for pure tmux/zellij
 // ATTACH (gate), where the attach client owns scrolling via copy-mode.
 //
-// Accumulate intended scroll DISTANCE (px) and emit one wheel tick per STEP px —
-// decoupled from how many wheel/touch events the browser fires per gesture
-// (high-res trackpads fire dozens), so a small gesture stays a small scroll and
-// doesn't compound into a whole screen. px<0 = scroll up (toward history). The
-// per-call cap stops a single huge delta (page tick / fling) from over-firing.
-var _scrollAccum=0;var _SCROLL_STEP=33;
+// Accumulate intended scroll DISTANCE (px) and emit one wheel tick per STEP px.
+// A high-resolution trackpad emits dozens of wheel events for one gesture, so
+// cap the whole continuous burst — not each browser event — then require an idle
+// gap (or direction reversal) before loading the next history chunk.
+var _scrollAccum=0,_scrollBurstTicks=0,_scrollBurstDir=0,_scrollBurstT=0;
+var _SCROLL_STEP=33;var _SCROLL_BURST_MAX=6;var _SCROLL_BURST_IDLE_MS=250;
+function _endScrollBurst(){
+  clearTimeout(_scrollBurstT);_scrollBurstT=0;
+  _scrollAccum=0;_scrollBurstTicks=0;_scrollBurstDir=0;
+}
+// Snapshot-backed remote TUIs can still accumulate useful local xterm history.
+// Consume it first; request another remote chunk only when the user pushes past
+// the local top/bottom boundary in that direction.
+function _canScrollLocal(px){
+  var b=term.buffer.active;
+  if(b.type==='alternate'||!px)return false;
+  if(!remoteScroll)return true;
+  return px>0||b.viewportY>0;
+}
 // Map a viewport pixel (clientX/Y) to a 1-based terminal cell "col;row", clamped to
 // the grid. The forwarded SGR wheel event MUST carry the cell UNDER THE POINTER, the
 // way a physical terminal reports it: zone-routed alt-screen TUIs — OpenCode (Bubble
@@ -7184,30 +7362,36 @@ function _cellAt(clientX,clientY){
   return col+';'+row;
 }
 function _fwdScroll(px,coord){
-  if(!hasToken||!ws_||ws_.readyState!==1)return;
+  if(!hasToken||!ws_||ws_.readyState!==1||!px)return;
   coord=coord||(((term.cols>>1)+1)+';'+((term.rows>>1)+1)); // never (1,1)
+  var dir=px<0?-1:1;
+  if(_scrollBurstDir&&dir!==_scrollBurstDir){_scrollAccum=0;_scrollBurstTicks=0;}
+  _scrollBurstDir=dir;
+  clearTimeout(_scrollBurstT);_scrollBurstT=setTimeout(_endScrollBurst,_SCROLL_BURST_IDLE_MS);
+  if(_scrollBurstTicks>=_SCROLL_BURST_MAX)return;
   _scrollAccum+=px;var data='',n=0;
-  while(Math.abs(_scrollAccum)>=_SCROLL_STEP&&n<6){
+  while(Math.abs(_scrollAccum)>=_SCROLL_STEP&&n<6&&_scrollBurstTicks<_SCROLL_BURST_MAX){
     var up=_scrollAccum<0; // px<0 → wheel-up (history)
     data+='\\x1b[<'+(up?64:65)+';'+coord+'M';
-    _scrollAccum+=up?_SCROLL_STEP:-_SCROLL_STEP;n++;
+    _scrollAccum+=up?_SCROLL_STEP:-_SCROLL_STEP;n++;_scrollBurstTicks++;
   }
+  if(_scrollBurstTicks>=_SCROLL_BURST_MAX)_scrollAccum=0;
   if(data)ws_.send(JSON.stringify({type:'input',data:data}));
 }
 if(!${isTmuxMode && !isPipeMode}){
   document.getElementById('terminal').addEventListener('wheel',function(e){
-    if(term.buffer.active.type!=='alternate'){
+    // Normalise deltaMode to px: line→~16px, page→~one screen.
+    var px=e.deltaMode===1?e.deltaY*16:e.deltaMode===2?e.deltaY*term.rows*16:e.deltaY;
+    if(_canScrollLocal(px)){
       // Normal buffer: xterm scrolls its own scrollback natively. In read-only a
       // mouse-mode CLI could swallow the wheel, so drive scrollback directly.
-      if(!hasToken){e.preventDefault();e.stopPropagation();term.scrollLines(e.deltaY>0?3:-3);}
+      if(!hasToken){e.preventDefault();e.stopPropagation();term.scrollLines(px>0?3:-3);}
       return;
     }
     if(!hasToken){
       e.preventDefault();e.stopPropagation();term.scrollLines(e.deltaY>0?3:-3);return;
     }
     e.preventDefault();e.stopPropagation();
-    // Normalise deltaMode to px: line→~16px, page→~one screen.
-    var px=e.deltaMode===1?e.deltaY*16:e.deltaMode===2?e.deltaY*term.rows*16:e.deltaY;
     _fwdScroll(px,_cellAt(e.clientX,e.clientY)); // report the cell under the pointer
   },{capture:true,passive:false});
 }
@@ -7512,29 +7696,36 @@ if(isTouch&&hasToken){
   _scheduleToolbarLayout();_wakeToolbar();
 }
 
-// Single-finger touch scrolling: normal-buffer CLIs use xterm's own Viewport
-// (handleTouchMove → scrollTop) natively. Alt-screen CLIs (Claude) have no xterm
-// scrollback, so native touch scroll does nothing — mirror the wheel fix and
-// forward the drag to the CLI as SGR wheel events so it scrolls its own
-// transcript. Only the alternate buffer is intercepted (capture + stopPropagation);
-// the normal buffer falls through to xterm untouched, so no double-drive of
-// scrollTop. overscroll-behavior:none (see <style>) kills the iOS rubber-band.
+// Single-finger touch scrolling: drive normal-buffer scrollback explicitly.
+// Some embedded WebViews do not perform xterm/browser native touch scrolling
+// when touch-action is restricted for pinch zoom. Handling in capture phase and
+// stopping propagation also prevents xterm from double-driving the viewport.
+// Alt-screen CLIs have no xterm scrollback, so forward the drag as SGR wheel
+// events and let the CLI scroll its own transcript.
 if(!${isTmuxMode && !isPipeMode}){
   var _tTerm=document.getElementById('terminal');
+  var _tViewport=document.querySelector('#terminal .xterm-viewport');
   var _tLastY=null;
   _tTerm.addEventListener('touchstart',function(e){
     if(e.touches.length===1)_tLastY=e.touches[0].clientY;
   },{capture:true,passive:true});
   _tTerm.addEventListener('touchmove',function(e){
-    // Normal buffer / multi-touch / no start → let xterm (or the browser) handle it.
-    if(!hasToken||term.buffer.active.type!=='alternate'||_tLastY===null||e.touches.length!==1)return;
+    // View links never forward input; let xterm/browser handle local scrolling.
+    if(!hasToken||_tLastY===null||e.touches.length!==1)return;
     e.preventDefault();e.stopPropagation();
     var y=e.touches[0].clientY;
+    var px=_tLastY-y;
+    if(_canScrollLocal(px)){
+      if(_tViewport)_tViewport.scrollTop-=y-_tLastY;
+      else term.scrollLines(y>_tLastY?-1:1);
+      _tLastY=y;return;
+    }
     // finger drags down (y grows) → px<0 → scroll up (history); report the touched cell
-    _fwdScroll(_tLastY-y,_cellAt(e.touches[0].clientX,y));
+    _fwdScroll(px,_cellAt(e.touches[0].clientX,y));
     _tLastY=y;
   },{capture:true,passive:false});
-  _tTerm.addEventListener('touchend',function(){_tLastY=null;},{capture:true,passive:true});
+  _tTerm.addEventListener('touchend',function(){_tLastY=null;_endScrollBurst()},{capture:true,passive:true});
+  _tTerm.addEventListener('touchcancel',function(){_tLastY=null;_endScrollBurst()},{capture:true,passive:true});
 }
 </script>
 </body>
@@ -8190,6 +8381,7 @@ function cleanup(): void {
   clientPtys.clear();
   for (const ws of wsClients) ws.close();
   wsClients.clear();
+  herdrWebBindings.clear();
   if (wss) { wss.close(); wss = null; }
   if (httpServer) { httpServer.close(); httpServer = null; }
   if (workflowPtyLogStream) {
