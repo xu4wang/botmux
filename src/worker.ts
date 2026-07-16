@@ -40,7 +40,7 @@ import { drainTranscript, joinAssistantText, trailingAssistantText, findJsonlCon
 import { BridgeTurnQueue, makeFingerprint, normaliseForFingerprint } from './services/bridge-turn-queue.js';
 import { shouldSuppressBridgeEmit, type BridgeSendMarker } from './services/bridge-fallback-gate.js';
 import { shouldReleaseFirstPromptTimeout, shouldWriteNow } from './utils/input-gate.js';
-import { shouldDeferUserFlush, shouldFlushInjectionsFirst, type PendingInjection } from './core/inject-queue-policy.js';
+import { canStartInjectionFlush, shouldDeferUserFlush, shouldFlushInjectionsFirst, type PendingInjection } from './core/inject-queue-policy.js';
 import { stripAnsiForLog, tailChars } from './utils/crash-log.js';
 import { CodexUpdateDialogGuard } from './utils/codex-update-dialog.js';
 import { installStdioEpipeGuard, isIgnorableStreamError } from './utils/stdio-epipe-guard.js';
@@ -3644,13 +3644,31 @@ async function handleTuiKeys(keys: string[], isFinal: boolean): Promise<void> {
 const pendingInjections: PendingInjection[] = [];
 let injectionFlushing = false;
 
-/** 排队注入一行 TUI 命令：idle（isPromptReady）时经 sendRawCommandLine 敲入。 */
+/** 排队注入一行 TUI 命令：idle（isPromptReady）时经 sendRawCommandLineSerially 敲入。 */
 async function flushPendingInjections(): Promise<void> {
-  if (injectionFlushing) return;
-  if (bareShellLaunchBlocked) return;  // launch failed into a bare shell — don't type commands into it
+  // 不跨 restart 边界写入（与 flushPending 同款守卫）：destroySession 异步期间
+  // backend 可能仍指向旧 CLI。
+  if (cliRestartInProgress) return;
+  // 与其它 PTY 写入方的互斥判定收敛在 canStartInjectionFlush（纯函数，可单测）：
+  // - 用户消息 flush 持锁中（isFlushing）：markPromptReady 没有 isFlushing 守卫，
+  //   可能在 flush 中途被误 idle 触发（startup-command 的 quiescence 等待、慢
+  //   submit-verify 的 text→Enter 间隙都是多秒级窗口）——此时开始注入会把命令
+  //   拼进已敲了半条用户消息的 composer。flushPending 反向检查 injectionFlushing，
+  //   互斥必须对称才成立。
+  // - /rename 原生同步在飞（sessionRenameInFlight）与字面命令行写入窗口
+  //   （commandLineWritesPending）：raw-write 围栏，注入同为 raw 命令行写入方。
+  // 被挡下的注入不丢：队列留存，竞争写入方结束后的下一次 markPromptReady 再踢。
+  if (!canStartInjectionFlush({
+    injectionFlushing,
+    userFlushing: isFlushing,
+    sessionRenameInFlight,
+    commandLineWritesPending,
+    bareShellLaunchBlocked,
+  })) return;
   injectionFlushing = true;
   try {
-    while (pendingInjections.length > 0 && backend && isPromptReady && !bareShellLaunchBlocked) {
+    while (pendingInjections.length > 0 && backend && isPromptReady && !bareShellLaunchBlocked
+      && !sessionRenameInFlight) {
       // Mirror flushPending's one-shot launch-failure guard: when an injection is
       // the FIRST writer after a (re)spawn, flushPending may never have run
       // (pendingMessages empty ⇒ early return) so the bare-shell check must also
@@ -3665,7 +3683,9 @@ async function flushPendingInjections(): Promise<void> {
       isPromptReady = false;
       idleDetector?.reset();
       try {
-        await sendRawCommandLine(backend, cmd);
+        // Serially：与 startupCommands / raw_input / native-rename 共用同一条
+        // 字面命令行写入互斥链（text → beat → Enter 窗口不被拼接）。
+        await sendRawCommandLineSerially(backend, cmd);
         await awaitPtyQuiescence(STARTUP_CMD_QUIET_MS, STARTUP_CMD_CAP_MS);
         log(`Injected command: ${cmd}`);
       } catch (e: any) {
@@ -3674,9 +3694,12 @@ async function flushPendingInjections(): Promise<void> {
     }
   } finally {
     injectionFlushing = false;
-    // 若注入期间有用户消息被 flushPending 的 injectionFlushing 守卫挡下、
-    // 且此刻已重新 idle，补踢一次（flushPending 自带全部守卫，最坏 no-op）。
-    if (isPromptReady && pendingMessages.length > 0) void flushPending();
+    // 若注入期间有用户输入（消息 / raw input / rename）被 flushPending 的
+    // injectionFlushing 守卫挡下、且此刻已重新 idle，补踢一次（flushPending
+    // 自带全部守卫，最坏 no-op）。
+    if (isPromptReady && (pendingMessages.length > 0 || pendingRawInputs.length > 0 || pendingSessionRename !== null)) {
+      void flushPending();
+    }
   }
 }
 

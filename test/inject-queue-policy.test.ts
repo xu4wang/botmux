@@ -15,8 +15,10 @@
  */
 import { describe, it, expect } from 'vitest';
 import {
+  canStartInjectionFlush,
   shouldDeferUserFlush,
   shouldFlushInjectionsFirst,
+  type InjectionFlushGate,
   type PendingInjection,
 } from '../src/core/inject-queue-policy.js';
 
@@ -72,5 +74,39 @@ describe('shouldFlushInjectionsFirst', () => {
 
   it('prioritizes injections when multiple barriers are queued', () => {
     expect(shouldFlushInjectionsFirst([barrier('/cd ~/a'), barrier('/cd ~/b')])).toBe(true);
+  });
+});
+
+describe('canStartInjectionFlush', () => {
+  const idle: InjectionFlushGate = {
+    injectionFlushing: false,
+    userFlushing: false,
+    sessionRenameInFlight: false,
+    commandLineWritesPending: 0,
+    bareShellLaunchBlocked: false,
+  };
+
+  it('starts when no other writer owns the PTY', () => {
+    expect(canStartInjectionFlush(idle)).toBe(true);
+  });
+
+  it('defers while another injection flush is draining (re-entrancy mutex)', () => {
+    expect(canStartInjectionFlush({ ...idle, injectionFlushing: true })).toBe(false);
+  });
+
+  it('defers while a user-message flush holds its mutex — markPromptReady can fire mid-flush (spurious idle during startup-command quiescence or a slow submit-verify window) and must NOT start typing an injection into a composer already holding half a user message', () => {
+    expect(canStartInjectionFlush({ ...idle, userFlushing: true })).toBe(false);
+  });
+
+  it('defers while native /rename owns the TUI (in flight beyond the raw write window)', () => {
+    expect(canStartInjectionFlush({ ...idle, sessionRenameInFlight: true })).toBe(false);
+  });
+
+  it('defers while a literal command-line write (text → beat → Enter) is pending', () => {
+    expect(canStartInjectionFlush({ ...idle, commandLineWritesPending: 1 })).toBe(false);
+  });
+
+  it('never types into a bare shell after a failed launch', () => {
+    expect(canStartInjectionFlush({ ...idle, bareShellLaunchBlocked: true })).toBe(false);
   });
 });

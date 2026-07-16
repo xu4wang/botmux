@@ -47,3 +47,37 @@ export function shouldDeferUserFlush(pending: readonly PendingInjection[]): bool
 export function shouldFlushInjectionsFirst(pending: readonly PendingInjection[]): boolean {
   return pending.some(i => i.barrier);
 }
+
+/** Writer-state snapshot for deciding whether an injection flush may START.
+ *  All fields are other writers that own (or may own) the PTY input line. */
+export interface InjectionFlushGate {
+  /** An injection flush is already draining (re-entrancy mutex). */
+  injectionFlushing: boolean;
+  /** A user-message flush holds its mutex. markPromptReady can fire while a
+   *  flush is mid-write (spurious idle during startup-command quiescence or a
+   *  slow submit-verify window) and would otherwise start typing an injection
+   *  into a composer that already holds half a user message. flushPending
+   *  checks `injectionFlushing` in the opposite direction — the exclusion must
+   *  be symmetric or it isn't an exclusion. */
+  userFlushing: boolean;
+  /** Native /rename owns the TUI until its confirmation, beyond the raw write
+   *  window itself. */
+  sessionRenameInFlight: boolean;
+  /** A literal command-line write (text → beat → Enter) is in flight. */
+  commandLineWritesPending: number;
+  /** Launch failed into a bare shell — never type commands into it. */
+  bareShellLaunchBlocked: boolean;
+}
+
+/**
+ * True when `flushPendingInjections()` may begin draining the queue. Deferred
+ * injections are not lost: the queue persists and the next genuine
+ * `markPromptReady()` re-kicks the drain once the competing writer is done.
+ */
+export function canStartInjectionFlush(gate: InjectionFlushGate): boolean {
+  return !gate.injectionFlushing
+    && !gate.userFlushing
+    && !gate.sessionRenameInFlight
+    && gate.commandLineWritesPending === 0
+    && !gate.bareShellLaunchBlocked;
+}
