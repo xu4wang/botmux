@@ -2,10 +2,10 @@
  * Env vars that must never reach a spawned CLI child. The bot's IM-app creds
  * (a child CLI's own Lark OAuth reads `process.env.LARK_APP_ID` as the app to
  * authorize and gets hijacked by the botmux IM app → no docs scopes → 403
- * loop) and claude-code's nesting marker. The child resolves Lark via the
- * namespaced `BOTMUX_LARK_APP_ID` or via bots.json on disk (im/lark/client.ts);
- * the worker keeps its own bare creds (worker-pool.ts forkWorker) for
- * lark-upload — only the *child* is redacted.
+ * loop), daemon-side GitHub API tokens, and claude-code's nesting marker. The
+ * child resolves Lark via the namespaced `BOTMUX_LARK_APP_ID` or via bots.json
+ * on disk (im/lark/client.ts); the worker keeps its own bare creds
+ * (worker-pool.ts forkWorker) for lark-upload — only the *child* is redacted.
  *
  * Two leak vectors, two layers (both keyed off this list):
  *  - PTY / direct spawn: `redactChildEnv()` deletes them from the env object.
@@ -13,7 +13,13 @@
  *    client env can't override, so the shell wrapper `unset`s them before exec
  *    (see SHELL_WRAPPER_SCRIPT in tmux-backend.ts).
  */
-export const REDACTED_CHILD_ENV_KEYS = ['LARK_APP_ID', 'LARK_APP_SECRET', 'CLAUDECODE'] as const;
+export const REDACTED_CHILD_ENV_KEYS = [
+  'LARK_APP_ID',
+  'LARK_APP_SECRET',
+  'GITHUB_TOKEN',
+  'GH_TOKEN',
+  'CLAUDECODE',
+] as const;
 
 /**
  * Botmux-managed, session/bot-scoped env keys that reach the CLI pane via the
