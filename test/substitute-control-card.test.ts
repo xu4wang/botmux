@@ -105,7 +105,6 @@ function makeSession(over?: Partial<Session>): Session {
     updatedAt: new Date().toISOString(),
     pid: null,
     cliId: 'claude-code',
-    substituteTriggered: true,
     ...over,
   } as Session;
 }

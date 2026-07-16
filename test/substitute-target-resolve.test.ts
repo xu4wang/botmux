@@ -76,4 +76,17 @@ describe('resolveSubstituteTargets', () => {
     expect(targets).toEqual([]);
     expect(resolution).toEqual([{ input: 'ou_other_app', ok: false, reason: 'cross_app_open_id' }]);
   });
+
+  it('reports a THROWN profile lookup for a hand-typed open_id as resolve_failed, not cross-app', async () => {
+    // A transient network / rate-limit error must not tell the user their
+    // open_id "belongs to another app" — that misleads them into discarding a
+    // perfectly valid target. Only a definitive null profile is cross-app.
+    const flaky: SubstituteResolveDeps = {
+      resolveRaw: deps.resolveRaw,
+      getProfile: async () => { throw new Error('timeout'); },
+    };
+    const { targets, resolution } = await resolveSubstituteTargets('app', [{ openId: 'ou_direct' }], flaky);
+    expect(targets).toEqual([]);
+    expect(resolution).toEqual([{ input: 'ou_direct', ok: false, reason: 'resolve_failed' }]);
+  });
 });

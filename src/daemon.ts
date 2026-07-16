@@ -2275,7 +2275,10 @@ function streamingCardDisabledFor(ds: DaemonSession): boolean {
     const cfg = getBot(ds.larkAppId).config;
     return cfg.disableStreamingCard === true
       || (!!ds.chatId && !!cfg.noCardChats?.includes(ds.chatId))
-      || ds.session.substituteTriggered === true;
+      // Substitute (avatar-style) turns hide the streaming card per-turn: the
+      // shared chat-scope session serves substitute AND direct @bot turns, so a
+      // session-level latch would permanently kill cards for normal turns too.
+      || (ds.currentReplyTarget ?? ds.session.currentReplyTarget)?.substitute === true;
   } catch { return false; }
 }
 
@@ -13869,7 +13872,6 @@ async function handleNewTopic(data: any, ctx: RoutingContext): Promise<void> {
   session.quoteTargetSenderIsBot = parsed.senderType === 'app' || parsed.senderType === 'bot';
   session.lastMessageAt = new Date(now).toISOString();
   session.scope = scope;
-  session.substituteTriggered = !!substituteTrigger;
   sessionStore.updateSession(session);
   messageQueue.ensureQueue(anchor);
   messageQueue.appendMessage(anchor, parsed);
@@ -14616,12 +14618,6 @@ async function handleThreadReply(data: any, ctx: RoutingContext): Promise<void> 
     return;
   }
 
-  // Mark sessions reached via substitute-mode mention so the streaming card / web-terminal buttons stay off.
-  if (ds && substituteTrigger && !ds.session.substituteTriggered) {
-    ds.session.substituteTriggered = true;
-    sessionStore.updateSession(ds.session);
-  }
-
   // When a command path rewrites the model prompt (for example /workflow),
   // keep the Lark-authored bytes visible and move the rewritten instruction
   // into hidden untrusted context. Simple quote/bot prefixes use only the
@@ -14772,7 +14768,6 @@ async function handleThreadReply(data: any, ctx: RoutingContext): Promise<void> 
     session.quoteTargetSenderIsBot = isForeignBot;
     session.lastMessageAt = new Date(now).toISOString();
     session.scope = scope;
-    session.substituteTriggered = !!substituteTrigger;
     sessionStore.updateSession(session);
 
     const shouldSendSubstituteControlCard = substituteTrigger

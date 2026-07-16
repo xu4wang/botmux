@@ -1920,7 +1920,15 @@ function SubstituteModeSection(props: { bot: BotDefaultsRow; patchBot: PatchBot 
     };
   }
 
+  // Monotonic per-row resolve epoch: two quick blurs create two in-flight
+  // requests; only the latest one may apply, or a slow stale response would
+  // overwrite the fresh result (last-completion-wins race).
+  const resolveEpochs = useRef(new Map<number, number>());
+
   async function resolveTargetRow(key: number): Promise<void> {
+    const epoch = (resolveEpochs.current.get(key) ?? 0) + 1;
+    resolveEpochs.current.set(key, epoch);
+    const isCurrent = () => resolveEpochs.current.get(key) === epoch;
     setTargetRows(rows => rows.map(row => row.key === key ? { ...row, resolving: true } : row));
     try {
       const row = targetRows.find(r => r.key === key);
@@ -1933,13 +1941,17 @@ function SubstituteModeSection(props: { bot: BotDefaultsRow; patchBot: PatchBot 
       const target: BotSubstituteTarget = { [row.idField]: idValue };
       if (row.name.trim()) target.name = row.name.trim();
       const res = await resolveSubstituteTarget(props.bot.larkAppId, target);
+      if (!isCurrent()) return;
       setTargetRows(rows => rows.map(r => {
         if (r.key !== key) return r;
         if (!res.ok) return { ...r, resolving: false, resolution: { ok: false } };
         const entry = res.resolution;
         if (entry?.ok === true) {
+          // userId passthrough: nothing was verified (no openId / profile) —
+          // keep the editable name input instead of showing a fake chip.
+          if (!entry.openId) return { ...r, resolving: false, resolution: undefined };
           const persisted: BotSubstituteTarget = { ...r.persisted };
-          if (entry.openId) persisted.openId = entry.openId;
+          persisted.openId = entry.openId;
           if (entry.name) persisted.name = entry.name;
           if (entry.avatarUrl) persisted.avatarUrl = entry.avatarUrl;
           return {
@@ -1957,6 +1969,7 @@ function SubstituteModeSection(props: { bot: BotDefaultsRow; patchBot: PatchBot 
         };
       }));
     } catch {
+      if (!isCurrent()) return;
       setTargetRows(rows => rows.map(r => r.key === key ? { ...r, resolving: false, resolution: { ok: false } } : r));
     }
   }
@@ -2182,7 +2195,7 @@ function SubstituteModeSection(props: { bot: BotDefaultsRow; patchBot: PatchBot 
               <div className="bd-substitute-target-name">
                 {target.resolving ? (
                   <span className="bd-substitute-target-resolving">{tr('botDefaults.substituteResolving')}</span>
-                ) : target.resolution?.ok === true ? (
+                ) : target.resolution?.ok === true && (target.name || target.resolution.avatarUrl) ? (
                   <>
                     {target.resolution.avatarUrl ? (
                       <Html html={botAvatarHtml({ name: target.resolution.name, avatarUrl: target.resolution.avatarUrl, size: 'sm' })} />

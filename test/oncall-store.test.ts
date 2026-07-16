@@ -392,4 +392,46 @@ describe('default-oncall store persistence', () => {
     expect(registry.getBot('app_default').config.oncallChats).toEqual([]);
     expect(readConfig().defaultOncallAutoboundChats).toEqual(['oc_auto']);
   });
+
+  it('setWorkingDirMode keeps a tombstoned chat that was manually re-bound to another dir', async () => {
+    // History: oc_x was unbound (or auto-bound then released) → tombstoned, then
+    // the user manually re-bound it to a custom dir. Leaving oncall mode must
+    // NOT silently release that explicit binding — tombstone membership alone
+    // does not mean "currently auto-bound".
+    writeConfig({
+      oncallChats: [{ chatId: 'oc_x', workingDir: '/repos/my-custom' }],
+      defaultOncallAutoboundChats: ['oc_x'],
+      defaultOncall: { enabled: true, workingDir: '/repos/oncall', since: 5_000 },
+    });
+    const { registry, store } = await freshModules();
+    registry.loadBotConfigs().forEach(c => registry.registerBot(c));
+
+    const r = await store.setWorkingDirMode('app_default', 'default', '/repos/dwd');
+
+    expect(r.ok).toBe(true);
+    expect(readConfig().oncallChats).toEqual([{ chatId: 'oc_x', workingDir: '/repos/my-custom' }]);
+    expect(registry.getBot('app_default').config.oncallChats).toEqual([
+      { chatId: 'oc_x', workingDir: '/repos/my-custom' },
+    ]);
+  });
+
+  it('setWorkingDirMode does not release bindings when defaultOncall was not enabled', async () => {
+    // Tombstones can exist from plain /oncall unbind history without defaultOncall
+    // ever having been enabled; a working-dir mode save must not touch bindings.
+    writeConfig({
+      oncallChats: [{ chatId: 'oc_x', workingDir: '/repos/manual' }],
+      defaultOncallAutoboundChats: ['oc_x'],
+      defaultOncall: { enabled: false, workingDir: '/repos/manual', since: 5_000 },
+    });
+    const { registry, store } = await freshModules();
+    registry.loadBotConfigs().forEach(c => registry.registerBot(c));
+
+    const r = await store.setWorkingDirMode('app_default', 'default', '/repos/dwd');
+
+    expect(r.ok).toBe(true);
+    expect(readConfig().oncallChats).toEqual([{ chatId: 'oc_x', workingDir: '/repos/manual' }]);
+    expect(registry.getBot('app_default').config.oncallChats).toEqual([
+      { chatId: 'oc_x', workingDir: '/repos/manual' },
+    ]);
+  });
 });

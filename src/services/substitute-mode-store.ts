@@ -109,6 +109,10 @@ export async function resolveSubstituteTargets(
       let name = t.name;
       let avatarUrl: string | undefined;
       let profileReachable = true;
+      // A definitive null profile means this app cannot see the open_id
+      // (cross-app / out of contact scope); a THROWN lookup is a transient
+      // failure (network / rate limit) and must not masquerade as cross-app.
+      let unreachableReason: 'cross_app_open_id' | 'resolve_failed' = 'cross_app_open_id';
       try {
         const p = await deps.getProfile(larkAppId, openId);
         if (p?.name) { name = p.name; avatarUrl = p.avatarUrl; }
@@ -117,10 +121,10 @@ export async function resolveSubstituteTargets(
         // transient profile lookup failure is not fatal.
         else if (isRawOpenId) { profileReachable = false; }
       } catch {
-        if (isRawOpenId) profileReachable = false;
+        if (isRawOpenId) { profileReachable = false; unreachableReason = 'resolve_failed'; }
       }
       if (!profileReachable) {
-        resolution.push({ input: raw, ok: false, reason: 'cross_app_open_id' });
+        resolution.push({ input: raw, ok: false, reason: unreachableReason });
         continue;
       }
       resolution.push({ input: raw, ok: true, openId, name, avatarUrl });

@@ -274,7 +274,8 @@ function streamingCardDisabled(ds: DaemonSession): boolean {
     const cfg = getBot(ds.larkAppId).config;
     return cfg.disableStreamingCard === true
       || (!!ds.chatId && !!cfg.noCardChats?.includes(ds.chatId))
-      || ds.session.substituteTriggered === true;
+      // Per-turn substitute gate — see streamingCardDisabledFor in daemon.ts.
+      || (ds.currentReplyTarget ?? ds.session.currentReplyTarget)?.substitute === true;
   } catch { return false; }
 }
 

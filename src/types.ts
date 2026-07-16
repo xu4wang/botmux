@@ -249,8 +249,6 @@ export interface Session {
   whiteboardId?: string;
   /** CLI-native resume id when it differs from botmux's sessionId (for example Codex thread id). */
   cliSessionId?: string;
-  /** True when this session was triggered by substitute-mode mention. Used to suppress the streaming card / web-terminal buttons for avatar-style sessions. */
-  substituteTriggered?: boolean;
   /**
    * Set true when the idle-worker sweeper suspends this session over the per-bot
    * live cap: the worker AND the backing tmux/herdr/zellij session (+ CLI) were

@@ -231,18 +231,23 @@ export async function setWorkingDirMode(
       nextWorkingDir = mode === 'default' ? dir : null;
     }
 
-    // Leaving oncall mode: any chats that were auto-bound by the defaultOncall
-    // flow must be released so they fall back to the bot-level defaultWorkingDir
-    // (or the repo-select card) instead of staying pinned to the old oncall dir.
-    // Manually bound chats (not in the autobound list) are intentionally kept.
+    // Leaving an ENABLED oncall mode: chats that were auto-bound by the
+    // defaultOncall flow must be released so they fall back to the bot-level
+    // defaultWorkingDir (or the repo-select card) instead of staying pinned to
+    // the old oncall dir. `defaultOncallAutoboundChats` is a tombstone list
+    // ("auto-bind's one shot is spent") — manual unbinds land there too and a
+    // manual re-bind does NOT remove the entry — so tombstone membership alone
+    // cannot distinguish a live auto-bind from a manual re-bind. Release only
+    // chats that ALSO still point at the outgoing oncall dir: a manual re-bind
+    // to a different dir is the user's explicit choice and is kept.
     const autobound: string[] = Array.isArray(entry.defaultOncallAutoboundChats)
       ? entry.defaultOncallAutoboundChats : [];
     let removedAutoboundChats: string[] = [];
-    if (mode !== 'oncall' && autobound.length > 0) {
+    if (mode !== 'oncall' && prior?.enabled === true && autobound.length > 0) {
       const cur: OncallChat[] = Array.isArray(entry.oncallChats) ? entry.oncallChats : [];
       const kept: OncallChat[] = [];
       for (const c of cur) {
-        if (c && autobound.includes(c.chatId)) {
+        if (c && autobound.includes(c.chatId) && c.workingDir === prior.workingDir) {
           removedAutoboundChats.push(c.chatId);
         } else {
           kept.push(c);

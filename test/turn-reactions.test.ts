@@ -126,14 +126,29 @@ describe('two-phase turn reactions', () => {
     expect(ds.pendingAckReactions?.map(a => a.messageId)).toEqual(['om_sub']);
   });
 
-  it('substitute-triggered session is card-off even when streaming card is globally enabled', async () => {
+  it('substitute turn is card-off even when streaming card is globally enabled', async () => {
     registerWith(false);
-    const ds = makeDs({ session: { sessionId: 'sess-sub', chatId: 'oc_x', rootMessageId: 'om_root', substituteTriggered: true } });
+    const ds = makeDs({
+      currentReplyTarget: { rootMessageId: 'om_trigger', turnId: 'om_a', updatedAt: new Date().toISOString(), substitute: true },
+    });
 
     await noteTurnReceived(ds, 'om_a');
 
     expect(mocks.addReaction).toHaveBeenCalledWith(APP, 'om_a', 'GoGoGo');
     expect(ds.pendingAckReactions?.map(a => a.messageId)).toEqual(['om_a']);
+  });
+
+  it('a later non-substitute turn in the same session gets the streaming card back (no session latch)', async () => {
+    registerWith(false);
+    const ds = makeDs({
+      // A direct @bot turn overwrote the reply target: substitute flag gone.
+      currentReplyTarget: { rootMessageId: 'om_direct', turnId: 'om_b', updatedAt: new Date().toISOString() },
+    });
+
+    await noteTurnReceived(ds, 'om_b');
+
+    expect(mocks.addReaction).not.toHaveBeenCalled();
+    expect(ds.pendingAckReactions ?? []).toEqual([]);
   });
 
   it('silentTurnReactions suppresses receipt reactions in card-off sessions', async () => {
