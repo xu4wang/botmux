@@ -7,6 +7,7 @@ import { join } from 'node:path';
 import { startIpcServer, setLarkAppId, setIpcAuthSecret, setBotRenamer, type IpcServerHandle } from '../src/core/dashboard-ipc-server.js';
 import { dashboardEventBus } from '../src/core/dashboard-events.js';
 import * as groupsStore from '../src/services/groups-store.js';
+import * as larkClient from '../src/im/lark/client.js';
 import * as oncallStore from '../src/services/oncall-store.js';
 import * as sessionStore from '../src/services/session-store.js';
 import * as workerPool from '../src/core/worker-pool.js';
@@ -1362,6 +1363,47 @@ describe('POST /api/groups/create', () => {
     bindSpy.mockRestore();
     addSpy.mockRestore();
     createSpy.mockRestore();
+  });
+});
+
+describe('POST /api/groups/transfer-owner', () => {
+  it('completes a deferred transfer by union_id and notifies the new owner', async () => {
+    setLarkAppId('test-app');
+    const transferSpy = vi.spyOn(groupsStore, 'transferChatOwner').mockResolvedValue({ ok: true });
+    const notifySpy = vi.spyOn(larkClient, 'sendMessage').mockResolvedValue('om_owner');
+    handle = await startIpcServer({ port: 0, host: '127.0.0.1' });
+    const res = await fetch(`http://127.0.0.1:${handle.port}/api/groups/transfer-owner`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ chatId: 'oc_new', ownerUnionId: 'on_operator' }),
+    });
+    expect(res.status).toBe(200);
+    expect(await res.json()).toMatchObject({
+      ok: true,
+      ownerTransferredTo: 'on_operator',
+      transferError: null,
+      notifyMessageId: 'om_owner',
+    });
+    expect(transferSpy).toHaveBeenCalledWith('test-app', 'oc_new', 'on_operator', 'union_id');
+    expect(notifySpy).toHaveBeenCalledWith(
+      'test-app', 'oc_new', '<at user_id="on_operator"></at>', 'text',
+    );
+    notifySpy.mockRestore();
+    transferSpy.mockRestore();
+  });
+
+  it('rejects malformed chat or union ids before calling Feishu', async () => {
+    setLarkAppId('test-app');
+    const transferSpy = vi.spyOn(groupsStore, 'transferChatOwner').mockResolvedValue({ ok: true });
+    handle = await startIpcServer({ port: 0, host: '127.0.0.1' });
+    const res = await fetch(`http://127.0.0.1:${handle.port}/api/groups/transfer-owner`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ chatId: 'bad', ownerUnionId: 'ou_wrong_scope' }),
+    });
+    expect(res.status).toBe(400);
+    expect(transferSpy).not.toHaveBeenCalled();
+    transferSpy.mockRestore();
   });
 });
 
