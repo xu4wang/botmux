@@ -193,9 +193,28 @@ export async function sweepAbandonedV3DistillationScratch(input: {
       removed++;
       continue;
     }
-    if (existsSync(join(path, MODEL_PREPARING_FILE))) {
-      // The daemon may have crashed after spawning bwrap but before publishing
-      // the namespace identity. No ownership proof means no age-based delete.
+    // Process marker missing: inspect the pre-spawn preparing marker. A live
+    // owner still means setup may be in flight. A dead (or rebooted) owner is
+    // enough to age out — bwrap is launched with --die-with-parent, so the
+    // monitor cannot outlive the recorded daemon owner. Corrupt preparing
+    // evidence stays fail-closed for manual inspection.
+    const preparingRead = readModelPreparingMarker(path);
+    if (preparingRead.kind === 'invalid') continue;
+    if (preparingRead.kind === 'valid') {
+      const preparing = preparingRead.marker;
+      if (
+        preparing.bootId !== undefined &&
+        bootId &&
+        preparing.bootId !== bootId
+      ) {
+        await rm(path, { recursive: true, force: true, maxRetries: 2, retryDelay: 25 });
+        removed++;
+        continue;
+      }
+      if (readProcessStartIdentity(preparing.ownerPid) === preparing.ownerProcStart) continue;
+      if (nowMs - info.mtimeMs < maxAgeMs) continue;
+      await rm(path, { recursive: true, force: true, maxRetries: 2, retryDelay: 25 });
+      removed++;
       continue;
     }
     if (nowMs - info.mtimeMs < maxAgeMs) continue;
@@ -309,6 +328,60 @@ function readModelProcessMarker(scratchDir: string): ModelProcessMarkerRead {
       ))
     ) return { kind: 'invalid' };
     return { kind: 'valid', marker: raw as unknown as ModelProcessMarker };
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return { kind: 'missing' };
+    return { kind: 'invalid' };
+  }
+}
+
+interface ModelPreparingMarker {
+  schemaVersion: 1;
+  ownerPid: number;
+  ownerProcStart: string;
+  /** Optional stronger reboot proof; older markers may omit it. */
+  bootId?: string;
+}
+
+type ModelPreparingMarkerRead =
+  | { kind: 'missing' }
+  | { kind: 'invalid' }
+  | { kind: 'valid'; marker: ModelPreparingMarker };
+
+function readModelPreparingMarker(scratchDir: string): ModelPreparingMarkerRead {
+  const path = join(scratchDir, MODEL_PREPARING_FILE);
+  try {
+    const stat = lstatSync(path);
+    if (!stat.isFile() || stat.isSymbolicLink() || stat.nlink !== 1 ||
+        (process.platform !== 'win32' && (stat.mode & 0o777) !== 0o600) || stat.size > 4096) {
+      return { kind: 'invalid' };
+    }
+    const raw = JSON.parse(readFileSync(path, 'utf8')) as Record<string, unknown>;
+    if (
+      raw.schemaVersion !== 1 ||
+      !Number.isSafeInteger(raw.ownerPid) || (raw.ownerPid as number) <= 0 ||
+      typeof raw.ownerProcStart !== 'string' || raw.ownerProcStart.length === 0 || raw.ownerProcStart.length > 256
+    ) {
+      return { kind: 'invalid' };
+    }
+    let bootId: string | undefined;
+    if (raw.bootId !== undefined) {
+      if (
+        typeof raw.bootId !== 'string' ||
+        !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(raw.bootId)
+      ) {
+        return { kind: 'invalid' };
+      }
+      bootId = raw.bootId;
+    }
+    return {
+      kind: 'valid',
+      marker: {
+        schemaVersion: 1,
+        ownerPid: raw.ownerPid as number,
+        ownerProcStart: raw.ownerProcStart as string,
+        ...(bootId ? { bootId } : {}),
+      },
+    };
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code === 'ENOENT') return { kind: 'missing' };
     return { kind: 'invalid' };
@@ -884,6 +957,7 @@ async function invokeStructuredModel(input: V3DistillationStructuredInvocation):
         schemaVersion: 1,
         ownerPid: process.pid,
         ownerProcStart,
+        bootId,
       })}\n`, { encoding: 'utf8', mode: 0o600, flag: 'wx' });
       fsyncRegularFileSync(preparingPath);
       fsyncDirectorySyncPortable(input.cwd);

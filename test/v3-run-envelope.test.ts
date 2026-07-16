@@ -6,6 +6,7 @@ import {
   readFileSync,
   readdirSync,
   rmSync,
+  symlinkSync,
   writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -314,6 +315,45 @@ describe('v3 run envelope — create-once publication + read states', () => {
       expect(readRunEnvelope(runDir)).toMatchObject({ kind: 'missing' });
       writeFileSync(join(runDir, V3_RUN_ENVELOPE_FILE), '{broken');
       expect(readRunEnvelope(runDir)).toMatchObject({ kind: 'invalid' });
+    } finally {
+      rmSync(base, { recursive: true, force: true });
+    }
+  });
+
+  it('treats dangling symlink run.json as invalid, not missing', () => {
+    const { base, runDir } = freshRun();
+    try {
+      const envelopePath = join(runDir, V3_RUN_ENVELOPE_FILE);
+      symlinkSync(join(runDir, 'does-not-exist.json'), envelopePath);
+      // existsSync follows the dangling target and reports false; the reader
+      // must still fail closed so callers cannot fall back to legacy grill.
+      expect(existsSync(envelopePath)).toBe(false);
+      const read = readRunEnvelope(runDir);
+      expect(read.kind).toBe('invalid');
+      if (read.kind === 'invalid') {
+        expect(read.problems.join(' ')).toMatch(/regular file|ELOOP|EPERM/i);
+      }
+      expect(() => loadAuthorizedV3Run(runDir)).toThrowError(expect.objectContaining({
+        code: 'envelope_invalid',
+      }));
+    } finally {
+      rmSync(base, { recursive: true, force: true });
+    }
+  });
+
+  it('rejects a resolvable symlink or non-regular run.json path as invalid', () => {
+    const { base, runDir } = freshRun();
+    try {
+      const target = join(runDir, 'outside.json');
+      writeFileSync(target, '{"schemaVersion":1}\n');
+      symlinkSync(target, join(runDir, V3_RUN_ENVELOPE_FILE));
+      expect(readRunEnvelope(runDir).kind).toBe('invalid');
+
+      rmSync(join(runDir, V3_RUN_ENVELOPE_FILE), { force: true });
+      mkdirSync(join(runDir, V3_RUN_ENVELOPE_FILE));
+      expect(readRunEnvelope(runDir)).toMatchObject({
+        kind: 'invalid',
+      });
     } finally {
       rmSync(base, { recursive: true, force: true });
     }

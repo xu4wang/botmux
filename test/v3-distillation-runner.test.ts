@@ -1047,4 +1047,71 @@ describe('sweepAbandonedV3DistillationScratch', () => {
     })).toBe(0);
     expect(existsSync(scratch)).toBe(true);
   });
+
+  it('ages out preparing-only scratch when the recorded owner is dead', async () => {
+    const dirs = fixture();
+    const old = join(dirs.scratchParent, 'botmux-v3-distill-preparing-dead');
+    const live = join(dirs.scratchParent, 'botmux-v3-distill-preparing-live');
+    mkdirSync(old, { mode: 0o700 });
+    mkdirSync(live, { mode: 0o700 });
+    const liveStart = readProcessStartIdentity(process.pid);
+    expect(liveStart).toBeDefined();
+    writeFileSync(join(old, '.model-preparing.json'), `${JSON.stringify({
+      schemaVersion: 1,
+      ownerPid: 999_999_999,
+      ownerProcStart: 'dead-owner',
+    })}\n`, { mode: 0o600 });
+    writeFileSync(join(live, '.model-preparing.json'), `${JSON.stringify({
+      schemaVersion: 1,
+      ownerPid: process.pid,
+      ownerProcStart: liveStart,
+    })}\n`, { mode: 0o600 });
+    const nowMs = Date.now();
+    utimesSync(old, new Date(nowMs - 3 * 3_600_000), new Date(nowMs - 3 * 3_600_000));
+    utimesSync(live, new Date(nowMs - 3 * 3_600_000), new Date(nowMs - 3 * 3_600_000));
+
+    expect(await sweepAbandonedV3DistillationScratch({
+      scratchParent: dirs.scratchParent,
+      nowMs,
+      maxAgeMs: 31 * 60_000,
+    })).toBe(1);
+    expect(existsSync(old)).toBe(false);
+    expect(existsSync(live)).toBe(true);
+  });
+
+  it('removes preparing-only scratch after a boot-id mismatch without waiting for age', async () => {
+    if (process.platform !== 'linux') return;
+    const dirs = fixture();
+    const scratch = join(dirs.scratchParent, 'botmux-v3-distill-preparing-boot');
+    mkdirSync(scratch, { mode: 0o700 });
+    const currentBootId = readLinuxBootIdentity();
+    expect(currentBootId).toBeDefined();
+    const staleBootId = `${currentBootId!.startsWith('0') ? '1' : '0'}${currentBootId!.slice(1)}`;
+    writeFileSync(join(scratch, '.model-preparing.json'), `${JSON.stringify({
+      schemaVersion: 1,
+      ownerPid: process.pid,
+      ownerProcStart: 'any-start',
+      bootId: staleBootId,
+    })}\n`, { mode: 0o600 });
+
+    expect(await sweepAbandonedV3DistillationScratch({
+      scratchParent: dirs.scratchParent,
+      maxAgeMs: 31 * 60_000,
+    })).toBe(1);
+    expect(existsSync(scratch)).toBe(false);
+  });
+
+  it('retains corrupt preparing markers instead of aging them out', async () => {
+    const dirs = fixture();
+    const scratch = join(dirs.scratchParent, 'botmux-v3-distill-preparing-corrupt');
+    mkdirSync(scratch, { mode: 0o700 });
+    writeFileSync(join(scratch, '.model-preparing.json'), '{not-json}\n', { mode: 0o600 });
+    utimesSync(scratch, new Date(0), new Date(0));
+
+    expect(await sweepAbandonedV3DistillationScratch({
+      scratchParent: dirs.scratchParent,
+      maxAgeMs: 31 * 60_000,
+    })).toBe(0);
+    expect(existsSync(scratch)).toBe(true);
+  });
 });

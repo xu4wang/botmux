@@ -15,8 +15,9 @@
 import { createHash, randomBytes } from 'node:crypto';
 import {
   closeSync,
-  existsSync,
+  constants,
   fchmodSync,
+  fstatSync,
   fsyncSync,
   linkSync,
   lstatSync,
@@ -314,14 +315,55 @@ export type ReadRunEnvelopeResult =
  * Defensive reader that preserves the crucial missing-vs-corrupt distinction.
  * Compatibility callers may fall back to grill state only for `missing`; an
  * existing invalid envelope must fail closed.
+ *
+ * Only a true ENOENT is `missing`. An existing path that is a symlink, FIFO,
+ * directory, device, or otherwise non-regular file is always `invalid` — even
+ * when a dangling symlink would make existsSync/stat follow-and-miss. Reads use
+ * O_NOFOLLOW + fstat so a TOCTOU swap cannot turn a checked regular file into
+ * an out-of-tree symlink.
  */
 export function readRunEnvelope(runDir: string, expectedRunId: string = basename(runDir)): ReadRunEnvelopeResult {
   const path = join(runDir, V3_RUN_ENVELOPE_FILE);
-  if (!existsSync(path)) return { kind: 'missing', path };
-  let raw: unknown;
+  let fd: number | undefined;
   let bytes: Buffer;
   try {
-    bytes = readFileSync(path);
+    fd = openSync(path, constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0));
+    const st = fstatSync(fd);
+    // Reject symlinks (O_NOFOLLOW already fails open on Linux with ELOOP),
+    // directories, FIFOs, devices, and anything else that is not a plain file.
+    if (!st.isFile()) {
+      return {
+        kind: 'invalid',
+        path,
+        problems: ['run.json must be a regular file'],
+      };
+    }
+    bytes = readFileSync(fd);
+  } catch (err) {
+    const code = (err as NodeJS.ErrnoException).code;
+    if (code === 'ENOENT') return { kind: 'missing', path };
+    // ELOOP (Linux O_NOFOLLOW on symlink), EPERM (some NOFOLLOW platforms),
+    // and EISDIR all mean "path exists but is not a usable regular file".
+    if (code === 'ELOOP' || code === 'EPERM' || code === 'EISDIR' || code === 'ENOTDIR') {
+      return {
+        kind: 'invalid',
+        path,
+        problems: [`run.json must be a regular file (${code})`],
+      };
+    }
+    return {
+      kind: 'invalid',
+      path,
+      problems: [`cannot read run.json: ${err instanceof Error ? err.message : String(err)}`],
+    };
+  } finally {
+    if (fd !== undefined) {
+      try { closeSync(fd); } catch { /* best effort */ }
+    }
+  }
+
+  let raw: unknown;
+  try {
     raw = JSON.parse(bytes.toString('utf-8'));
   } catch (err) {
     return {

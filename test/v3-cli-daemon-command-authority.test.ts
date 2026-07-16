@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, rmSync, symlinkSync, unlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -201,6 +201,23 @@ describe('agent-facing v3 daemon command authority', () => {
     writeFileSync(join(runDir, 'run.json'), '{not-json');
 
     expect(() => authorize('invalid-envelope')).toThrow(/run.json 无效.*拒绝降级/);
+  });
+
+  it('fails closed when run.json is a dangling symlink instead of falling back to grill', () => {
+    writeMarker();
+    writeSession();
+    const { runDir } = birthRun({
+      goal: 'dangling envelope',
+      baseDir,
+      runId: 'dangling-envelope',
+      chatBinding: BINDING,
+    });
+    // Replace any pre-created envelope with a dangling symlink. existsSync would
+    // report missing and previously opened the missing-only legacy path.
+    try { unlinkSync(join(runDir, 'run.json')); } catch { /* optional */ }
+    symlinkSync(join(runDir, 'missing-target.json'), join(runDir, 'run.json'));
+
+    expect(() => authorize('dangling-envelope')).toThrow(/run.json 无效.*拒绝降级/);
   });
 
   it('keeps the old unbound manual-run fallback but rejects empty unknown dirs', () => {
