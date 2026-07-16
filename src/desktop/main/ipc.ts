@@ -31,7 +31,7 @@ export function registerDesktopIpc(args: {
   ipcMain.handle('desktop:locate-dashboard', () => locateDashboard(args.runtime));
   ipcMain.handle('desktop:get-dashboard-url', async () => {
     const result = await args.runtime.dashboard();
-    return result.code === 0 ? result.stdout.trim() : null;
+    return result.code === 0 ? selectDesktopDashboardUrl(result.stdout) : null;
   });
   ipcMain.handle('desktop:list-log-targets', () => listTargets(args.paths));
   ipcMain.handle('desktop:tail-logs', (_event, targetId: unknown) => {
@@ -129,7 +129,7 @@ async function locateDashboard(runtime: RuntimeService): Promise<DashboardLocate
   }
 
   const current = await runtime.currentDashboard();
-  const currentUrl = current.code === 0 ? current.stdout.trim() : '';
+  const currentUrl = current.code === 0 ? selectDesktopDashboardUrl(current.stdout) : '';
   if (currentUrl) return validateLocatedDashboard(currentUrl, 'current');
   if (!isNoActiveDashboardToken(current)) {
     const message = current.stderr.trim() || current.stdout.trim() || `Dashboard lookup failed with exit code ${current.code}`;
@@ -141,7 +141,7 @@ async function locateDashboard(runtime: RuntimeService): Promise<DashboardLocate
   }
 
   const result = await runtime.dashboard();
-  const url = result.code === 0 ? result.stdout.trim() : '';
+  const url = result.code === 0 ? selectDesktopDashboardUrl(result.stdout) : '';
   if (url) {
     return validateLocatedDashboard(url, 'rotated');
   }
@@ -152,6 +152,42 @@ async function locateDashboard(runtime: RuntimeService): Promise<DashboardLocate
     reason: classifyDashboardLocateFailure(message),
     message,
   };
+}
+
+function selectDesktopDashboardUrl(output: string): string {
+  const urls = extractHttpUrls(output);
+  if (urls.length === 0) return output.trim();
+  return urls.find(isLocalDashboardUrl) ?? urls[0] ?? output.trim();
+}
+
+function extractHttpUrls(output: string): string[] {
+  return output
+    .split(/\r?\n/)
+    .flatMap(line => [...line.matchAll(/https?:\/\/[^\s]+/g)].map(match => trimUrlSuffix(match[0])))
+    .filter(Boolean);
+}
+
+function trimUrlSuffix(url: string): string {
+  return url.replace(/[),.;，。；）]+$/u, '');
+}
+
+function isLocalDashboardUrl(url: string): boolean {
+  try {
+    const host = new URL(url).hostname.toLowerCase();
+    return host === 'localhost'
+      || host === '127.0.0.1'
+      || host === '[::1]'
+      || isPrivateIpv4(host);
+  } catch {
+    return false;
+  }
+}
+
+function isPrivateIpv4(host: string): boolean {
+  const parts = host.split('.').map(part => Number(part));
+  if (parts.length !== 4 || parts.some(part => !Number.isInteger(part) || part < 0 || part > 255)) return false;
+  const [a, b] = parts;
+  return a === 10 || (a === 172 && b >= 16 && b <= 31) || (a === 192 && b === 168);
 }
 
 async function validateLocatedDashboard(

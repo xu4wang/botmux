@@ -14,7 +14,27 @@ describe('desktop dashboard compat validation', () => {
     }));
 
     await expect(validateDashboardCompat('http://127.0.0.1:7891/?token=x', { fetch })).resolves.toEqual({ ok: true });
-    expect(fetch).toHaveBeenCalledWith('http://127.0.0.1:7891/__desktop/compat', expect.any(Object));
+    expect(fetch).toHaveBeenCalledWith('http://127.0.0.1:7891/__desktop/compat?token=x', expect.any(Object));
+  });
+
+  it('preserves platform dashboard auth query params when probing compat', async () => {
+    const { validateDashboardCompat } = await import('../../src/desktop/main/dashboard-compat.js');
+    const fetch = vi.fn().mockResolvedValue(response(200, {
+      schemaVersion: 1,
+      product: 'botmux',
+      runtimeVersion: '2.95.0',
+      dashboardProtocolVersion: 1,
+      desktopShell: { supported: true },
+      features: ['desktop-shell'],
+      routes: ['#/'],
+    }));
+
+    await expect(validateDashboardCompat('https://m-test.botmux.bytedance.net/?t=secret-token#/sessions', { fetch }))
+      .resolves.toEqual({ ok: true });
+    expect(fetch).toHaveBeenCalledWith(
+      'https://m-test.botmux.bytedance.net/__desktop/compat?t=secret-token',
+      expect.any(Object),
+    );
   });
 
   it('degrades safely when an old CLI does not expose the compat manifest', async () => {

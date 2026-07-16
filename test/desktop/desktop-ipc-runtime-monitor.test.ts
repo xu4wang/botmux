@@ -168,6 +168,50 @@ describe('desktop dashboard locate IPC', () => {
     await expect(handlers.get('desktop:get-dashboard-url')?.({} as any)).resolves.toBe('http://127.0.0.1:7891/?t=x');
   });
 
+  it('prefers the local direct dashboard URL from multi-line CLI output', async () => {
+    const { registerDesktopIpc } = await import('../../src/desktop/main/ipc.js');
+    const fetch = vi.fn().mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: vi.fn().mockResolvedValue({
+        schemaVersion: 1,
+        product: 'botmux',
+        runtimeVersion: '2.95.0',
+        dashboardProtocolVersion: 1,
+        desktopShell: { supported: true },
+        features: ['desktop-shell'],
+        routes: ['#/'],
+      }),
+    });
+    vi.stubGlobal('fetch', fetch);
+    const output = [
+      'https://m-test.botmux.bytedance.net/?t=platform-token',
+      '本地直连(平台异常时可用): http://10.92.89.226:7891/?t=local-token',
+    ].join('\n');
+    const runtime = {
+      getState: vi.fn().mockResolvedValue({ status: 'running' }),
+      start: vi.fn(),
+      stop: vi.fn(),
+      restart: vi.fn(),
+      takeover: vi.fn(),
+      currentDashboard: vi.fn().mockResolvedValue({ code: 0, stdout: `${output}\n`, stderr: '' }),
+      dashboard: vi.fn().mockResolvedValue({ code: 0, stdout: `${output}\n`, stderr: '' }),
+    };
+
+    registerDesktopIpc({
+      paths: desktopPaths,
+      runtime: runtime as any,
+    });
+
+    await expect(handlers.get('desktop:locate-dashboard')?.({} as any)).resolves.toEqual({
+      ok: true,
+      url: 'http://10.92.89.226:7891/?t=local-token',
+      source: 'current',
+    });
+    expect(fetch).toHaveBeenCalledWith('http://10.92.89.226:7891/__desktop/compat?t=local-token', expect.any(Object));
+    await expect(handlers.get('desktop:get-dashboard-url')?.({} as any)).resolves.toBe('http://10.92.89.226:7891/?t=local-token');
+  });
+
   it('rotates a dashboard URL only when no active dashboard token exists', async () => {
     const { registerDesktopIpc } = await import('../../src/desktop/main/ipc.js');
     vi.stubGlobal('fetch', vi.fn().mockResolvedValue({

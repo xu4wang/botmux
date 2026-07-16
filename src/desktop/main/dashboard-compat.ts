@@ -30,7 +30,13 @@ export async function validateDashboardCompat(
 ): Promise<DashboardCompatResult> {
   let compatUrl: string;
   try {
-    compatUrl = new URL('/__desktop/compat', dashboardUrl).toString();
+    const parsed = new URL(dashboardUrl);
+    // Preserve auth query params from dashboard URLs. Platform tunnel links use
+    // `?t=...` before the hash; dropping it makes the compat probe look like an
+    // old/incompatible CLI even when the local dashboard is current.
+    parsed.pathname = '/__desktop/compat';
+    parsed.hash = '';
+    compatUrl = parsed.toString();
   } catch {
     return {
       ok: false,
