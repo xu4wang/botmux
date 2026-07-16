@@ -115,6 +115,7 @@ import { normalizeKanbanColumn, normalizeKanbanPosition, normalizeSessionTitle }
 import { validateSlashInjection } from './slash-inject.js';
 import { validateRoleLibraryPath } from './role-library.js';
 import { repinSessionWorkingDir } from './session-cwd.js';
+import { authorizeSessionScopedIpc } from './daemon-ipc-session-auth.js';
 import type { CliId } from '../adapters/cli/types.js';
 import { updateSessionTitle } from './session-title.js';
 import { requestAgentSessionRename } from './session-rename.js';
@@ -221,6 +222,11 @@ function routeHasNarrowUntrustedAuth(method: string, pathname: string): boolean 
   // forge readiness or an ask for that session.
   if (method === 'POST' && pathname === '/api/session-ready') return true;
   if (method === 'POST' && pathname === '/api/asks') return true;
+  // botmux slash / botmux cd（角色切换）：合法调用方是会话内的 CLI 自身，沙箱 /
+  // 读隔离下读不到 host secret。两个 handler 内验证该会话的 rotating per-turn
+  // capability 并绑定到 URL 里的 sessionId（同 /api/asks 姿势）——capability 只
+  // 证明「我是这个会话当前这一轮的 CLI」，选不了别的会话。
+  if (method === 'POST' && /^\/api\/sessions\/[^/]+\/(?:slash|cd)$/.test(pathname)) return true;
   if (method === 'POST' && pathname === '/api/hooks/emit') return true;
   if (method === 'POST' && pathname === '/api/attention') return true;
   // Workflow v3 mutations carry their own domain-separated full-envelope
@@ -389,11 +395,47 @@ ipcRoute('POST', '/api/sessions/:sessionId/suspend', (_req, res, params) => {
   jsonRes(res, 200, { ok: true, sessionId: params.sessionId, suspended: true });
 });
 
+/** 会话级 CLI IPC（slash/cd）的调用方证明：trusted-host（.dashboard-secret HMAC，
+ *  外层 gate 已验）直接放行；否则（沙箱/读隔离 CLI 读不到 secret，走
+ *  routeHasNarrowUntrustedAuth 窄孔进来）必须出示该会话当前轮换的 capability，
+ *  与 daemon 活跃记录里的 managedTurnOrigin 比对（/api/asks 同款姿势）。
+ *  capability 只证明「我是这个会话当前这一轮的 CLI」——绑定 URL sessionId，
+ *  拿到别的 sessionId 也伪造不了它的 capability。会话不存在时对未签名调用方
+ *  同样回 origin_unproven，不提供「哪些 sessionId 活跃」的探针。 */
+function sessionCliIpcAuth(
+  req: IncomingMessage,
+  ds: DaemonSession | undefined,
+  sessionId: string,
+  body: Record<string, unknown> | undefined,
+): { ok: true } | { ok: false; error: string } {
+  const claimedAttempt = typeof body?.originDispatchAttempt === 'number'
+    && Number.isSafeInteger(body.originDispatchAttempt)
+    && body.originDispatchAttempt > 0
+    ? body.originDispatchAttempt
+    : undefined;
+  const decision = authorizeSessionScopedIpc({
+    trustedHost: isTrustedHostIpcRequest(req),
+    sessionExists: !!ds,
+    receiverSession: !!ds?.session.vcMeetingReceiver,
+    allowReceiver: false,
+    sessionId,
+    liveOrigin: ds?.managedTurnOrigin,
+    claimedCapability: typeof body?.originCapability === 'string' ? body.originCapability : undefined,
+    claimedTurnId: typeof body?.originTurnId === 'string' ? body.originTurnId : undefined,
+    claimedDispatchAttempt: claimedAttempt,
+  });
+  return decision.ok ? { ok: true } : { ok: false, error: decision.error };
+}
+
 /** 向本会话 CLI 注入一条 allowlist 内的原生斜杠命令（idle 后生效）。
- *  Loopback-trusted（同 suspend/resume）：签名所需 .dashboard-secret 被读隔离
- *  deny，沙箱内 CLI 无法签名；安全边界由 allowlist（默认空=全拒）承担。 */
+ *  鉴权双路径（见 sessionCliIpcAuth）：trusted-host 签名或本会话 rotating
+ *  capability；命令面由 allowlist（默认空=全拒）承担。 */
 ipcRoute('POST', '/api/sessions/:sessionId/slash', async (req, res, params) => {
+  const body = await readJsonBody<{ command?: string } & Record<string, unknown>>(req)
+    .catch(() => ({} as { command?: string } & Record<string, unknown>));
   const ds = findActiveBySessionId(params.sessionId);
+  const auth = sessionCliIpcAuth(req, ds, params.sessionId, body);
+  if (!auth.ok) return jsonRes(res, 403, { ok: false, error: auth.error });
   if (!ds) return jsonRes(res, 404, { ok: false, error: 'session_not_active' });
   // Adopt/observed 会话是收编的用户自有 pane，用户可能正在里面打字——机器注入
   // 会与人的输入交错。与 /suspend、/restart 同款排除。
@@ -401,7 +443,6 @@ ipcRoute('POST', '/api/sessions/:sessionId/slash', async (req, res, params) => {
     return jsonRes(res, 409, { ok: false, error: 'adopt_inject_unsupported' });
   }
   if (!ds.worker || ds.worker.killed) return jsonRes(res, 409, { ok: false, error: 'no_live_worker' });
-  const body = await readJsonBody<{ command?: string }>(req).catch(() => ({} as { command?: string }));
   const allow = getBotTuiSlashAllow(ds.larkAppId);
   const v = validateSlashInjection(body?.command ?? '', allow);
   if (!v.ok) return jsonRes(res, 403, { ok: false, error: v.error });
@@ -417,19 +458,22 @@ ipcRoute('POST', '/api/sessions/:sessionId/slash', async (req, res, params) => {
 
 /** 会话内切换工作目录（角色切换专用）：硬校验角色库根 → 更新记录落盘（唯一事实源）
  *  → 按能力位选择 idle 注入 /cd（进程不死）或杀进程冷启动兜底。
- *  Loopback-trusted（同 suspend/slash）：签名所需 .dashboard-secret 被读隔离
- *  deny，沙箱内 CLI 无法签名；安全边界由 validateRoleLibraryPath 硬校验承担
- *  （realpath 归一 + dev/ino 包含判断，角色库根之外一律拒）。
+ *  鉴权双路径（见 sessionCliIpcAuth）：trusted-host 签名或本会话 rotating
+ *  capability；目录面由 validateRoleLibraryPath 硬校验承担（realpath 归一 +
+ *  dev/ino 包含判断，角色库根之外一律拒）。
  *  不发话题消息（AI 自己发角色化确认）。 */
 ipcRoute('POST', '/api/sessions/:sessionId/cd', async (req, res, params) => {
+  const body = await readJsonBody<{ dir?: string } & Record<string, unknown>>(req)
+    .catch(() => ({} as { dir?: string } & Record<string, unknown>));
   const ds = findActiveBySessionId(params.sessionId);
+  const auth = sessionCliIpcAuth(req, ds, params.sessionId, body);
+  if (!auth.ok) return jsonRes(res, 403, { ok: false, error: auth.error });
   if (!ds) return jsonRes(res, 404, { ok: false, error: 'session_not_active' });
   // Adopt/observed 会话是收编的用户自有 pane——注入或冷重启都会打断用户自己的
   // 终端会话。与 /suspend、/restart、/slash 同款排除。
   if (ds.adoptedFrom || ds.initConfig?.adoptMode) {
     return jsonRes(res, 409, { ok: false, error: 'adopt_cd_unsupported' });
   }
-  const body = await readJsonBody<{ dir?: string }>(req).catch(() => ({} as { dir?: string }));
   const v = validateRoleLibraryPath(body?.dir ?? '');
   if (!v.ok) {
     return jsonRes(res, v.error === 'outside_role_library' ? 403 : 400, { ok: false, error: v.error });

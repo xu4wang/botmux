@@ -15,9 +15,14 @@ import { describe, it, expect, beforeAll, afterAll, afterEach, vi } from 'vitest
 import { mkdirSync, mkdtempSync, realpathSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { startIpcServer, type IpcServerHandle } from '../src/core/dashboard-ipc-server.js';
+import { setIpcAuthSecret, startIpcServer, type IpcServerHandle } from '../src/core/dashboard-ipc-server.js';
+import { daemonIpcAuthHeaders } from '../src/core/daemon-ipc-auth.js';
 import * as workerPool from '../src/core/worker-pool.js';
 import * as sessionCwd from '../src/core/session-cwd.js';
+
+/** 会话当前轮换 capability（daemon 侧 ds.managedTurnOrigin 与请求 body 双方持有）。 */
+const CAP = 'deadbeef'.repeat(8);
+const HOST_SECRET = 'test-ipc-cd-host-secret';
 
 let handle: IpcServerHandle | null = null;
 let prevHome: string | undefined;
@@ -43,25 +48,37 @@ afterAll(() => {
 afterEach(async () => {
   if (handle) await handle.close();
   handle = null;
+  setIpcAuthSecret(null);
   vi.restoreAllMocks();
 });
 
-async function postCd(sessionId: string, dir?: string): Promise<Response> {
-  if (!handle) handle = await startIpcServer({ port: 0, host: '127.0.0.1' });
-  return fetch(`http://127.0.0.1:${handle.port}/api/sessions/${sessionId}/cd`, {
-    method: 'POST',
-    headers: { 'content-type': 'application/json' },
-    body: JSON.stringify(dir === undefined ? {} : { dir }),
-  });
+/** auth 三态：capability（默认，沙箱/读隔离 CLI 姿势）/ signed（trusted-host
+ *  HMAC，需 authRequired 服务器）/ none（未证明身份的裸调用）。 */
+async function postCd(sessionId: string, dir?: string, opts: {
+  auth?: 'capability' | 'signed' | 'none';
+  authRequired?: boolean;
+} = {}): Promise<Response> {
+  if (!handle) {
+    if (opts.authRequired) setIpcAuthSecret(HOST_SECRET);
+    handle = await startIpcServer({ port: 0, host: '127.0.0.1', ...(opts.authRequired ? { authRequired: true } : {}) });
+  }
+  const auth = opts.auth ?? 'capability';
+  const path = `/api/sessions/${sessionId}/cd`;
+  const bodyObj: Record<string, unknown> = dir === undefined ? {} : { dir };
+  if (auth === 'capability') bodyObj.originCapability = CAP;
+  const headers: HeadersInit = auth === 'signed'
+    ? daemonIpcAuthHeaders({ secret: HOST_SECRET, port: handle.port, method: 'POST', path, headers: { 'content-type': 'application/json' } })
+    : { 'content-type': 'application/json' };
+  return fetch(`http://127.0.0.1:${handle.port}${path}`, { method: 'POST', headers, body: JSON.stringify(bodyObj) });
 }
 
 describe('POST /api/sessions/:sessionId/cd', () => {
-  it('404s for sessions that are not active', async () => {
+  it('404s for sessions that are not active — trusted-host caller (signed, authRequired on)', async () => {
     vi.spyOn(workerPool, 'findActiveBySessionId').mockReturnValue(undefined);
     const repinSpy = vi.spyOn(sessionCwd, 'repinSessionWorkingDir').mockImplementation(() => {});
     const killSpy = vi.spyOn(workerPool, 'killWorker').mockImplementation(() => {});
 
-    const res = await postCd('missing', roleDir);
+    const res = await postCd('missing', roleDir, { auth: 'signed', authRequired: true });
 
     expect(res.status).toBe(404);
     expect(await res.json()).toMatchObject({ ok: false, error: 'session_not_active' });
@@ -73,6 +90,7 @@ describe('POST /api/sessions/:sessionId/cd', () => {
     const send = vi.fn();
     vi.spyOn(workerPool, 'findActiveBySessionId').mockReturnValue({
       session: { sessionId: 's-adopt', cliId: 'claude-code' },
+      managedTurnOrigin: { capability: CAP },
       worker: { send, killed: false },
       adoptedFrom: { source: 'tmux', tmuxTarget: '0:1.0', cwd: '/x' },
     } as any);
@@ -91,6 +109,7 @@ describe('POST /api/sessions/:sessionId/cd', () => {
   it('409s adopt sessions (initConfig.adoptMode, adoptedFrom absent)', async () => {
     vi.spyOn(workerPool, 'findActiveBySessionId').mockReturnValue({
       session: { sessionId: 's-adopt-init', cliId: 'claude-code' },
+      managedTurnOrigin: { capability: CAP },
       worker: { send: vi.fn(), killed: false },
       adoptedFrom: undefined,
       initConfig: { adoptMode: true },
@@ -106,6 +125,7 @@ describe('POST /api/sessions/:sessionId/cd', () => {
     const send = vi.fn();
     vi.spyOn(workerPool, 'findActiveBySessionId').mockReturnValue({
       session: { sessionId: 's-outside', cliId: 'claude-code' },
+      managedTurnOrigin: { capability: CAP },
       worker: { send, killed: false },
       adoptedFrom: undefined,
     } as any);
@@ -125,6 +145,7 @@ describe('POST /api/sessions/:sessionId/cd', () => {
   it('400s a nonexistent dir (dir_not_found)', async () => {
     vi.spyOn(workerPool, 'findActiveBySessionId').mockReturnValue({
       session: { sessionId: 's-noent', cliId: 'claude-code' },
+      managedTurnOrigin: { capability: CAP },
       worker: { send: vi.fn(), killed: false },
       adoptedFrom: undefined,
     } as any);
@@ -140,6 +161,7 @@ describe('POST /api/sessions/:sessionId/cd', () => {
   it('400s a missing/empty dir field (empty_path)', async () => {
     vi.spyOn(workerPool, 'findActiveBySessionId').mockReturnValue({
       session: { sessionId: 's-empty', cliId: 'claude-code' },
+      managedTurnOrigin: { capability: CAP },
       worker: { send: vi.fn(), killed: false },
       adoptedFrom: undefined,
     } as any);
@@ -150,10 +172,38 @@ describe('POST /api/sessions/:sessionId/cd', () => {
     expect(await res.json()).toMatchObject({ ok: false, error: 'empty_path' });
   });
 
+  it('403s origin_unproven with ZERO side effects: no capability / wrong capability never reach repin/inject/kill', async () => {
+    const send = vi.fn();
+    vi.spyOn(workerPool, 'findActiveBySessionId').mockReturnValue({
+      session: { sessionId: 's-unproven', cliId: 'claude-code' },
+      managedTurnOrigin: { capability: 'f00d'.repeat(16) },  // live ≠ CAP
+      worker: { send, killed: false },
+      adoptedFrom: undefined,
+    } as any);
+    const repinSpy = vi.spyOn(sessionCwd, 'repinSessionWorkingDir').mockImplementation(() => {});
+    const killSpy = vi.spyOn(workerPool, 'killWorker').mockImplementation(() => {});
+
+    // 无 capability
+    const resNone = await postCd('s-unproven', roleDir, { auth: 'none' });
+    expect(resNone.status).toBe(403);
+    expect(await resNone.json()).toMatchObject({ ok: false, error: 'origin_unproven' });
+
+    // 错 capability（body 里带的 CAP 与 live 不符）
+    const resWrong = await postCd('s-unproven', roleDir);
+    expect(resWrong.status).toBe(403);
+    expect(await resWrong.json()).toMatchObject({ ok: false, error: 'origin_unproven' });
+
+    // cd 是有副作用的路由：鉴权失败必须发生在 repin（落盘）与 kill/inject 之前。
+    expect(repinSpy).not.toHaveBeenCalled();
+    expect(send).not.toHaveBeenCalled();
+    expect(killSpy).not.toHaveBeenCalled();
+  });
+
   it('200 mode:inject — live worker + claude-code capability: repin FIRST, then inject /cd <resolvedPath>', async () => {
     const send = vi.fn();
     const ds = {
       session: { sessionId: 's-inject', cliId: 'claude-code' },
+      managedTurnOrigin: { capability: CAP },
       worker: { send, killed: false },
       adoptedFrom: undefined,
       initConfig: { workingDir: '/old/stale/dir' },
@@ -182,6 +232,7 @@ describe('POST /api/sessions/:sessionId/cd', () => {
     const send = vi.fn(() => { throw new Error('EPIPE: worker channel closed'); });
     const ds = {
       session: { sessionId: 's-send-throws', cliId: 'claude-code' },
+      managedTurnOrigin: { capability: CAP },
       worker: { send, killed: false },
       adoptedFrom: undefined,
       initConfig: { workingDir: '/old/stale/dir' },
@@ -208,6 +259,7 @@ describe('POST /api/sessions/:sessionId/cd', () => {
     // 若有人把 `if (ds.worker && !ds.worker.killed)` 守卫加回去，此断言失败。
     const ds = {
       session: { sessionId: 's-cold-noworker', cliId: 'claude-code' },
+      managedTurnOrigin: { capability: CAP },
       worker: null,
       adoptedFrom: undefined,
     } as any;
@@ -228,6 +280,7 @@ describe('POST /api/sessions/:sessionId/cd', () => {
     const send = vi.fn();
     const ds = {
       session: { sessionId: 's-cold-codex', cliId: 'codex' },
+      managedTurnOrigin: { capability: CAP },
       worker: { send, killed: false },
       adoptedFrom: undefined,
     } as any;
@@ -248,6 +301,7 @@ describe('POST /api/sessions/:sessionId/cd', () => {
   it('200 mode:cold-restart — unknown cliId falls through the catch (no crash)', async () => {
     const ds = {
       session: { sessionId: 's-cold-unknown', cliId: 'no-such-cli' },
+      managedTurnOrigin: { capability: CAP },
       worker: { send: vi.fn(), killed: false },
       adoptedFrom: undefined,
     } as any;

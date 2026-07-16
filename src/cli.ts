@@ -3749,6 +3749,44 @@ async function cmdSuspend(): Promise<void> {
   if (failed > 0) process.exitCode = 1;
 }
 
+/** 会话级 CLI IPC（slash/cd）的 POST：与 postAsk 同款双路径——能读 host secret
+ *  （非隔离进程）走 trusted-host HMAC 签名；读不到（沙箱 BOTMUX_SEND_RELAY /
+ *  macOS 读隔离 carve-out）改带本会话当前轮换的 origin capability，由 daemon
+ *  handler 与活跃记录比对。两条路都不读 bots.json。 */
+async function postSessionCliIpc(
+  ipcPort: number,
+  sessionId: string,
+  route: 'slash' | 'cd',
+  payload: Record<string, unknown>,
+): Promise<Response> {
+  const requestBody: Record<string, unknown> = { ...payload };
+  let hostSecret: string | undefined;
+  if (!process.env.BOTMUX_SEND_RELAY) {
+    try { hostSecret = loadDaemonIpcSecret(); } catch { /* sandboxed/read-isolated: capability fallback below */ }
+  }
+  if (!hostSecret) {
+    const claim = readManagedOriginCapability(
+      resolveDataDir(),
+      sessionId,
+      process.env.BOTMUX_SEND_RELAY,
+    );
+    if (claim) {
+      requestBody.originCapability = claim.capability;
+      if (claim.turnId) requestBody.originTurnId = claim.turnId;
+      if (claim.dispatchAttempt !== undefined) requestBody.originDispatchAttempt = claim.dispatchAttempt;
+    }
+  }
+  const path = `/api/sessions/${encodeURIComponent(sessionId)}/${route}`;
+  const init = {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify(requestBody),
+  } satisfies RequestInit;
+  return hostSecret
+    ? fetchDaemonIpc(ipcPort, path, init, hostSecret)
+    : fetch(`http://127.0.0.1:${ipcPort}${path}`, init);
+}
+
 /** botmux slash "<斜杠命令>"：请求 daemon 在本会话 idle 后把命令敲入自己的 CLI。
  *  自识别当前会话（pid marker → BOTMUX_SESSION_ID env），allowlist 由 daemon 侧校验。 */
 async function cmdSlash(): Promise<void> {
@@ -3768,12 +3806,9 @@ async function cmdSlash(): Promise<void> {
   if (!s) { console.error(`❌ 未找到 session ${sid}`); process.exit(1); }
   const daemon = findDaemon(s.larkAppId);
   if (!daemon) { console.error('❌ daemon 不在线'); process.exit(1); }
-  const res = await fetch(
-    `http://127.0.0.1:${daemon.ipcPort}/api/sessions/${encodeURIComponent(s.sessionId)}/slash`,
-    { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ command }) },
-  );
+  const res = await postSessionCliIpc(daemon.ipcPort, s.sessionId, 'slash', { command });
   const body: any = await res.json().catch(() => ({}));
-  if (res.ok && body?.ok) { console.log(`✓ 已排队注入: ${body.queued}（会话空闲时执行）`); return; }
+  if (res.ok && body?.ok) { console.log(`✓ 已排队注入: ${body.queued}（会话空闲时执行；CLI 进程若在执行前重启则丢弃）`); return; }
   console.error(`✗ 被拒绝: ${body?.error ?? `HTTP ${res.status}`}`);
   process.exit(1);
 }
@@ -3798,10 +3833,7 @@ async function cmdCd(): Promise<void> {
   if (!s) { console.error(`❌ 未找到 session ${sid}`); process.exit(1); }
   const daemon = findDaemon(s.larkAppId);
   if (!daemon) { console.error('❌ daemon 不在线'); process.exit(1); }
-  const res = await fetch(
-    `http://127.0.0.1:${daemon.ipcPort}/api/sessions/${encodeURIComponent(s.sessionId)}/cd`,
-    { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ dir }) },
-  );
+  const res = await postSessionCliIpc(daemon.ipcPort, s.sessionId, 'cd', { dir });
   const body: any = await res.json().catch(() => ({}));
   if (res.ok && body?.ok) {
     console.log(body.mode === 'inject'
