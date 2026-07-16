@@ -11,7 +11,7 @@
  *   botmux restart [--include-pm2] [--with-plugin] — restart daemon, then ensure auto plugin services
  *   botmux logs [--lines] — view daemon logs
  *   botmux status         — show daemon status
- *   botmux upgrade        — upgrade to latest version
+ *   botmux upgrade|update — upgrade to latest version
  *   botmux list           — interactive session picker (TUI), attach to tmux
  *   botmux list --plain   — plain table output (for piping / scripts)
  *   botmux delete <id>    — close a session by ID prefix
@@ -4203,7 +4203,7 @@ botmux v${getVersion()} — IM ↔ AI 编程 CLI 桥接
   restart     重启 daemon（默认不停止插件 service，core 启动后确保 mode=auto 正在运行；--with-plugin 显式先停再启动 auto service；--include-pm2 同时重启 PM2 God）
   logs        查看 daemon 日志（--lines N, --bot <0-based-index|pm2-name|appId>）
   status      查看 daemon 状态
-  upgrade     升级到最新版本
+  upgrade     升级到最新版本（别名：update）
   dashboard   打印新的 Web Dashboard 一次性登录 URL（旧 token 同时失效）
   list        列出活跃会话（交互式选择并连接 tmux）
               --plain  纯文本表格输出（管道/脚本场景）
@@ -8554,7 +8554,8 @@ switch (command) {
   case 'restart': await cmdRestart(); break;
   case 'logs':    cmdLogs(); break;
   case 'status':  cmdStatus(); break;
-  case 'upgrade': cmdUpgrade(); break;
+  case 'upgrade':
+  case 'update':  cmdUpgrade(); break;
   case 'dashboard': await cmdDashboard(); break;
   case 'bind': {
     // `botmux bind <code>` — 把本机绑定到中心化平台
