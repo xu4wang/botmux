@@ -215,7 +215,20 @@ function pm2Bin(): string {
 
 /** Env for pm2 invocations with an isolated PM2_HOME. */
 function pm2Env(home: string = PM2_HOME): NodeJS.ProcessEnv {
-  return { ...process.env, PM2_HOME: home };
+  const env: NodeJS.ProcessEnv = { ...process.env, PM2_HOME: home };
+  // CLAUDE_CONFIG_DIR / CODEX_HOME / GROK_HOME are PER-SESSION CLI data-root
+  // pointers, injected per-pane at spawn time (see worker.ts). They must never be
+  // baked into the long-lived pm2 daemon/worker env: pm2 persists the caller's env
+  // into every managed app (and into dump.pm2 for resurrect), so a
+  // `botmux start/restart` invoked from ANY process that happens to carry one —
+  // most commonly a bot's own session during self-upgrade, whose env holds its
+  // injected CLAUDE_CONFIG_DIR — would poison ALL workers. A non-isolated bot then
+  // inherits that value and its CLI reads/writes a sibling bot's home. Strip them
+  // at this boundary so the daemon stays session-agnostic.
+  delete env.CLAUDE_CONFIG_DIR;
+  delete env.CODEX_HOME;
+  delete env.GROK_HOME;
+  return env;
 }
 
 function listPm2GodDaemonPids(home: string = PM2_HOME): number[] {

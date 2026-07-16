@@ -5827,17 +5827,33 @@ function spawnCli(cfg: Extract<DaemonToWorker, { type: 'init' }>): void {
   }
   if (injectClaudeSandbox) childEnv.IS_SANDBOX = '1';
   if (claudeResumeTokenThreshold) childEnv.CLAUDE_CODE_RESUME_TOKEN_THRESHOLD = claudeResumeTokenThreshold;
+  // Session-level CLI data-root pointers must never be INHERITED from the worker
+  // env — a stale pm2 dump can still carry a sibling bot's home (see pm2Env).
+  // Scrub them BEFORE the adapter/isolation layers below so only values computed
+  // for THIS session survive. Do NOT pin a "default" instead of deleting:
+  // CLAUDE_CONFIG_DIR=~/.claude is not a no-op — setting the var relocates the
+  // CLI's state file from ~/.claude.json to $CLAUDE_CONFIG_DIR/.claude.json,
+  // which lacks hasCompletedOnboarding → the CLI reruns first-run onboarding
+  // (theme picker + login) on every non-isolated session.
+  delete childEnv.CLAUDE_CONFIG_DIR;
+  delete childEnv.CODEX_HOME;
+  delete childEnv.GROK_HOME;
+
   // Adapter-supplied env: points Claude-family forks at their data root (Seed's
   // CLAUDE_CONFIG_DIR → `.claude-runtime`). Keys here are also in the tmux
   // passthrough whitelist (BOTMUX_INJECTED_ENV_KEYS) so the tmux backend forwards
   // them past the server's global env.
   if (cliAdapter.spawnEnv) Object.assign(childEnv, cliAdapter.spawnEnv);
 
-  // v2 read isolation: point the CLI at its PER-BOT config dir (set AFTER spawnEnv so
-  // it overrides any adapter default). claude → CLAUDE_CONFIG_DIR, codex → CODEX_HOME.
-  // Both are in BOTMUX_INJECTED_ENV_KEYS so the tmux backend forwards them into the
-  // pane; without this the CLI falls back to the global ~/.claude|~/.codex which the
-  // Seatbelt wrapper denies → it can't read its own data and won't start.
+  // v2 read isolation: point the CLI at its PER-BOT config dir (set AFTER spawnEnv
+  // so it overrides any adapter default). claude → CLAUDE_CONFIG_DIR, codex →
+  // CODEX_HOME. Both are in BOTMUX_INJECTED_ENV_KEYS so the tmux backend forwards
+  // them into the pane; without this the CLI falls back to the global
+  // ~/.claude|~/.codex which the Seatbelt wrapper denies → it can't read its own
+  // data and won't start. Non-isolated sessions get NO explicit value: the scrub
+  // above plus the pane wrapper's unset clause (PANE_ENV_UNSET_CLAUSE covers
+  // BOTMUX_INJECTED_ENV_KEYS) already guarantee the pane starts clean, and the
+  // CLI's built-in default preserves stock semantics.
   if (isolationBotHome) {
     if (claudeDataDir) childEnv.CLAUDE_CONFIG_DIR = claudeDataDir; // = <BOT_HOME>/claude
     else childEnv.CODEX_HOME = isolatedCodexHome!;
