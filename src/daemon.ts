@@ -3833,6 +3833,18 @@ for (const sessionRelayMutation of V3_SESSION_RUN_MUTATIONS) {
                 : {}),
               ...(ds.chatId ? { chatId: ds.chatId } : {}),
               ...(ds.larkAppId ? { larkAppId: ds.larkAppId } : {}),
+              // Current-turn pointers for the generation join: the authorizer
+              // rejects a capability whose turn is no longer the session's
+              // current inbound turn (a queued message already advanced these).
+              ...(ds.session.quoteTargetId
+                ? { quoteTargetId: ds.session.quoteTargetId }
+                : {}),
+              ...((ds.currentReplyTarget ?? ds.session.currentReplyTarget)?.turnId
+                ? {
+                    currentReplyTargetTurnId:
+                      (ds.currentReplyTarget ?? ds.session.currentReplyTarget)!.turnId,
+                  }
+                : {}),
             }
           : undefined,
         selfLarkAppId: selfV3LarkAppId,

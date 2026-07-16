@@ -3731,9 +3731,10 @@ function authorizeWorkflowDaemonCommand(runId: string, rest: string[]): string {
  * above is masked by design (process-tree marker, run directory,
  * `.dashboard-secret`), so the CLI instead presents its per-turn rotating
  * capability and lets the daemon re-derive the caller/chat/bot tuple from its
- * own live session record (workflows/v3/session-relay.ts). The capability file
- * is also the detector: host sessions never have one, so this returns null and
- * the strictly stronger marker + signed-envelope path stays the default.
+ * own live session record (workflows/v3/session-relay.ts). Detection is
+ * marker-first (a visible live process marker → host path, so a stale
+ * capability file can never hijack a healthy host session), then falls back
+ * to the worker-published capability file that only isolated sessions have.
  * `--bot` is meaningless here — the run must be bound to this very session's
  * chat tuple, which pins the daemon.
  */

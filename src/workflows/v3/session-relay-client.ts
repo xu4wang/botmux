@@ -3,9 +3,10 @@
  *
  * Used only when the CLI runs inside an isolation boundary that masks the
  * host mutation path: a Linux bwrap sandbox (BOTMUX_SEND_RELAY outbox) or a
- * macOS read-isolated session (per-session capability carve-out file). The
- * presence of the worker-published rotating capability IS the signal — host
- * sessions never have one, so they keep the marker + signed-envelope path.
+ * macOS read-isolated session (per-session capability carve-out file).
+ * Isolation is detected marker-first (a visible live process-tree marker
+ * always wins → host path), and only then by the worker-published rotating
+ * capability file — see readWorkflowSessionRelayContext.
  *
  * Identity is NOT claimed here: the daemon re-derives caller/chat/bot from
  * its own live session record keyed by the verified capability. Env values
@@ -15,6 +16,7 @@
 import {
   readManagedOriginCapability,
 } from '../../core/managed-origin-capability.js';
+import { findAncestorSessionContext } from '../../core/session-marker.js';
 import type { WorkflowDaemonMutation, WorkflowDaemonMutationResponse } from './daemon-ipc-client.js';
 import { WorkflowDaemonMutationTransportError } from './daemon-ipc-client.js';
 import { V3_SESSION_RUN_MUTATION_ROUTE_PREFIX } from './session-relay.js';
@@ -31,17 +33,29 @@ export interface WorkflowSessionRelayContext {
 
 /**
  * Detect an isolated session and load its per-turn capability.
- * Returns null for host sessions (no capability file exists), which keeps the
- * strictly stronger marker + signed-envelope path as the default.
+ *
+ * Detection follows the same precedence as resolveSessionContext
+ * (core/session-marker.ts): a visible live process-tree marker means the host
+ * path is available and MUST be used — capability files can survive a SIGKILL
+ * or a later config change that disables isolation, so file existence alone
+ * would permanently hijack a healthy host session onto the relay. Only when no
+ * marker is visible (bwrap masks the marker dir + unshares pids; Seatbelt
+ * denies it) is the capability file consulted, and host sessions without one
+ * still return null.
  */
 export function readWorkflowSessionRelayContext(options: {
   env: NodeJS.ProcessEnv;
   dataDir: string;
-  /** Test seam. */
+  startPid?: number;
+  /** Test seams. */
   readClaim?: typeof readManagedOriginCapability;
+  findMarker?: typeof findAncestorSessionContext;
 }): WorkflowSessionRelayContext | null {
   const sessionId = options.env.BOTMUX_SESSION_ID?.trim();
   if (!sessionId) return null;
+  const findMarker = options.findMarker ?? findAncestorSessionContext;
+  const marker = findMarker(options.dataDir, options.startPid ?? process.ppid);
+  if (marker?.sessionId) return null;
   const readClaim = options.readClaim ?? readManagedOriginCapability;
   const relayDir = options.env.BOTMUX_SEND_RELAY?.trim();
   const claim = readClaim(options.dataDir, sessionId, relayDir || undefined);

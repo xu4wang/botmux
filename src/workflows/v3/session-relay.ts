@@ -39,6 +39,13 @@ export interface V3SessionRelaySessionView {
   callerOpenId?: string;
   chatId?: string;
   larkAppId?: string;
+  /** The session's CURRENT inbound turn pointer — advances the moment the next
+   * message arrives, while liveOrigin only rotates when that message is
+   * actually dequeued into the CLI. The generation join below compares them. */
+  quoteTargetId?: string;
+  /** Chat-scope fold-back turn pointer (currentReplyTarget.turnId), advanced
+   * together with quoteTargetId. */
+  currentReplyTargetTurnId?: string;
 }
 
 export type V3SessionRelayDecision =
@@ -133,6 +140,25 @@ export function authorizeV3SessionRunMutationRequest(input: {
   }
   if (current.larkAppId !== input.selfLarkAppId) {
     return { ok: false, status: 403, error: 'session_identity_incomplete' };
+  }
+
+  // Generation join, mirroring the host path (current-turn-provenance.ts):
+  // lastCallerOpenId/quoteTargetId advance the moment the NEXT inbound message
+  // arrives, while the capability rotates only when that message is dequeued
+  // into the CLI (worker flushPending). The capability therefore proves turn
+  // A, but the caller fields may already describe a queued turn B — mixing the
+  // two would let A borrow B's identity. Only when the live capability's
+  // turnId IS the session's current turn pointer do all tuple fields belong to
+  // one generation (they are written atomically per inbound message);
+  // anything else fails closed, exactly like the host marker join.
+  const liveTurnId = current.liveOrigin?.turnId;
+  const quoteTargetId = current.quoteTargetId;
+  const replyTurnId = current.currentReplyTargetTurnId;
+  if (!nonEmpty(liveTurnId)
+    || !nonEmpty(quoteTargetId)
+    || quoteTargetId !== liveTurnId
+    || (replyTurnId !== undefined && replyTurnId !== liveTurnId)) {
+    return { ok: false, status: 403, error: 'turn_provenance_stale' };
   }
 
   let authority;

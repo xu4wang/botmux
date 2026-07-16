@@ -67,6 +67,28 @@ describe('readWorkflowSessionRelayContext', () => {
     });
   });
 
+  it('prefers a visible live process marker over a leftover capability file', () => {
+    // A capability file can survive SIGKILL or disabling isolation. A healthy
+    // host session (whose live marker is visible) must keep the strictly
+    // stronger marker + signed-envelope path instead of being hijacked onto
+    // the relay with a stale token.
+    const carveOut = managedOriginCapabilityPath(dataDir, 'sess-1');
+    mkdirSync(dirname(carveOut), { recursive: true });
+    writeFileSync(carveOut, JSON.stringify({ sessionId: 'sess-1', capability: CAPABILITY }));
+    expect(readWorkflowSessionRelayContext({
+      env: { BOTMUX_SESSION_ID: 'sess-1' },
+      dataDir,
+      findMarker: () => ({ sessionId: 'sess-1', turnId: 'turn-1' }),
+    })).toBeNull();
+    // A corrupt marker ({sessionId: ''}) does not count as live — same
+    // precedence as resolveSessionContext.
+    expect(readWorkflowSessionRelayContext({
+      env: { BOTMUX_SESSION_ID: 'sess-1' },
+      dataDir,
+      findMarker: () => ({ sessionId: '' }),
+    })).not.toBeNull();
+  });
+
   it('detects a macOS read-isolated session via the per-session carve-out file', () => {
     const carveOut = managedOriginCapabilityPath(dataDir, 'sess-1');
     mkdirSync(dirname(carveOut), { recursive: true });

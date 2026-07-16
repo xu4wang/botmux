@@ -61,6 +61,7 @@ describe('v3 session relay authorization', () => {
       callerOpenId: 'ou_caller',
       chatId: 'oc_owner',
       larkAppId: 'cli_owner',
+      quoteTargetId: 'turn-1',
       ...overrides,
     };
   }
@@ -96,6 +97,7 @@ describe('v3 session relay authorization', () => {
       raw: { sessionId: 'sess-1', originCapability: CAPABILITY },
       session: sessionView({
         liveOrigin: { capability: CAPABILITY, turnId: 'turn-9', dispatchAttempt: 3 },
+        quoteTargetId: 'turn-9',
       }),
     });
     expect(decision.ok).toBe(true);
@@ -140,6 +142,54 @@ describe('v3 session relay authorization', () => {
     expect(authorize({ session: undefined })).toEqual({
       ok: false, status: 403, error: 'origin_unproven',
     });
+  });
+
+  it('rejects a capability whose turn is no longer the session current turn', () => {
+    // Reviewer repro: turn A still running (capability/turn = A) while user
+    // B's message is already queued — the daemon has advanced quoteTargetId /
+    // lastCallerOpenId to B, and A must NOT be able to borrow B's identity to
+    // mutate B's run.
+    writeEnvelope('bound-b', {
+      ...BINDING,
+      ownerOpenId: 'ou_caller_b',
+      sessionId: 'sess-1',
+    });
+    const decision = authorize({
+      runId: 'bound-b',
+      session: sessionView({
+        liveOrigin: { capability: CAPABILITY, turnId: 'turn-a' },
+        callerOpenId: 'ou_caller_b',
+        quoteTargetId: 'turn-b',
+      }),
+    });
+    expect(decision).toEqual({ ok: false, status: 403, error: 'turn_provenance_stale' });
+
+    // The reverse direction is fail-closed too: A mutating A's own run is
+    // denied while B is queued (same posture as the host marker join).
+    writeEnvelope('bound-ok', BINDING);
+    expect(authorize({
+      session: sessionView({ quoteTargetId: 'turn-b' }),
+    })).toEqual({ ok: false, status: 403, error: 'turn_provenance_stale' });
+  });
+
+  it('requires both current-turn pointers to be the capability generation', () => {
+    writeEnvelope('bound-ok', BINDING);
+    // Missing liveOrigin.turnId (e.g. pre-turn publish) proves no generation.
+    expect(authorize({
+      session: sessionView({ liveOrigin: { capability: CAPABILITY } }),
+    })).toEqual({ ok: false, status: 403, error: 'turn_provenance_stale' });
+    // Session without a current inbound turn pointer cannot be joined.
+    expect(authorize({
+      session: sessionView({ quoteTargetId: undefined }),
+    })).toEqual({ ok: false, status: 403, error: 'turn_provenance_stale' });
+    // Chat-scope fold-back pointer must agree as well when present…
+    expect(authorize({
+      session: sessionView({ currentReplyTargetTurnId: 'turn-b' }),
+    })).toEqual({ ok: false, status: 403, error: 'turn_provenance_stale' });
+    // …and passes when it names the same generation.
+    expect(authorize({
+      session: sessionView({ currentReplyTargetTurnId: 'turn-1' }),
+    }).ok).toBe(true);
   });
 
   it('denies meeting receiver sessions even with a valid capability', () => {
