@@ -1,5 +1,5 @@
 import type { ChildProcess } from 'node:child_process';
-import type { Session, DaemonToWorker, LarkAttachment, LarkMention, DisplayMode, StreamStatus } from '../types.js';
+import type { CodexAppTurnInput, Session, DaemonToWorker, LarkAttachment, LarkMention, DisplayMode, StreamStatus } from '../types.js';
 import type { CliUsageLimitState } from '../utils/cli-usage-limit.js';
 
 /** Frozen card state — cached content for historical streaming cards that can still be toggled. */
@@ -52,6 +52,14 @@ export interface DaemonSession {
   repoCardMessageId?: string;    // message_id of the repo selection card — for withdrawal
   worktreeCreating?: boolean;    // a worktree-open is in flight — dedups repeated card clicks / `/repo wt`
   pendingPrompt?: string;        // original user message to send after repo is selected
+  /** Clean Codex App text/context retained alongside pendingPrompt while repo
+   * selection delays the first turn. The legacy enriched prompt remains the
+   * compatibility source for every other CLI. */
+  pendingCodexAppText?: string;
+  /** Trusted, Botmux-authored instructions held out of the visible Codex App
+   * user message while the first turn waits for repo selection/worktree setup. */
+  pendingCodexAppApplicationContext?: string;
+  pendingCodexAppMessageContext?: string;
   /** One-shot CLI slash command to send literally after the worker reports
    *  prompt_ready. Used when a new topic starts with an adapter-default
    *  passthrough command such as `/goal`: the CLI must see raw `/...`, not a
@@ -64,7 +72,14 @@ export interface DaemonSession {
    *  after the raw input on prompt_ready, so the buffered messages queue as
    *  the next turn instead of being dropped. In-memory only, like
    *  pendingRawInput. */
-  pendingFollowUpInput?: { userPrompt: string; cliInput: string };
+  pendingFollowUpInput?: {
+    userPrompt: string;
+    cliInput: string;
+    codexAppInput?: CodexAppTurnInput;
+    /** The clean-input feature gate was evaluated when this follow-up was
+     * staged; prompt_ready must not re-read a later config value. */
+    codexAppInputGateFrozen?: true;
+  };
   pendingAttachments?: LarkAttachment[];
   pendingMentions?: LarkMention[];    // @mentions from initial message, used when building prompt after repo selection
   pendingSubstituteTrigger?: import('../types.js').SubstituteTrigger;
@@ -73,6 +88,8 @@ export interface DaemonSession {
    *  matching the original caller, not the user who clicked the card. */
   pendingSender?: import('../im/lark/identity-cache.js').ResolvedSender;
   pendingFollowUps?: string[];         // buffered follow-up messages (enriched) sent while waiting for repo selection
+  pendingCodexAppFollowUps?: string[]; // matching raw user texts for clean Codex App materialization
+  pendingCodexAppFollowUpContexts?: string[]; // matching metadata-only context; never duplicates the raw follow-up text
   ownerOpenId?: string;          // topic creator's open_id — receives write-enabled terminal link via DM
   streamCardId?: string;         // message_id of the streaming card in group (PATCHed with live output)
   streamCardNonce?: string;       // unique nonce for the current streaming card — embedded in button values to distinguish old vs current card
@@ -112,6 +129,7 @@ export interface DaemonSession {
   usageLimitRetryTimer?: NodeJS.Timeout;
   lastUserPrompt?: string;
   lastCliInput?: string;
+  lastCodexAppInput?: CodexAppTurnInput;
   replyThreadAliases?: { [rootMessageId: string]: { createdAt: string; lastUsedAt: string } };
   currentReplyTarget?: { rootMessageId: string; turnId: string; updatedAt: string };
   currentTurnTitle?: string;      // title for the current turn's streaming card

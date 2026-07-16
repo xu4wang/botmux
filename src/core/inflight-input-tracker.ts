@@ -20,7 +20,9 @@
  * early and degrades to the old lose-on-crash behavior for that turn only.
  */
 
-export type InflightItem = { content: string; turnId?: string };
+import type { CodexAppTurnInput } from '../types.js';
+
+export type InflightItem = { content: string; turnId?: string; codexAppInput?: CodexAppTurnInput };
 
 export class InflightInputTracker {
   private unacked: InflightItem[] = [];

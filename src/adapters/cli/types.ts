@@ -1,3 +1,5 @@
+import type { CodexAppTurnInput } from '../../types.js';
+
 export interface PtyHandle {
   write(data: string): void;
   /** Send text literally via tmux send-keys -l (tmux mode only).
@@ -159,6 +161,21 @@ export interface CliAdapter {
     /** Non-transient reason when the adapter knows submission is impossible
      *  without waiting for transcript confirmation (for example an unsupported
      *  terminal keybinding). Worker surfaces this immediately. */
+    failureReason?: string;
+    recheck?: () => SubmitRecheckResult | Promise<SubmitRecheckResult>;
+  }>;
+
+  /** Optional structured input path for adapters whose protocol can keep
+   * application context out of the visible user message. The worker calls this
+   * only when a typed sidecar is present; every other adapter continues through
+   * writeInput with byte-for-byte legacy content. */
+  writeStructuredInput?(
+    pty: PtyHandle,
+    content: string,
+    codexAppInput: CodexAppTurnInput,
+  ): Promise<void | {
+    submitted: boolean;
+    cliSessionId?: string;
     failureReason?: string;
     recheck?: () => SubmitRecheckResult | Promise<SubmitRecheckResult>;
   }>;

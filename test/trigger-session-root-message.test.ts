@@ -41,15 +41,44 @@ vi.mock('../src/services/message-queue.js', () => ({
 const mockForkWorker = vi.fn();
 vi.mock('../src/core/worker-pool.js', () => ({
   forkWorker: (...args: any[]) => mockForkWorker(...args),
+  sendWorkerInput: (ds: any, payload: any, turnId?: string) => {
+    if (!ds.worker || ds.worker.killed) return false;
+    ds.worker.send({
+      type: 'message',
+      content: typeof payload === 'string' ? payload : payload.content,
+      ...(turnId ? { turnId } : {}),
+    });
+    return true;
+  },
   getCurrentCliVersion: vi.fn(() => 'test-cli-version'),
 }));
 
+const mockBuildFollowUpCliInput = vi.fn((prompt: string, _sessionId?: string, opts?: any) => ({
+  content: `follow:${prompt}`,
+  codexAppInput: opts?.cliId === 'codex-app' && opts?.codexAppText ? { text: opts.codexAppText } : undefined,
+}));
+const mockBuildNewTopicCliInput = vi.fn((prompt: string, ...args: any[]) => ({
+  content: `new:${prompt}`,
+  codexAppInput: args[1] === 'codex-app' && args[10]?.codexAppText ? { text: args[10].codexAppText } : undefined,
+}));
 vi.mock('../src/core/session-manager.js', () => ({
   buildFollowUpContent: vi.fn((prompt: string) => `follow:${prompt}`),
+  buildFollowUpCliInput: (...args: any[]) => mockBuildFollowUpCliInput(...args),
   buildNewTopicPrompt: vi.fn((prompt: string) => `new:${prompt}`),
+  buildNewTopicCliInput: (...args: any[]) => mockBuildNewTopicCliInput(...args),
   ensureSessionWhiteboard: vi.fn(),
   getAvailableBots: vi.fn(async () => []),
   rememberLastCliInput: vi.fn(),
+}));
+
+const mockBotAutoWorktreeEnabled = vi.fn(() => false);
+vi.mock('../src/services/default-worktree.js', () => ({
+  botAutoWorktreeEnabled: (...args: any[]) => mockBotAutoWorktreeEnabled(...args),
+}));
+
+const mockRunAutoWorktreeCommit = vi.fn(async () => {});
+vi.mock('../src/im/lark/card-handler.js', () => ({
+  runAutoWorktreeCommit: (...args: any[]) => mockRunAutoWorktreeCommit(...args),
 }));
 
 import { triggerSessionTurn } from '../src/core/trigger-session.js';
@@ -93,6 +122,7 @@ function existingDs(overrides: Partial<DaemonSession> = {}): DaemonSession {
 describe('triggerSessionTurn rootMessageId target', () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    mockBotAutoWorktreeEnabled.mockReturnValue(false);
     mockGetBot.mockReturnValue({
       config: { larkAppId: APP, cliId: 'claude-code', workingDir: '/tmp' },
       botName: 'Bot',
@@ -121,7 +151,7 @@ describe('triggerSessionTurn rootMessageId target', () => {
     const ds = activeSessions.get(sessionKey(ROOT, APP));
     expect(ds?.scope).toBe('thread');
     expect(ds?.session.rootMessageId).toBe(ROOT);
-    expect(mockForkWorker).toHaveBeenCalledWith(ds, expect.stringContaining('new:'));
+    expect(mockForkWorker).toHaveBeenCalledWith(ds, { content: expect.stringContaining('new:') });
   });
 
   it('rejects cross-chat rootMessageId without creating a session', async () => {
@@ -156,6 +186,29 @@ describe('triggerSessionTurn rootMessageId target', () => {
     expect(send).toHaveBeenCalledWith({ type: 'message', content: expect.stringContaining('follow:') });
   });
 
+  it('keeps external-event wrappers hidden on a live clean Codex App turn', async () => {
+    mockGetBot.mockReturnValue({
+      config: { larkAppId: APP, cliId: 'codex-app', codexAppCleanInput: true, workingDir: '/tmp' },
+      botName: 'Bot',
+      botOpenId: 'ou_bot',
+    });
+    const ds = existingDs({ worker: { killed: false, send: vi.fn() } as any });
+    const req = request();
+    req.instruction = 'Summarize the alert for the operator.';
+
+    await triggerSessionTurn(req, {
+      larkAppId: APP,
+      activeSessions: new Map([[sessionKey(ROOT, APP), ds]]),
+    });
+
+    const opts = mockBuildFollowUpCliInput.mock.calls.at(-1)?.[2];
+    expect(opts.codexAppText).toBe('外部事件触发');
+    expect(opts.codexAppApplicationContext).toContain('Summarize the alert for the operator.');
+    expect(opts.codexAppMessageContext).toContain('<botmux_external_event trusted="false">');
+    expect(opts.codexAppMessageContext).toContain('"alert": "x"');
+    expect(opts.codexAppMessageContext).not.toContain('Summarize the alert for the operator.');
+  });
+
   it('reuses an existing root session whose worker is not running', async () => {
     const ds = existingDs();
     const activeSessions = new Map<string, DaemonSession>([[sessionKey(ROOT, APP), ds]]);
@@ -163,7 +216,71 @@ describe('triggerSessionTurn rootMessageId target', () => {
 
     expect(res).toMatchObject({ ok: true, action: 'queued', target: { sessionId: 'sess_existing', chatId: CHAT } });
     expect(mockCreateSession).not.toHaveBeenCalled();
-    expect(mockForkWorker).toHaveBeenCalledWith(ds, expect.stringContaining('follow:'), { resume: true, turnId: expect.stringMatching(/^trg_/) });
+    expect(mockForkWorker).toHaveBeenCalledWith(ds, { content: expect.stringContaining('follow:') }, { resume: true, turnId: expect.stringMatching(/^trg_/) });
+  });
+
+  it('preserves the clean split when an external event reforks a stopped Codex App session', async () => {
+    mockGetBot.mockReturnValue({
+      config: { larkAppId: APP, cliId: 'codex-app', codexAppCleanInput: true, workingDir: '/tmp' },
+      botName: 'Bot',
+      botOpenId: 'ou_bot',
+    });
+    const ds = existingDs();
+
+    await triggerSessionTurn(request(), {
+      larkAppId: APP,
+      activeSessions: new Map([[sessionKey(ROOT, APP), ds]]),
+    });
+
+    const opts = mockBuildFollowUpCliInput.mock.calls.at(-1)?.[2];
+    expect(opts.codexAppText).toBe('外部事件触发');
+    expect(opts.codexAppMessageContext).toContain('External event received.');
+    expect(mockForkWorker).toHaveBeenCalledWith(
+      ds,
+      expect.objectContaining({ codexAppInput: { text: '外部事件触发' } }),
+      expect.objectContaining({ resume: true }),
+    );
+  });
+
+  it('retains the clean first turn through external-event auto-worktree staging', async () => {
+    mockGetBot.mockReturnValue({
+      config: { larkAppId: APP, cliId: 'codex-app', codexAppCleanInput: true, workingDir: '/tmp' },
+      botName: 'Bot',
+      botOpenId: 'ou_bot',
+    });
+    mockBotAutoWorktreeEnabled.mockReturnValue(true);
+    const req = request();
+    req.instruction = 'Inspect the alert.';
+    const activeSessions = new Map<string, DaemonSession>();
+
+    await triggerSessionTurn(req, { larkAppId: APP, activeSessions });
+
+    const ds = activeSessions.get(sessionKey(ROOT, APP));
+    expect(ds?.pendingRepo).toBe(true);
+    expect(ds?.pendingCodexAppText).toBe('外部事件触发');
+    expect(ds?.pendingCodexAppApplicationContext).toContain('Inspect the alert.');
+    expect(ds?.pendingCodexAppMessageContext).toContain('<botmux_external_event trusted="false">');
+    expect(ds?.pendingCodexAppMessageContext).not.toContain('Inspect the alert.');
+    expect(mockRunAutoWorktreeCommit).toHaveBeenCalledWith(expect.objectContaining({ ds }));
+  });
+
+  it('passes the clean split into a new Codex App session without worktree staging', async () => {
+    mockGetBot.mockReturnValue({
+      config: { larkAppId: APP, cliId: 'codex-app', codexAppCleanInput: true, workingDir: '/tmp' },
+      botName: 'Bot',
+      botOpenId: 'ou_bot',
+    });
+    const activeSessions = new Map<string, DaemonSession>();
+
+    await triggerSessionTurn(request(), { larkAppId: APP, activeSessions });
+
+    const opts = mockBuildNewTopicCliInput.mock.calls.at(-1)?.[11];
+    expect(opts.codexAppText).toBe('外部事件触发');
+    expect(opts.codexAppMessageContext).toContain('"alert": "x"');
+    expect(mockForkWorker).toHaveBeenCalledWith(
+      activeSessions.get(sessionKey(ROOT, APP)),
+      expect.objectContaining({ codexAppInput: { text: '外部事件触发' } }),
+    );
   });
 
   it('reuses an existing root session with asyncReturnSessionId when worker is not running', async () => {
@@ -175,7 +292,7 @@ describe('triggerSessionTurn rootMessageId target', () => {
 
     expect(res).toMatchObject({ ok: true, action: 'queued', async: { status: 'pending', sessionId: 'sess_existing' } });
     expect(mockCreateSession).not.toHaveBeenCalled();
-    expect(mockForkWorker).toHaveBeenCalledWith(ds, expect.stringContaining('follow:'), { resume: true, turnId: expect.stringMatching(/^trg_/) });
+    expect(mockForkWorker).toHaveBeenCalledWith(ds, { content: expect.stringContaining('follow:') }, { resume: true, turnId: expect.stringMatching(/^trg_/) });
     expect(ds.latestAsyncTriggerId).toMatch(/^trg_/);
   });
 
@@ -187,7 +304,7 @@ describe('triggerSessionTurn rootMessageId target', () => {
     const promise = triggerSessionTurn(req, { larkAppId: APP, activeSessions });
     await vi.waitFor(() => expect(ds.pendingWaitPromises?.size).toBe(1));
     const [turnId, waiter] = [...ds.pendingWaitPromises!.entries()][0]!;
-    expect(mockForkWorker).toHaveBeenCalledWith(ds, expect.stringContaining('follow:'), { resume: true, turnId });
+    expect(mockForkWorker).toHaveBeenCalledWith(ds, { content: expect.stringContaining('follow:') }, { resume: true, turnId });
     waiter.resolve('done');
     await expect(promise).resolves.toMatchObject({ ok: true, action: 'completed', output: { content: 'done' } });
     expect(mockCreateSession).not.toHaveBeenCalled();

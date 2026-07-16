@@ -12,8 +12,9 @@ import * as sessionStore from '../services/session-store.js';
 import * as scheduleStore from '../services/schedule-store.js';
 import * as scheduler from './scheduler.js';
 import { scanProjects, scanMultipleProjects, describeProjectDir } from '../services/project-scanner.js';
-import { createRepoWorktree } from '../services/git-worktree.js';
+import { createRepoWorktree, pushWorktreeBranch } from '../services/git-worktree.js';
 import { worktreeSlugFromContextAI } from '../services/worktree-slug-ai.js';
+import { resolvePairedSpawnBackendType } from './persistent-backend.js';
 import { buildRepoSelectCard, buildAdoptSelectCard, buildCodexAppThreadSelectCard, buildSlashListCard, getCliDisplayName, buildConfigCard, buildLandCard } from '../im/lark/card-builder.js';
 import { computeSandboxDiff } from '../services/sandbox-land.js';
 import { handleDashboardCommand } from './dashboard-command/index.js';
@@ -1382,13 +1383,13 @@ export async function handleCommand(
             // dropped: wrap them now (full prompt-building context lives here)
             // and stash for delivery right after the raw input on prompt_ready.
             if (hasBufferedInput) {
-              const { buildNewTopicPrompt, ensureSessionWhiteboard, getAvailableBots } = await import('./session-manager.js');
+              const { buildNewTopicCliInput, ensureSessionWhiteboard, getAvailableBots } = await import('./session-manager.js');
               ensureSessionWhiteboard(ds!);
-              const followUpPrompt = buildNewTopicPrompt(
+              const followUpInput = buildNewTopicCliInput(
                 pendingPrompt,
                 ds!.session.sessionId,
-                botCfg.cliId,
-                botCfg.cliPathOverride,
+                ds!.session.cliId ?? botCfg.cliId,
+                ds!.session.cliPathOverride ?? botCfg.cliPathOverride,
                 ds!.pendingAttachments,
                 ds!.pendingMentions,
                 await getAvailableBots(ds!.larkAppId, ds!.chatId),
@@ -1396,23 +1397,39 @@ export async function handleCommand(
                 { name: selfBot.botName, openId: selfBot.botOpenId },
                 loc,
                 ds!.pendingSender,
-                { larkAppId, chatId: ds!.chatId, whiteboardId: ds!.session.whiteboardId },
+                {
+                  larkAppId,
+                  chatId: ds!.chatId,
+                  whiteboardId: ds!.session.whiteboardId,
+                  substituteTrigger: ds!.pendingSubstituteTrigger,
+                  codexAppText: ds!.pendingCodexAppText,
+                  codexAppApplicationContext: ds!.pendingCodexAppApplicationContext,
+                  codexAppMessageContext: ds!.pendingCodexAppMessageContext,
+                  codexAppFollowUps: ds!.pendingCodexAppFollowUps,
+                  codexAppFollowUpContexts: ds!.pendingCodexAppFollowUpContexts,
+                },
               );
               ds!.pendingFollowUpInput = {
-                userPrompt: pendingPrompt || (ds!.pendingFollowUps?.join('\n\n') ?? ''),
-                cliInput: followUpPrompt,
+                userPrompt: ds!.pendingCodexAppText !== undefined || ds!.pendingCodexAppFollowUps
+                  ? [ds!.pendingCodexAppText ?? '', ...(ds!.pendingCodexAppFollowUps ?? [])].filter(Boolean).join('\n\n')
+                  : pendingPrompt || ds!.pendingFollowUps?.join('\n\n') || '',
+                cliInput: followUpInput.content,
+                ...((ds!.session.cliId ?? botCfg.cliId) === 'codex-app' && botCfg.codexAppCleanInput === true && followUpInput.codexAppInput
+                  ? { codexAppInput: followUpInput.codexAppInput }
+                  : {}),
+                codexAppInputGateFrozen: true,
               };
             }
             rememberLastCliInput(ds!, pendingRawInput, pendingRawInput);
             forkWorker(ds!, '', false);
           } else if (hasBufferedInput) {
-            const { buildNewTopicPrompt, ensureSessionWhiteboard, getAvailableBots } = await import('./session-manager.js');
+            const { buildNewTopicCliInput, ensureSessionWhiteboard, getAvailableBots } = await import('./session-manager.js');
             ensureSessionWhiteboard(ds!);
-            const prompt = buildNewTopicPrompt(
+            const prompt = buildNewTopicCliInput(
               pendingPrompt,
               ds!.session.sessionId,
-              botCfg.cliId,
-              botCfg.cliPathOverride,
+              ds!.session.cliId ?? botCfg.cliId,
+              ds!.session.cliPathOverride ?? botCfg.cliPathOverride,
               ds!.pendingAttachments,
               ds!.pendingMentions,
               await getAvailableBots(ds!.larkAppId, ds!.chatId),
@@ -1420,7 +1437,17 @@ export async function handleCommand(
               { name: selfBot.botName, openId: selfBot.botOpenId },
               loc,
               ds!.pendingSender,
-              { larkAppId, chatId: ds!.chatId, whiteboardId: ds!.session.whiteboardId },
+              {
+                larkAppId,
+                chatId: ds!.chatId,
+                whiteboardId: ds!.session.whiteboardId,
+                substituteTrigger: ds!.pendingSubstituteTrigger,
+                codexAppText: ds!.pendingCodexAppText,
+                codexAppApplicationContext: ds!.pendingCodexAppApplicationContext,
+                codexAppMessageContext: ds!.pendingCodexAppMessageContext,
+                codexAppFollowUps: ds!.pendingCodexAppFollowUps,
+                codexAppFollowUpContexts: ds!.pendingCodexAppFollowUpContexts,
+              },
             );
             // Last-line defence: prompt prep awaited above — if anything
             // replaced OR closed the session in that window (`/close` deletes
@@ -1439,10 +1466,16 @@ export async function handleCommand(
             forkWorker(ds!, '', false);
           }
           ds!.pendingPrompt = undefined;
+          ds!.pendingCodexAppText = undefined;
+          ds!.pendingCodexAppApplicationContext = undefined;
+          ds!.pendingCodexAppMessageContext = undefined;
           ds!.pendingAttachments = undefined;
           ds!.pendingMentions = undefined;
+          ds!.pendingSubstituteTrigger = undefined;
           ds!.pendingSender = undefined;
           ds!.pendingFollowUps = undefined;
+          ds!.pendingCodexAppFollowUps = undefined;
+          ds!.pendingCodexAppFollowUpContexts = undefined;
           await sessionReply(rootId, replyText);
         };
 
@@ -1455,6 +1488,8 @@ export async function handleCommand(
             // First spawn: pin the new cwd onto the CURRENT session, then fork.
             ds!.workingDir = selectedPath;
             ds!.session.workingDir = selectedPath;
+            // A single repo selection supersedes any stale multi-Riff stamp.
+            ds!.session.riffRepoDirs = undefined;
             sessionStore.updateSession(ds!.session);
             await forkPendingCli(t('cmd.repo.selected_in_pending', { name: displayName }, loc));
           } else {
@@ -1577,6 +1612,22 @@ export async function handleCommand(
               logger.info(`[${logTag}] Worktree ${creation.path} created but session changed mid-flight — not switching`);
               await sessionReply(rootId, t('cmd.repo.worktree_created_not_switched', { path: creation.path, branch: creation.branch }, loc));
               break;
+            }
+            const botCfg = getBot(ds.larkAppId).config;
+            const effectiveBackend = resolvePairedSpawnBackendType(
+              wasPending ? (ds.session.cliId ?? botCfg.cliId) : botCfg.cliId,
+              wasPending ? ds.session.backendType : undefined,
+              botCfg.backendType,
+              config.daemon.backendType,
+            );
+            if (effectiveBackend === 'riff') {
+              try {
+                await pushWorktreeBranch(creation.path, creation.branch);
+              } catch (e) {
+                const errMsg = e instanceof Error ? e.message : String(e);
+                logger.warn(`[${logTag}] riff worktree branch push failed (${creation.branch}): ${errMsg}`);
+                await sessionReply(rootId, t('card.repo.riff_worktree_push_failed', { branch: creation.branch, error: errMsg }, loc));
+              }
             }
             await sessionReply(rootId, t('cmd.repo.worktree_created', {
               path: creation.path, branch: creation.branch, base: creation.baseRef,

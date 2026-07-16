@@ -509,6 +509,11 @@ export interface BotConfig {
    * such as --yolo or --dangerously-*. Missing/false preserves legacy behavior.
    */
   disableCliBypass?: boolean;
+  /** Experimental Codex App input split. When true, newly accepted turns send
+   * the real user text as app-server `input` and keep Botmux metadata in
+   * `additionalContext`, so the desktop user bubble stays clean. Missing/false
+   * preserves the legacy XML-ish prompt byte-for-byte. Codex App only. */
+  codexAppCleanInput?: boolean;
   /**
    * Run this bot's CLI inside a per-session file sandbox (bubblewrap, Linux):
    * the agent sees only a clone of the project + a de-identified config dir,
@@ -1419,6 +1424,7 @@ export function parseBotConfigsFromText(jsonText: string): BotConfig[] {
         ? entry.model.trim()
         : undefined,
       disableCliBypass: entry.disableCliBypass === true,
+      codexAppCleanInput: entry.codexAppCleanInput === true || undefined,
       sandbox: entry.sandbox === true,
       sandboxHidePaths: normalizeStringList(entry.sandboxHidePaths),
       sandboxReadonlyPaths: normalizeStringList(entry.sandboxReadonlyPaths),

@@ -101,6 +101,54 @@ describe('dashboard IPC server', () => {
   });
 });
 
+describe('PUT /api/bot-card-prefs — Codex App clean history', () => {
+  it('is default-off and persists explicit on/off changes immediately', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'dashboard-ipc-codex-clean-'));
+    const configPath = join(dir, 'bots.json');
+    const appId = 'test-codex-clean-app';
+    const prevBotsConfig = process.env.BOTS_CONFIG;
+    try {
+      process.env.BOTS_CONFIG = configPath;
+      writeFileSync(configPath, JSON.stringify([{
+        larkAppId: appId,
+        larkAppSecret: 'secret',
+        cliId: 'codex-app',
+      }], null, 2));
+      loadBotConfigs().forEach((c: any) => registerBot(c));
+      setLarkAppId(appId);
+      handle = await startIpcServer({ port: 0, host: '127.0.0.1' });
+      const base = `http://127.0.0.1:${handle.port}`;
+
+      const initial = await (await fetch(`${base}/api/bot-default-oncall`)).json();
+      expect(initial.codexAppCleanInput).toBe(false);
+
+      const on = await fetch(`${base}/api/bot-card-prefs`, {
+        method: 'PUT',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ codexAppCleanInput: true }),
+      });
+      expect(on.status).toBe(200);
+      expect(await on.json()).toMatchObject({ ok: true, codexAppCleanInput: true });
+      expect(JSON.parse(readFileSync(configPath, 'utf-8'))[0].codexAppCleanInput).toBe(true);
+
+      const off = await fetch(`${base}/api/bot-card-prefs`, {
+        method: 'PUT',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ codexAppCleanInput: false }),
+      });
+      expect(off.status).toBe(200);
+      expect(await off.json()).toMatchObject({ ok: true, codexAppCleanInput: false });
+      expect(JSON.parse(readFileSync(configPath, 'utf-8'))[0].codexAppCleanInput).toBeUndefined();
+    } finally {
+      if (handle) await handle.close();
+      handle = null;
+      if (prevBotsConfig === undefined) delete process.env.BOTS_CONFIG;
+      else process.env.BOTS_CONFIG = prevBotsConfig;
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});
+
 describe('GET /api/sessions', () => {
   it('returns array shape (sessions: Row[])', async () => {
     handle = await startIpcServer({ port: 0, host: '127.0.0.1' });

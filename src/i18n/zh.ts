@@ -668,6 +668,7 @@ export const messages: Record<string, string> = {
   'card.voice.toast_session_gone': '⚠️ 会话已不在线，无法生成语音总结',
   'card.voice.toast_need_auth': '🔒 你没有该机器人的使用权限，无法生成语音总结，请联系管理员授权',
   'card.voice.toast_worker_busy': '⚠️ 会话当前还在执行中，请等它空闲后再生成语音总结。',
+  'card.voice.user_message': '生成语音总结',
   'card.action.takeover_retired': '⚠️ 旧版"接管"按钮已停用。bridge 模式下原 CLI 由 botmux 桥接，无需接管即可在飞书中收到回答。如需 /resume 完整接管能力，请等待 /adopt --takeover 命令上线。',
   'card.action.terminal_not_ready': '⚠️ 终端尚未就绪，请稍后再试。',
   'card.action.local_terminal_opened': '💻 已请求打开本机 {cliName}',
@@ -1141,6 +1142,7 @@ export const messages: Record<string, string> = {
 
   // External event trigger seed
   'trigger.external_event': '外部事件触发：{source}',
+  'trigger.external_event_clean': '外部事件触发',
 
   // Worker-side submit / notify messages
   'worker.submit_impossible': '⚠️ 刚才那条消息没有写入 {cliName}，因为当前按键配置无法从终端自动提交。\n原因：{reason}\n请调整 Claude Code Chat keybinding 后重发。\n开头：{preview}',

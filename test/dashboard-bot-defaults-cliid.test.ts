@@ -1,8 +1,8 @@
 import React from 'react';
 import TestRenderer, { act } from 'react-test-renderer';
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { displayCliId } from '../src/dashboard/web/bot-defaults.js';
-import { BotAgentSection } from '../src/dashboard/web/bot-defaults-page.js';
+import { BotAgentSection, CodexAppDisplaySection } from '../src/dashboard/web/bot-defaults-page.js';
 import { isOnboardingSubmitDisabled } from '../src/dashboard/web/bot-onboarding.js';
 
 (globalThis as any).IS_REACT_ACT_ENVIRONMENT = true;
@@ -109,5 +109,90 @@ describe('riff CLI switch persistence (PR #467 P1)', () => {
     const puts = requests.filter(r => r.method === 'PUT');
     expect(puts.map(r => r.url.split('/').pop())).toEqual(['riff', 'agent']);
     expect(puts[1]!.body).toEqual({ cliId: 'riff', model: '' });
+  });
+});
+
+describe('Codex App history switch', () => {
+  it('keeps the clean-history control visible when the nested Codex dependency is unavailable', () => {
+    let agentRenderer!: TestRenderer.ReactTestRenderer;
+    let displayRenderer!: TestRenderer.ReactTestRenderer;
+    act(() => {
+      agentRenderer = TestRenderer.create(React.createElement(BotAgentSection, {
+        bot: { larkAppId: 'cli_codex_app_missing', cliId: 'codex-app', model: '' },
+        sessionFallback: 'codex-app',
+        cliState: {
+          options: [{
+            id: 'codex-app',
+            label: 'Codex App',
+            available: false,
+            command: 'codex',
+            availabilityReason: '找不到嵌套 codex',
+          }],
+          ttadkModelDefault: 'glm-5.1',
+          ttadkModelSuggestions: [],
+        },
+        patchBot: () => undefined,
+      }));
+      displayRenderer = TestRenderer.create(React.createElement(CodexAppDisplaySection, {
+        bot: { larkAppId: 'cli_codex_app_missing', cliId: 'codex-app' },
+        putCardPref: vi.fn(),
+      }));
+    });
+
+    expect(agentRenderer.root.findByProps({ className: 'hint-warn' }).children.join('')).toContain('codex');
+    expect(displayRenderer.root.findByProps({ 'data-action': 'toggle-codex-app-clean-input' }).props.checked).toBe(false);
+  });
+
+  it('renders a real default-off Codex App history switch and persists the opt-in', async () => {
+    const putCardPref = vi.fn(async () => ({
+      ok: true,
+      status: 200,
+      body: { ok: true, codexAppCleanInput: true },
+    }));
+    let renderer!: TestRenderer.ReactTestRenderer;
+    act(() => {
+      renderer = TestRenderer.create(React.createElement(CodexAppDisplaySection, {
+        bot: { larkAppId: 'cli_codex_app', cliId: 'codex-app' },
+        putCardPref,
+      }));
+    });
+
+    const toggle = renderer.root.findByProps({ 'data-action': 'toggle-codex-app-clean-input' });
+    expect(toggle.props.checked).toBe(false);
+    const renderedText = JSON.stringify(renderer.toJSON());
+    expect(renderedText).toContain('只影响 Codex App');
+    expect(renderedText).toContain('默认关闭，保持原有兼容行为');
+
+    await act(async () => {
+      toggle.props.onChange({ currentTarget: { checked: true } });
+      await Promise.resolve();
+    });
+    expect(putCardPref).toHaveBeenCalledWith({ codexAppCleanInput: true });
+    expect(renderer.root.findByProps({ 'data-action': 'toggle-codex-app-clean-input' }).props.checked).toBe(true);
+  });
+
+  it('rolls the Codex App history switch back when persistence fails', async () => {
+    const putCardPref = vi.fn(async () => ({
+      ok: false,
+      status: 500,
+      body: { error: 'write_failed' },
+    }));
+    let renderer!: TestRenderer.ReactTestRenderer;
+    act(() => {
+      renderer = TestRenderer.create(React.createElement(CodexAppDisplaySection, {
+        bot: { larkAppId: 'cli_codex_app', cliId: 'codex-app' },
+        putCardPref,
+      }));
+    });
+
+    const toggle = renderer.root.findByProps({ 'data-action': 'toggle-codex-app-clean-input' });
+    await act(async () => {
+      toggle.props.onChange({ currentTarget: { checked: true } });
+      await Promise.resolve();
+    });
+
+    expect(renderer.root.findByProps({ 'data-action': 'toggle-codex-app-clean-input' }).props.checked).toBe(false);
+    expect(renderer.root.findByProps({ 'data-codex-app-clean-input-status': '' }).children.join(''))
+      .toContain('write_failed');
   });
 });

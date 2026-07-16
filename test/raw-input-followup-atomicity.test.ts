@@ -45,7 +45,7 @@ describe('worker raw_input handler', () => {
   });
 
   it('routes the follow-up through sendToPty (normal busy-queue semantics)', () => {
-    expect(region).toContain('sendToPty(msg.followUpContent)');
+    expect(region).toContain('sendToPty(msg.followUpContent, undefined, msg.followUpCodexAppInput)');
   });
 });
 

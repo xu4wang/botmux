@@ -34,7 +34,7 @@ import { listDocSubscriptionsForSession, removeDocSubscription } from '../servic
 import { TmuxBackend } from '../adapters/backend/tmux-backend.js';
 import { HerdrBackend } from '../adapters/backend/herdr-backend.js';
 import { sandboxEnabled } from '../adapters/backend/sandbox.js';
-import { isSuspendableBackendType, getSessionPersistentBackendType, resolveSpawnBackendType, persistentSessionName, killPersistentSession, reconcileRiffBackendType } from './persistent-backend.js';
+import { isSuspendableBackendType, getSessionPersistentBackendType, persistentSessionName, killPersistentSession, resolvePairedSpawnBackendType } from './persistent-backend.js';
 import { getBot, getAllBots, loadBotConfigs, resolveBrandLabel } from '../bot-registry.js';
 
 /** A random id minted once per daemon process (this lifetime). Stamped onto
@@ -70,7 +70,7 @@ import { prepareSessionSkillPrompt } from './skills/session-runtime.js';
 import { prepareSkillDelivery } from './skills/delivery.js';
 import { resolveEffectivePluginIds } from './plugins/effective.js';
 import { ensureGatewayEntry } from './plugins/mcp/gateway-installer.js';
-import type { DaemonToWorker, WorkerToDaemon, Session, DisplayMode } from '../types.js';
+import type { CliTurnPayload, CodexAppTurnInput, DaemonToWorker, WorkerToDaemon, Session, DisplayMode } from '../types.js';
 import { sessionKey, sessionAnchorId, isDocNativeSession, type DaemonSession } from './types.js';
 import { DONE_REACTION_EMOJI_TYPE } from './pending-response.js';
 import { buildTerminalUrl } from './terminal-url.js';
@@ -1659,16 +1659,54 @@ function resolvesToHome(p: string): boolean {
   catch { return p === homedir(); }
 }
 
-export function forkWorker(ds: DaemonSession, prompt: string, resumeOrTurnId: boolean | string | { resume?: boolean; turnId?: string } = false): void {
+function codexAppInputForSession(
+  ds: DaemonSession,
+  input: CodexAppTurnInput | undefined,
+  turnId?: string,
+): CodexAppTurnInput | undefined {
+  if (!input) return undefined;
+  const botCfg = getBot(ds.larkAppId).config;
+  const effectiveCliId = ds.session.cliId ?? botCfg.cliId;
+  if (effectiveCliId !== 'codex-app' || botCfg.codexAppCleanInput !== true || ds.adoptedFrom) return undefined;
+  return turnId && !input.clientUserMessageId
+    ? { ...input, clientUserMessageId: turnId }
+    : input;
+}
+
+/** Send one normal (non-raw) worker turn while applying the per-bot Codex App
+ * clean-input gate at message acceptance time. This freezes the sidecar onto
+ * the IPC item, so later config flips do not mutate an already queued turn. */
+export function sendWorkerInput(
+  ds: DaemonSession,
+  payload: string | CliTurnPayload,
+  turnId?: string,
+): boolean {
+  if (!ds.worker || ds.worker.killed) return false;
+  const normalized = typeof payload === 'string' ? { content: payload } : payload;
+  const codexAppInput = codexAppInputForSession(ds, normalized.codexAppInput, turnId);
+  ds.worker.send({
+    type: 'message',
+    content: normalized.content,
+    ...(codexAppInput ? { codexAppInput } : {}),
+    ...(turnId ? { turnId } : {}),
+  } as DaemonToWorker);
+  return true;
+}
+
+export function forkWorker(ds: DaemonSession, promptInput: string | CliTurnPayload, resumeOrTurnId: boolean | string | { resume?: boolean; turnId?: string } = false): void {
   const cb = requireCallbacks();
   const bot = getBot(ds.larkAppId);
   const botCfg = bot.config;
+  const promptPayload = typeof promptInput === 'string' ? { content: promptInput } : promptInput;
+  const prompt = promptPayload.content;
   // 不变式：一旦真正起 CLI，会话就不再是「待办池(queued)」parked 态。无论由哪条
   // 路径触发（激活按钮 / 拖到进行中 / 群里来消息抢先起会话），都在此清掉 queued
   // 标记并落盘——否则重启后会被当 parked 恢复成 hasHistory:false 而丢掉真历史。
   if (ds.session.queued) {
     ds.session.queued = false;
     ds.session.queuedPrompt = undefined;
+    ds.session.queuedCodexAppText = undefined;
+    ds.session.queuedCodexAppMessageContext = undefined;
     sessionStore.updateSession(ds.session);
   }
   // worker.js lives in the same directory as daemon.js (src/)
@@ -1840,6 +1878,11 @@ export function forkWorker(ds: DaemonSession, prompt: string, resumeOrTurnId: bo
   });
 
   // Send init config — use per-bot settings
+  const promptCodexAppInput = codexAppInputForSession(
+    ds,
+    promptPayload.codexAppInput,
+    initTurnId ?? ds.currentReplyTarget?.turnId,
+  );
   const initMsg: DaemonToWorker = {
     type: 'init',
     sessionId: ds.session.sessionId,
@@ -1881,11 +1924,12 @@ export function forkWorker(ds: DaemonSession, prompt: string, resumeOrTurnId: bo
     // the real persistent pane (the stamp is written below; restore reads it via
     // getSessionPersistentBackendType). A brand-new session (no stamp) resolves
     // from live config, so a dashboard backend switch only affects NEW sessions.
-    backendType: reconcileRiffBackendType(agentCfg.cliId, resolveSpawnBackendType(ds.session.backendType, botCfg.backendType, config.daemon.backendType), config.daemon.backendType),
+    backendType: resolvePairedSpawnBackendType(agentCfg.cliId, ds.session.backendType, botCfg.backendType, config.daemon.backendType),
     backendConfig: botCfg.riff,
     riffParentTaskId: ds.session.riffParentTaskId,
     riffRepoDirs: ds.session.riffRepoDirs,
     prompt,
+    ...(promptCodexAppInput ? { promptCodexAppInput } : {}),
     resume,
     cliSessionId: ds.session.cliSessionId,
     ownerOpenId: ds.ownerOpenId,
@@ -2251,13 +2295,20 @@ function setupWorkerHandlers(
           // enqueues followUpContent only after the Enter landed.
           const followUp = ds.pendingFollowUpInput;
           ds.pendingFollowUpInput = undefined;
+          const followUpCodexAppInput = followUp?.codexAppInputGateFrozen
+            ? followUp.codexAppInput
+            : codexAppInputForSession(ds, followUp?.codexAppInput);
           ds.worker.send({
             type: 'raw_input',
             content: rawInput,
             followUpContent: followUp?.cliInput,
+            ...(followUpCodexAppInput ? { followUpCodexAppInput } : {}),
           } as DaemonToWorker);
           logger.info(`[${t}] Sent pending raw input after prompt_ready: ${rawInput.substring(0, 80)}${followUp ? ` (+follow-up ${followUp.cliInput.length} chars)` : ''}`);
-          if (followUp) rememberLastCliInput(ds, followUp.userPrompt, followUp.cliInput);
+          if (followUp) rememberLastCliInput(ds, followUp.userPrompt, {
+            content: followUp.cliInput,
+            ...(followUpCodexAppInput ? { codexAppInput: followUpCodexAppInput } : {}),
+          }, { codexAppInputAccepted: !!followUpCodexAppInput });
         }
         break;
       }

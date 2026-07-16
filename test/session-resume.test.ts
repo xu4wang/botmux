@@ -332,6 +332,36 @@ describe('resumeSession', () => {
       expect(restoreUsageLimitRuntimeState).toHaveBeenCalledWith(ds);
     });
 
+    it('restores the persisted clean sidecar for a long-running Codex App session', async () => {
+      const closed = makeClosedSession({
+        chatId: 'oc_codex_restore',
+        rootMessageId: 'om_codex_restore',
+        cliId: 'codex-app',
+      });
+      closed.lastUserPrompt = '第 27 轮继续分析';
+      closed.lastCliInput = '<user_message>第 27 轮继续分析</user_message>';
+      closed.lastCodexAppInput = {
+        text: '第 27 轮继续分析',
+        clientUserMessageId: 'om_round_27',
+        additionalContext: {
+          botmux_sender: { kind: 'untrusted', value: '<sender name="晓雪" />' },
+          botmux_role: { kind: 'application', value: '<role>reviewer</role>' },
+        },
+      };
+      sessionStore.updateSession(closed);
+      sessionStore.closeSession(closed.sessionId);
+
+      const map = new Map<string, DaemonSession>();
+      const result = await resumeSession(closed.sessionId, map);
+
+      expect(result.ok).toBe(true);
+      const restored = map.get(sessionKey('om_codex_restore', 'app_test'))!;
+      expect(restored.lastUserPrompt).toBe('第 27 轮继续分析');
+      expect(restored.lastCliInput).toContain('<user_message>');
+      expect(restored.lastCodexAppInput).toEqual(closed.lastCodexAppInput);
+      expect(restored.session.lastCodexAppInput).toEqual(closed.lastCodexAppInput);
+    });
+
     it('flips status back to active, clears closedAt, and registers in the Map (thread-scope)', async () => {
       const closed = makeClosedSession({ rootMessageId: 'om_threadA' });
       (closed as any).lastUserPrompt = '继续修复限额后的任务';

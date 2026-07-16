@@ -1,6 +1,14 @@
 #!/usr/bin/env node
-import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process';
+import { spawn, spawnSync, type ChildProcessWithoutNullStreams } from 'node:child_process';
 import { Buffer } from 'node:buffer';
+import type { CodexAppTurnInput } from './types.js';
+import {
+  buildCodexAppTurnStartParams,
+  isCleanInputCapabilityError,
+  isCodexAppTurnInput,
+  parseCodexVersion,
+  type CodexVersion,
+} from './adapters/cli/codex-app-turn.js';
 
 type JsonObject = Record<string, any>;
 
@@ -22,12 +30,18 @@ interface PendingRequest {
 
 interface ActiveTurn {
   turnId?: string;
+  serverStarted: boolean;
   startedAtMs: number;
   finalText: string;
   allAgentText: string;
   itemText: Map<string, string>;
   done: Promise<void>;
   resolveDone: () => void;
+}
+
+interface QueuedInput {
+  content: string;
+  codexAppInput?: CodexAppTurnInput;
 }
 
 const OSC_PREFIX = '\x1b]777;botmux:';
@@ -246,15 +260,37 @@ const client = new AppServerClient(args.codexBin, args.cwd);
 let threadId = args.threadId;
 let threadReady = false;
 let activeTurn: ActiveTurn | null = null;
-const queue: string[] = [];
+const queue: QueuedInput[] = [];
 let inputBuffer = '';
 let processing = false;
+let cleanInputUnsupported = false;
+let codexVersionChecked = false;
+let codexVersion: CodexVersion | undefined;
+let cleanVersionWarningShown = false;
+
+function detectedCodexVersion(): CodexVersion | undefined {
+  if (codexVersionChecked) return codexVersion;
+  codexVersionChecked = true;
+  try {
+    const result = spawnSync(args.codexBin, ['--version'], {
+      cwd: args.cwd,
+      env: process.env,
+      encoding: 'utf8',
+      timeout: 10_000,
+    });
+    codexVersion = parseCodexVersion(`${result.stdout ?? ''}\n${result.stderr ?? ''}`);
+  } catch {
+    codexVersion = undefined;
+  }
+  return codexVersion;
+}
 
 function makeTurn(): ActiveTurn {
   let resolveDone!: () => void;
   const done = new Promise<void>(resolve => { resolveDone = resolve; });
   return {
     startedAtMs: Date.now(),
+    serverStarted: false,
     finalText: '',
     allAgentText: '',
     itemText: new Map(),
@@ -302,6 +338,7 @@ function handleNotification(msg: JsonObject): void {
   if (activeTurn.turnId && params.turnId && params.turnId !== activeTurn.turnId) return;
 
   if (msg.method === 'turn/started') {
+    activeTurn.serverStarted = true;
     activeTurn.turnId = params.turn?.id ?? params.turnId ?? activeTurn.turnId;
     return;
   }
@@ -406,22 +443,52 @@ async function ensureThread(): Promise<string> {
   return startedThreadId;
 }
 
-async function runTurn(content: string): Promise<void> {
+async function runTurn(message: QueuedInput): Promise<void> {
   const tid = await ensureThread();
   const turn = makeTurn();
   activeTurn = turn;
+  const version = message.codexAppInput ? detectedCodexVersion() : undefined;
+  let built = buildCodexAppTurnStartParams({
+    threadId: tid,
+    cwd: args.cwd,
+    legacyContent: message.content,
+    codexAppInput: message.codexAppInput,
+    codexVersion: version,
+    structuredDisabled: cleanInputUnsupported,
+  });
+  if (message.codexAppInput && !built.structured && !cleanInputUnsupported && !cleanVersionWarningShown) {
+    cleanVersionWarningShown = true;
+    const found = version ? `${version.major}.${version.minor}.${version.patch}` : 'unknown';
+    writeLine(`[codex-app] clean input requires codex >= 0.135.0 (found ${found}); using legacy prompt`);
+  }
+  for (const path of built.skippedImages) {
+    writeLine(`[codex-app] skipped unreadable local image: ${path}`);
+  }
   writeLine();
   writeLine('[user]');
-  writeLine(content);
+  writeLine(built.structured && message.codexAppInput ? message.codexAppInput.text : message.content);
   writeLine();
 
-  const result = await client.request('turn/start', {
-    threadId: tid,
-    input: [{ type: 'text', text: content, text_elements: [] }],
-    cwd: args.cwd,
-    approvalPolicy: 'never',
-    sandboxPolicy: { type: 'dangerFullAccess' },
-  });
+  let result;
+  try {
+    result = await client.request('turn/start', built.params);
+  } catch (err) {
+    if (!built.structured || turn.serverStarted || !isCleanInputCapabilityError(err)) throw err;
+    // The app-server explicitly rejected the experimental field before a turn
+    // started. Disable structured input for this runner lifetime and retry the
+    // preserved legacy prompt exactly once.
+    cleanInputUnsupported = true;
+    writeLine('[codex-app] clean input unsupported by app-server; retrying this turn with the legacy prompt');
+    built = buildCodexAppTurnStartParams({
+      threadId: tid,
+      cwd: args.cwd,
+      legacyContent: message.content,
+      codexAppInput: message.codexAppInput,
+      codexVersion: version,
+      structuredDisabled: true,
+    });
+    result = await client.request('turn/start', built.params);
+  }
   turn.turnId = result.turn?.id ?? turn.turnId;
   await turn.done;
 
@@ -472,7 +539,13 @@ function enqueueLine(line: string): void {
     try {
       const decoded = JSON.parse(Buffer.from(encoded, 'base64').toString('utf8'));
       if (decoded?.type === 'message' && typeof decoded.content === 'string') {
-        queue.push(decoded.content);
+        const codexAppInput = isCodexAppTurnInput(decoded.codexAppInput)
+          ? decoded.codexAppInput
+          : undefined;
+        if (decoded.codexAppInput !== undefined && !codexAppInput) {
+          writeLine('[codex-app] ignored invalid structured input sidecar');
+        }
+        queue.push({ content: decoded.content, codexAppInput });
         void drainQueue();
       }
     } catch (err: any) {
@@ -480,7 +553,7 @@ function enqueueLine(line: string): void {
     }
     return;
   }
-  queue.push(line);
+  queue.push({ content: line });
   void drainQueue();
 }
 

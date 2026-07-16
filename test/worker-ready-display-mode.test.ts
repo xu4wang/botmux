@@ -126,6 +126,7 @@ vi.mock('@larksuiteoapi/node-sdk', () => ({
 
 import { CARD_POSTING_SENTINEL, initWorkerPool, __testOnly_setupWorkerHandlers } from '../src/core/worker-pool.js';
 import type { DaemonSession } from '../src/core/types.js';
+import { getBot } from '../src/bot-registry.js';
 
 // ─── Helpers ───────────────────────────────────────────────────────────────
 
@@ -537,6 +538,61 @@ describe('Worker ready: set_display_mode re-sync', () => {
     fakeWorker.emit('message', { type: 'prompt_ready' });
     await flush();
     expect(fakeWorker.send).not.toHaveBeenCalled();
+  });
+
+  it('prompt_ready preserves a clean sidecar whose gate was frozen on when staged', async () => {
+    const fakeWorker = makeFakeWorker();
+    const ds = makeDs({
+      worker: fakeWorker,
+      pendingRawInput: '/goal ship',
+      pendingFollowUpInput: {
+        userPrompt: 'clean',
+        cliInput: '<user_message>legacy</user_message>',
+        codexAppInput: { text: 'clean' },
+        codexAppInputGateFrozen: true,
+      },
+    } as Partial<DaemonSession>);
+
+    __testOnly_setupWorkerHandlers(ds, fakeWorker);
+    fakeWorker.emit('message', { type: 'prompt_ready' });
+    await flush();
+
+    expect(fakeWorker.send).toHaveBeenCalledWith({
+      type: 'raw_input',
+      content: '/goal ship',
+      followUpContent: '<user_message>legacy</user_message>',
+      followUpCodexAppInput: { text: 'clean' },
+    });
+  });
+
+  it('prompt_ready keeps a staged-off follow-up legacy even if config is now on', async () => {
+    vi.mocked(getBot).mockReturnValue({
+      config: { larkAppId: 'app_test', larkAppSecret: 'secret', cliId: 'codex-app', codexAppCleanInput: true },
+      resolvedAllowedUsers: [],
+      botOpenId: 'ou_bot',
+      botName: 'TestBot',
+    } as any);
+    const fakeWorker = makeFakeWorker();
+    const ds = makeDs({
+      worker: fakeWorker,
+      pendingRawInput: '/goal ship',
+      pendingFollowUpInput: {
+        userPrompt: 'legacy',
+        cliInput: '<user_message>legacy</user_message>',
+        codexAppInputGateFrozen: true,
+      },
+    } as Partial<DaemonSession>);
+    ds.session.cliId = 'codex-app' as any;
+
+    __testOnly_setupWorkerHandlers(ds, fakeWorker);
+    fakeWorker.emit('message', { type: 'prompt_ready' });
+    await flush();
+
+    expect(fakeWorker.send).toHaveBeenCalledWith({
+      type: 'raw_input',
+      content: '/goal ship',
+      followUpContent: '<user_message>legacy</user_message>',
+    });
   });
 
   it('prompt_ready without pending raw input never emits the buffered follow-up alone', async () => {

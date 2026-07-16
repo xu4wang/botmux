@@ -38,6 +38,12 @@ export interface Session {
   /** queued 会话被激活时要作为首轮发给 CLI 的原始内容（用户在弹框里写的任务）。
    *  仅 queued===true 时有意义；激活后清空。持久化以扛 daemon 重启。 */
   queuedPrompt?: string;
+  /** Dashboard backlog 对应的 Codex App 可见用户原文。queuedPrompt 仍保留
+   * 角色/编排包装供 legacy CLI 使用；这两个旁路字段让 daemon 重启后也能在
+   * clean-input 开启时恢复相同的可见文本与隐藏上下文。激活后与 queuedPrompt
+   * 一并清空。 */
+  queuedCodexAppText?: string;
+  queuedCodexAppMessageContext?: string;
   createdAt: string;
   /** Last user/bot/scheduler input that was routed into this session. */
   lastMessageAt?: string;
@@ -124,6 +130,9 @@ export interface Session {
   usageLimit?: CliUsageLimitState;
   lastUserPrompt?: string;
   lastCliInput?: string;
+  /** Structured companion for lastCliInput so retry_last_task can preserve a
+   * clean Codex App turn. The legacy string remains authoritative fallback. */
+  lastCodexAppInput?: CodexAppTurnInput;
   /** Default local project whiteboard bound to this session when the optional whiteboard feature is enabled. */
   whiteboardId?: string;
   /** CLI-native resume id when it differs from botmux's sessionId (for example Codex thread id). */
@@ -220,13 +229,18 @@ export interface LarkMention {
   idType?: string;     // e.g. "open_id" or "app_id" from Lark event payloads
 }
 
+export interface SubstituteTriggerIdentity {
+  name?: string;
+  openId?: string;
+  userId?: string;
+  unionId?: string;
+}
+
 export interface SubstituteTrigger {
-  target: {
-    name?: string;
-    openId?: string;
-    userId?: string;
-    unionId?: string;
-  };
+  /** Canonical identity copied only from Botmux configuration. */
+  target: SubstituteTriggerIdentity;
+  /** Event-provided mention metadata. It is observation data, never policy. */
+  observedMention?: SubstituteTriggerIdentity;
   disclosure?: 'prefix' | 'none';
 }
 
@@ -330,16 +344,45 @@ export type TermActionKey =
   | 'up' | 'down' | 'left' | 'right'
   | 'half_page_up' | 'half_page_down';
 
+/** A context fragment passed to Codex App's experimental `additionalContext`
+ * turn/start field. `application` becomes developer-role context; `untrusted`
+ * stays user-role context. Keys are supplied separately by the caller and must
+ * be fixed Botmux identifiers rather than user-controlled text. */
+export interface CodexAppAdditionalContextEntry {
+  kind: 'untrusted' | 'application';
+  value: string;
+}
+
+/** Structured Codex App turn input. The legacy XML-ish prompt always travels
+ * alongside this sidecar and remains the fallback for unsupported app-server
+ * versions. This object is intentionally protocol-shaped so the runner only
+ * validates/maps it; it never has to reverse-parse the legacy prompt. */
+export interface CodexAppTurnInput {
+  text: string;
+  additionalContext?: Record<string, CodexAppAdditionalContextEntry>;
+  localImages?: Array<{
+    path: string;
+    detail?: 'auto' | 'low' | 'high' | 'original';
+  }>;
+  clientUserMessageId?: string;
+}
+
+/** A legacy CLI prompt plus an optional backend-specific structured sidecar. */
+export interface CliTurnPayload {
+  content: string;
+  codexAppInput?: CodexAppTurnInput;
+}
+
 /** Messages sent from Daemon to Worker */
 export type DaemonToWorker =
-  | { type: 'init'; sessionId: string; chatId: string; rootMessageId: string; workingDir: string; cliId: string; cliPathOverride?: string; wrapperCli?: string; launchShell?: string; model?: string; disableCliBypass?: boolean; startupCommands?: string[]; env?: Record<string, string>; sandbox?: boolean; sandboxHidePaths?: string[]; sandboxReadonlyPaths?: string[]; sandboxNetwork?: boolean; readIsolation?: boolean; readDenyExtraPaths?: string[]; daemonBootId?: string; backendType: BackendType; backendConfig?: RiffBackendConfig; riffParentTaskId?: string; riffRepoDirs?: string[]; prompt: string; resume?: boolean; cliSessionId?: string; originalSessionId?: string; ownerOpenId?: string; webPort?: number; larkAppId: string; larkAppSecret: string; brand?: 'feishu' | 'lark'; botName?: string; botOpenId?: string; locale?: 'zh' | 'en'; turnId?: string; pluginBindings?: string[]; skillPolicy?: BotSkillPolicy; skillPluginDir?: string; skillReadonlyRoots?: string[]; adoptMode?: boolean; adoptSource?: 'tmux' | 'herdr' | 'zellij'; adoptTmuxTarget?: string; adoptZellijSession?: string; adoptZellijPaneId?: string; adoptHerdrSessionName?: string; adoptHerdrTarget?: string; adoptHerdrPaneId?: string; adoptPaneCols?: number; adoptPaneRows?: number; bridgeJsonlPath?: string; adoptCliPid?: number; adoptCwd?: string; adoptRestoredFromMetadata?: boolean }
-  | { type: 'message'; content: string; turnId?: string }
+  | { type: 'init'; sessionId: string; chatId: string; rootMessageId: string; workingDir: string; cliId: string; cliPathOverride?: string; wrapperCli?: string; launchShell?: string; model?: string; disableCliBypass?: boolean; startupCommands?: string[]; env?: Record<string, string>; sandbox?: boolean; sandboxHidePaths?: string[]; sandboxReadonlyPaths?: string[]; sandboxNetwork?: boolean; readIsolation?: boolean; readDenyExtraPaths?: string[]; daemonBootId?: string; backendType: BackendType; backendConfig?: RiffBackendConfig; riffParentTaskId?: string; riffRepoDirs?: string[]; prompt: string; promptCodexAppInput?: CodexAppTurnInput; resume?: boolean; cliSessionId?: string; originalSessionId?: string; ownerOpenId?: string; webPort?: number; larkAppId: string; larkAppSecret: string; brand?: 'feishu' | 'lark'; botName?: string; botOpenId?: string; locale?: 'zh' | 'en'; turnId?: string; pluginBindings?: string[]; skillPolicy?: BotSkillPolicy; skillPluginDir?: string; skillReadonlyRoots?: string[]; adoptMode?: boolean; adoptSource?: 'tmux' | 'herdr' | 'zellij'; adoptTmuxTarget?: string; adoptZellijSession?: string; adoptZellijPaneId?: string; adoptHerdrSessionName?: string; adoptHerdrTarget?: string; adoptHerdrPaneId?: string; adoptPaneCols?: number; adoptPaneRows?: number; bridgeJsonlPath?: string; adoptCliPid?: number; adoptCwd?: string; adoptRestoredFromMetadata?: boolean }
+  | { type: 'message'; content: string; codexAppInput?: CodexAppTurnInput; turnId?: string }
   /** Literal slash-command passthrough. `followUpContent` rides along so the
    *  worker enqueues it strictly AFTER the slash command's Enter — two separate
    *  IPCs would race: process.on('message') handlers don't serialize, and the
    *  raw_input branch awaits 200ms between sendText and Enter, a window where
    *  a separate `message` IPC could write into the PTY first. */
-  | { type: 'raw_input'; content: string; followUpContent?: string }
+  | { type: 'raw_input'; content: string; followUpContent?: string; followUpCodexAppInput?: CodexAppTurnInput }
   | { type: 'close' }
   | { type: 'suspend' }
   | { type: 'restart' }

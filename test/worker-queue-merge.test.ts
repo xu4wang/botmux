@@ -16,4 +16,20 @@ describe('mergeQueuedCliInput', () => {
 
     expect(pending).toEqual([{ content: 'first\n\nsecond', turnId: 't2' }]);
   });
+
+  it('never merges structured Codex App turns because context is per-message', () => {
+    const pending = [{
+      content: 'legacy-1',
+      turnId: 't1',
+      codexAppInput: { text: 'clean-1' },
+    }];
+    const next = {
+      content: 'legacy-2',
+      turnId: 't2',
+      codexAppInput: { text: 'clean-2' },
+    };
+    expect(mergeQueuedCliInput(pending, next)).toBe(false);
+    expect(pending).toHaveLength(1);
+    expect(pending[0].codexAppInput.text).toBe('clean-1');
+  });
 });

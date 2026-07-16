@@ -88,7 +88,7 @@ import { createServer as createHttpServer, type IncomingMessage } from 'node:htt
 import { WebSocketServer, WebSocket } from 'ws';
 import { listenWebTerminalWithFallback } from './utils/web-terminal-listen.js';
 import { TERMINAL_FAVICON_DATA_URI } from './utils/terminal-favicon.js';
-import type { DaemonToWorker, WorkerToDaemon, DisplayMode, TermActionKey, ScreenStatus } from './types.js';
+import type { CodexAppTurnInput, DaemonToWorker, WorkerToDaemon, DisplayMode, TermActionKey, ScreenStatus } from './types.js';
 import { t, setDefaultLocale } from './i18n/index.js';
 import { TerminalRenderer } from './utils/terminal-renderer.js';
 import {
@@ -139,6 +139,7 @@ import * as pty from 'node-pty';
 import { createHash } from 'node:crypto';
 import { installHook, type HookInstallConfig } from './adapters/hook-installer.js';
 import { hookCommandFor } from './adapters/hook-command.js';
+import { withCodexAppContext } from './utils/codex-app-context.js';
 
 // ─── State ───────────────────────────────────────────────────────────────────
 
@@ -200,6 +201,14 @@ function refreshCliPluginGeneration(
     throw new Error(t('worker.skill_delivery_failed', { reason }));
   }
   cfg.prompt = generation.prompt;
+  if (cfg.promptCodexAppInput && generation.skillCatalog) {
+    cfg.promptCodexAppInput = withCodexAppContext(
+      cfg.promptCodexAppInput,
+      'botmux_plugin_skills',
+      generation.skillCatalog,
+      'application',
+    );
+  }
   cfg.skillPluginDir = generation.skillPluginDir;
   cfg.skillReadonlyRoots = generation.skillReadonlyRoots;
   deferredPluginSkillCatalog = generation.deferredSkillCatalog ?? null;
@@ -3785,7 +3794,9 @@ async function flushPending(): Promise<void> {
       // worker — exactly the failure mode this change is closing. Contain it.
       let result: Awaited<ReturnType<typeof cliAdapter.writeInput>> | undefined;
       try {
-        result = await cliAdapter.writeInput(backend, msg);
+        result = item.codexAppInput && cliAdapter.writeStructuredInput
+          ? await cliAdapter.writeStructuredInput(backend, msg, item.codexAppInput)
+          : await cliAdapter.writeInput(backend, msg);
         scheduleBusyPatternIdleProbe(`${cliName()} post-submit`);
       } catch (err: any) {
         log(`writeInput threw: ${err?.message ?? err}`);
@@ -3827,9 +3838,9 @@ async function flushPending(): Promise<void> {
   }
 }
 
-function sendToPty(content: string, turnId?: string): void {
+function sendToPty(content: string, turnId?: string, codexAppInput?: CodexAppTurnInput): void {
   if (!backend || !cliAdapter) return;
-  const next = { content, turnId };
+  const next = { content, turnId, codexAppInput };
   const shouldMergeQueued = !isFlushing && !shouldWriteNow({
     isPromptReady,
     isFlushing,
@@ -6746,7 +6757,11 @@ process.on('message', async (raw: unknown) => {
           codexBridgeMarkPendingTurn(msg.prompt, msg.turnId);
         }
         if (msg.prompt && (!cliAdapter?.passesInitialPromptViaArgs || deferInitialPrompt)) {
-          pendingMessages.push({ content: msg.prompt, turnId: msg.turnId });
+          pendingMessages.push({
+            content: msg.prompt,
+            turnId: msg.turnId,
+            codexAppInput: msg.promptCodexAppInput,
+          });
         }
 
         // Riff (remote HTTP backends): spawnCli already marked the prompt ready
@@ -6773,8 +6788,17 @@ process.on('message', async (raw: unknown) => {
       // Cancel any active tmux copy-mode scroll so user input reaches the CLI.
       if (tmuxScrolledHalfPages > 0) exitTmuxScrollMode();
       let content = msg.content;
+      let codexAppInput = msg.codexAppInput;
       if (deferredPluginSkillCatalog && !lastInitConfig?.adoptMode) {
         content = `${content}\n\n${deferredPluginSkillCatalog}`;
+        if (codexAppInput) {
+          codexAppInput = withCodexAppContext(
+            codexAppInput,
+            'botmux_plugin_skills',
+            deferredPluginSkillCatalog,
+            'application',
+          );
+        }
         deferredPluginSkillCatalog = null;
         log('Attached refreshed plugin Skill catalog to the first turn of this CLI generation');
       }
@@ -6874,7 +6898,7 @@ process.on('message', async (raw: unknown) => {
         // arrival. Marking now would race with a still-running previous
         // turn whose `botmux send` could sneak its sentAtMs past this
         // turn's markTimeMs and falsely suppress its fallback.
-        sendToPty(content, msg.turnId);
+        sendToPty(content, msg.turnId, codexAppInput);
       }
       break;
     }
@@ -6905,7 +6929,7 @@ process.on('message', async (raw: unknown) => {
         // Enter landed: sendToPty queues it as the next turn (type-ahead /
         // pendingMessages), exactly like a Lark message arriving while busy.
         if (msg.followUpContent) {
-          sendToPty(msg.followUpContent);
+          sendToPty(msg.followUpContent, undefined, msg.followUpCodexAppInput);
           log(`Enqueued follow-up after raw input (${msg.followUpContent.length} chars)`);
         }
       }

@@ -30,6 +30,17 @@ describe('InflightInputTracker', () => {
     expect(t.takeCarryOver()).toEqual([]);
   });
 
+  it('preserves the Codex App structured sidecar across a crash replay', () => {
+    const t = new InflightInputTracker();
+    const codexAppInput = {
+      text: 'clean',
+      additionalContext: { botmux_sender: { kind: 'untrusted' as const, value: 'Alice' } },
+    };
+    t.onWrite({ content: '<legacy />', turnId: 'om_1', codexAppInput });
+    expect(t.onCliExit()).toBe(1);
+    expect(t.takeCarryOver()).toEqual([{ content: '<legacy />', turnId: 'om_1', codexAppInput }]);
+  });
+
   it('completed turn: idle clears in-flight, a later crash re-queues nothing', () => {
     const t = new InflightInputTracker();
     t.onWrite(item('hello'));

@@ -665,6 +665,7 @@ export const messages: Record<string, string> = {
   'card.voice.toast_session_gone': '⚠️ Session is offline; cannot generate a voice summary.',
   'card.voice.toast_need_auth': '🔒 You are not authorized to use this bot, so you cannot generate a voice summary. Ask an admin for access.',
   'card.voice.toast_worker_busy': '⚠️ The session is still running. Wait for it to go idle, then generate the voice summary.',
+  'card.voice.user_message': 'Generate a voice summary',
   'card.action.takeover_retired': '⚠️ The old "Take Over" button is retired. In bridge mode, botmux bridges the original CLI so replies still come back to Lark — no takeover needed. Full takeover (`/adopt --takeover`) is on the roadmap.',
   'card.action.terminal_not_ready': '⚠️ Terminal is not ready yet, please try again shortly.',
   'card.action.local_terminal_opened': '💻 Requested opening local {cliName}.',
@@ -1138,6 +1139,7 @@ export const messages: Record<string, string> = {
 
   // External event trigger seed
   'trigger.external_event': 'External event: {source}',
+  'trigger.external_event_clean': 'External event',
 
   // Worker-side submit / notify messages
   'worker.submit_impossible': '⚠️ Your last message was NOT delivered to {cliName}: the current keybinding config can’t auto-submit from the terminal.\nReason: {reason}\nAdjust the Claude Code Chat keybinding, then resend.\nStart: {preview}',

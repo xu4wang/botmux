@@ -1562,6 +1562,7 @@ ipcRoute('GET', '/api/bot-default-oncall', async (_req, res) => {
     backendType: backendTypeStore.getBotBackendType(cachedLarkAppId) ?? null,
     disableStreamingCard: cardPrefs.disableStreamingCard,
     silentTurnReactions: cardPrefs.silentTurnReactions,
+    codexAppCleanInput: cardPrefs.codexAppCleanInput,
     writableTerminalLinkInCard: cardPrefs.writableTerminalLinkInCard,
     privateCard: cardPrefs.privateCard,
     botToBotSameDir: cardPrefs.botToBotSameDir,
@@ -1599,7 +1600,7 @@ ipcRoute('GET', '/api/bot-default-oncall', async (_req, res) => {
 ipcRoute('PUT', '/api/bot-card-prefs', async (req, res) => {
   if (!cachedLarkAppId) return jsonRes(res, 503, { error: 'larkAppId_not_set' });
   let body: {
-    disableStreamingCard?: unknown; silentTurnReactions?: unknown; writableTerminalLinkInCard?: unknown; privateCard?: unknown;
+    disableStreamingCard?: unknown; silentTurnReactions?: unknown; codexAppCleanInput?: unknown; writableTerminalLinkInCard?: unknown; privateCard?: unknown;
     botToBotSameDir?: unknown;
     autoStartOnGroupJoin?: unknown; autoStartOnGroupJoinPrompt?: unknown; autoStartOnNewTopic?: unknown;
     regularGroupReplyMode?: unknown; regularGroupMentionMode?: unknown; docSubscribeDefaultMode?: unknown;
@@ -1608,7 +1609,7 @@ ipcRoute('PUT', '/api/bot-card-prefs', async (req, res) => {
   catch { return jsonRes(res, 400, { ok: false, error: 'bad_json' }); }
 
   const patch: {
-    disableStreamingCard?: boolean; silentTurnReactions?: boolean; writableTerminalLinkInCard?: boolean; privateCard?: boolean;
+    disableStreamingCard?: boolean; silentTurnReactions?: boolean; codexAppCleanInput?: boolean; writableTerminalLinkInCard?: boolean; privateCard?: boolean;
     botToBotSameDir?: boolean;
     autoStartOnGroupJoin?: boolean; autoStartOnGroupJoinPrompt?: string; autoStartOnNewTopic?: boolean;
     regularGroupReplyMode?: ChatReplyMode; regularGroupMentionMode?: 'always' | 'topic' | 'never' | 'ambient';
@@ -1617,6 +1618,7 @@ ipcRoute('PUT', '/api/bot-card-prefs', async (req, res) => {
   if (typeof body.disableStreamingCard === 'boolean') patch.disableStreamingCard = body.disableStreamingCard;
   if (typeof body.botToBotSameDir === 'boolean') patch.botToBotSameDir = body.botToBotSameDir;
   if (typeof body.silentTurnReactions === 'boolean') patch.silentTurnReactions = body.silentTurnReactions;
+  if (typeof body.codexAppCleanInput === 'boolean') patch.codexAppCleanInput = body.codexAppCleanInput;
   if (typeof body.writableTerminalLinkInCard === 'boolean') patch.writableTerminalLinkInCard = body.writableTerminalLinkInCard;
   if (typeof body.privateCard === 'boolean') patch.privateCard = body.privateCard;
   if (typeof body.autoStartOnGroupJoin === 'boolean') patch.autoStartOnGroupJoin = body.autoStartOnGroupJoin;

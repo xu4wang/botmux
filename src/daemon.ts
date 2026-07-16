@@ -67,6 +67,7 @@ import {
   initWorkerPool,
   setActiveSessionsRegistry,
   forkWorker,
+  sendWorkerInput,
   killWorker,
   reapOrphanWorkers,
   scheduleCardPatch,
@@ -96,10 +97,10 @@ import {
   expandHome,
   downloadResources,
   formatAttachmentsHint,
-  buildNewTopicPrompt,
-  buildFollowUpContent,
+  buildNewTopicCliInput,
+  buildFollowUpCliInput,
   buildBridgeInputContent,
-  buildReforkPrompt,
+  buildReforkCliInput,
   getAvailableBots,
   restoreActiveSessions,
   executeScheduledTask,
@@ -109,6 +110,7 @@ import {
   ensureSessionWhiteboard,
 } from './core/session-manager.js';
 import { triggerSessionTurn } from './core/trigger-session.js';
+import { applyQueuedCodexAppLegacyFallback, mergeQueuedCodexAppTurn } from './core/session-create.js';
 import { findOnlineDaemon, listOnlineDaemons } from './utils/daemon-discovery.js';
 import { beginReplyTargetTurn, fallbackTurnId, resolveSessionReplyTarget, syncReplyTargetState } from './core/reply-target.js';
 import { sweepOrphanSandboxes } from './adapters/backend/sandbox.js';
@@ -149,7 +151,7 @@ import { getDocSubscription, listAllDocSubscriptions, listDocSubscriptionsForSes
 import { BOT_REPLY_SENTINEL, subscribeDocFile, unsubscribeDocFile, addCommentReaction, hasBotSentinel, isBotAuthoredReply, listDocComments } from './im/lark/doc-comment.js';
 import { learnFromMentions, resolveSender, flushIdentityCacheSync } from './im/lark/identity-cache.js';
 import { normalizeBrand } from './im/lark/lark-hosts.js';
-import { buildDocCommentPrompt, buildDocWatchWarmupPrompt } from './core/doc-comment-prompt.js';
+import { buildDocCommentTurnInput, buildDocWatchWarmupTurnInput } from './core/doc-comment-prompt.js';
 import { advanceDocCommentCursor, docCommentRepliesAfterCursor, latestDocCommentPollCursor } from './core/doc-comment-poller.js';
 import { renderBufferedSenderBlock } from './core/session-manager.js';
 import { shutdownBackendDisposition } from './core/persistent-backend.js';
@@ -2310,12 +2312,12 @@ async function prewarmDocCommentSession(ds: DaemonSession, sub: DocSubscription)
   const bot = getBot(ds.larkAppId);
   const botCfg = bot.config;
   const loc = localeForBot(ds.larkAppId);
-  const promptContent = buildDocWatchWarmupPrompt({
+  const warmupInput = {
     fileToken: sub.fileToken,
     fileType: sub.fileType,
     brand: normalizeBrand(botCfg.brand),
     locale: loc,
-  });
+  } as const;
   const title = `[Doc Watch] ${sub.fileToken.slice(0, 12)}`;
   const turnId = `doc-watch-${Date.now()}-${sub.fileToken.slice(0, 8)}`;
   const sender = sub.ownerOpenId ? await resolveSender(ds.larkAppId, sub.ownerOpenId, 'user') : undefined;
@@ -2326,34 +2328,39 @@ async function prewarmDocCommentSession(ds: DaemonSession, sub: DocSubscription)
   if (sub.workingDir && (!ds.worker || ds.worker.killed)) {
     ds.workingDir = sub.workingDir;
     ds.session.workingDir = sub.workingDir;
+    // An explicit doc-watch cwd replaces the previous repo selection. Keeping
+    // a multi-Riff stamp would make the cold refork ignore this new directory.
+    ds.session.riffRepoDirs = undefined;
   }
 
   if (ds.worker && !ds.worker.killed) {
     ensureSessionWhiteboard(ds);
-    const msgContent = buildFollowUpContent(promptContent, ds.session.sessionId, {
-      isAdoptMode: false,
-      cliId: botCfg.cliId,
-      cliPathOverride: botCfg.cliPathOverride,
+    const { promptContent, cliInput } = buildDocWatchWarmupTurnInput({
+      ds,
+      promptInput: warmupInput,
+      botCliId: botCfg.cliId,
+      botCliPathOverride: botCfg.cliPathOverride,
       sender,
-      larkAppId: ds.larkAppId,
-      chatId: ds.session.chatId,
-      whiteboardId: ds.session.whiteboardId,
+      mode: 'live',
     });
-    rememberLastCliInput(ds, promptContent, msgContent);
+    rememberLastCliInput(ds, promptContent, cliInput);
     sessionStore.updateSession(ds.session);
-    ds.worker.send({ type: 'message', content: msgContent, turnId } as DaemonToWorker);
+    sendWorkerInput(ds, cliInput, turnId);
     markSessionActivity(ds);
   } else {
     ensureSessionWhiteboard(ds);
-    const wrappedPrompt = buildReforkPrompt(ds, promptContent, {
-      cliId: botCfg.cliId,
-      cliPathOverride: botCfg.cliPathOverride,
-      selfMention: { name: bot.botName, openId: bot.botOpenId },
+    const { promptContent, cliInput: wrappedInput } = buildDocWatchWarmupTurnInput({
+      ds,
+      promptInput: warmupInput,
+      botCliId: botCfg.cliId,
+      botCliPathOverride: botCfg.cliPathOverride,
+      botIdentity: { name: bot.botName, openId: bot.botOpenId },
       sender,
+      mode: 'refork',
     });
-    rememberLastCliInput(ds, promptContent, wrappedPrompt);
+    rememberLastCliInput(ds, promptContent, wrappedInput);
     sessionStore.updateSession(ds.session);
-    forkWorker(ds, wrappedPrompt, ds.hasHistory);
+    forkWorker(ds, wrappedInput, ds.hasHistory);
   }
   logger.info(`[${tag(ds)}] doc-comment watch prewarm injected file=${sub.fileToken.slice(0, 12)}`);
 }
@@ -6800,7 +6807,8 @@ async function handleNewTopic(data: any, ctx: RoutingContext): Promise<void> {
   // weight on first turns. `content` (post force-topic-strip) is what the
   // worker will see; promptContent wraps it for prompt-building paths but
   // leaves `content` untouched for title / log substring uses.
-  const promptContent = buildQuoteHint(parsed, scope, anchor, localeForBot(larkAppId)) + content;
+  const codexAppMessageContext = buildQuoteHint(parsed, scope, anchor, localeForBot(larkAppId));
+  const promptContent = codexAppMessageContext + content;
 
   // Resolve sender identity for <sender> tag injection. The first call to
   // resolveSender for an unseen open_id may await contact.v3.user.get with a
@@ -6862,6 +6870,8 @@ async function handleNewTopic(data: any, ctx: RoutingContext): Promise<void> {
     hasHistory: false,
     pendingRepo: !pinnedWorkingDir || autoWt,
     pendingPrompt: promptContent,
+    pendingCodexAppText: content,
+    pendingCodexAppMessageContext: codexAppMessageContext,
     pendingAttachments: attachments.length > 0 ? attachments : undefined,
     pendingMentions: parsed.mentions,
     pendingSubstituteTrigger: substituteTrigger,
@@ -6892,9 +6902,9 @@ async function handleNewTopic(data: any, ctx: RoutingContext): Promise<void> {
     if (await replyInvalidWorkingDirs(anchor, larkAppId, ds)) return;
     const selfBot = getBot(larkAppId);
     ensureSessionWhiteboard(ds);
-    const prompt = buildNewTopicPrompt(promptContent, session.sessionId, botCfg.cliId, botCfg.cliPathOverride, attachments, parsed.mentions, await getAvailableBots(larkAppId, chatId), undefined, { name: selfBot.botName, openId: selfBot.botOpenId }, localeForBot(larkAppId), newTopicSender, { larkAppId, chatId, whiteboardId: ds.session.whiteboardId, substituteTrigger });
-    rememberLastCliInput(ds, promptContent, prompt);
+    const prompt = buildNewTopicCliInput(promptContent, session.sessionId, botCfg.cliId, botCfg.cliPathOverride, attachments, parsed.mentions, await getAvailableBots(larkAppId, chatId), undefined, { name: selfBot.botName, openId: selfBot.botOpenId }, localeForBot(larkAppId), newTopicSender, { larkAppId, chatId, whiteboardId: ds.session.whiteboardId, substituteTrigger, codexAppText: content, codexAppMessageContext });
     await noteTurnReceived(ds, messageId, content, newTopicSender, messageId, substituteTrigger ? SUBSTITUTE_RECEIVED_REACTION_EMOJI_TYPE : undefined);
+    rememberLastCliInput(ds, promptContent, prompt);
     forkWorker(ds, prompt);
     const reason = oncallEntry
       ? `oncall-bound chat ${chatId}`
@@ -6924,9 +6934,9 @@ async function handleNewTopic(data: any, ctx: RoutingContext): Promise<void> {
     ds.pendingRepo = false;
     const selfBot = getBot(larkAppId);
     ensureSessionWhiteboard(ds);
-    const prompt = buildNewTopicPrompt(promptContent, session.sessionId, botCfg.cliId, botCfg.cliPathOverride, attachments, parsed.mentions, await getAvailableBots(larkAppId, chatId), undefined, { name: selfBot.botName, openId: selfBot.botOpenId }, localeForBot(larkAppId), newTopicSender, { larkAppId, chatId, whiteboardId: ds.session.whiteboardId, substituteTrigger });
-    rememberLastCliInput(ds, promptContent, prompt);
+    const prompt = buildNewTopicCliInput(promptContent, session.sessionId, botCfg.cliId, botCfg.cliPathOverride, attachments, parsed.mentions, await getAvailableBots(larkAppId, chatId), undefined, { name: selfBot.botName, openId: selfBot.botOpenId }, localeForBot(larkAppId), newTopicSender, { larkAppId, chatId, whiteboardId: ds.session.whiteboardId, substituteTrigger, codexAppText: content, codexAppMessageContext });
     await noteTurnReceived(ds, messageId, content, newTopicSender, messageId, substituteTrigger ? SUBSTITUTE_RECEIVED_REACTION_EMOJI_TYPE : undefined);
+    rememberLastCliInput(ds, promptContent, prompt);
     forkWorker(ds, prompt);
     logger.info(`Session ${session.sessionId} ready (no projects to select), total active: ${getActiveCount()}`);
   }
@@ -7034,6 +7044,11 @@ async function handleBotAdded(chatId: string, operatorOpenId: string | undefined
     const mode = await getChatMode(larkAppId, chatId, { forceRefresh: true });
     const promptBody = resolveGroupJoinPrompt(botCfg.autoStartOnGroupJoinPrompt);
     const title = (promptBody || tr('daemon.auto_start_join_title', undefined, localeForBot(larkAppId))).substring(0, 50);
+    // D8 deliberately keeps the legacy prompt empty when no join prompt is
+    // configured, so the agent can inspect group context without receiving a
+    // synthetic instruction. Codex App still needs a non-blank visible
+    // UserMessage; reuse the localized session title only in its clean sidecar.
+    const codexAppText = promptBody || title;
 
     // Pick scope + anchor. 话题群 → seed a topic and anchor thread-scope there;
     // 普通群 → chat-scope anchored at chatId.
@@ -7083,6 +7098,7 @@ async function handleBotAdded(chatId: string, operatorOpenId: string | undefined
       hasHistory: false,
       pendingRepo: !pinnedWorkingDir || autoWt,
       pendingPrompt: promptBody,
+      pendingCodexAppText: botCfg.cliId === 'codex-app' ? codexAppText : undefined,
       ownerOpenId: operatorOpenId,
       currentTurnTitle: title,
       workingDir: pinnedWorkingDir,
@@ -7093,11 +7109,11 @@ async function handleBotAdded(chatId: string, operatorOpenId: string | undefined
     groupJoinAnchorByChat.set(chatLiveKey, dsKey);
 
     const selfBot = getBot(larkAppId);
-    const buildPrompt = async () => buildNewTopicPrompt(
+    const buildPrompt = async () => buildNewTopicCliInput(
       promptBody, session.sessionId, botCfg.cliId, botCfg.cliPathOverride,
       undefined, undefined, await getAvailableBots(larkAppId, chatId), undefined,
       { name: selfBot.botName, openId: selfBot.botOpenId }, localeForBot(larkAppId), undefined,
-      { larkAppId, chatId, whiteboardId: ds.session.whiteboardId },
+      { larkAppId, chatId, whiteboardId: ds.session.whiteboardId, codexAppText },
     );
 
     // Auto-worktree: register PENDING, build worktree off-path, commit+fork later.
@@ -7112,8 +7128,8 @@ async function handleBotAdded(chatId: string, operatorOpenId: string | undefined
       if (await replyInvalidWorkingDirs(anchor, larkAppId, ds)) return;
       ensureSessionWhiteboard(ds);
       const prompt = await buildPrompt();
-      rememberLastCliInput(ds, promptBody, prompt);
       await noteTurnReceived(ds, anchor, promptBody);
+      rememberLastCliInput(ds, promptBody, prompt);
       forkWorker(ds, prompt);
       logger.info(`[auto-start:入群] ${chatId.substring(0, 12)} 自动开工（${mode}/${scope}），workingDir=${pinnedWorkingDir}`);
       return;
@@ -7133,8 +7149,8 @@ async function handleBotAdded(chatId: string, operatorOpenId: string | undefined
       ds.pendingRepo = false;
       ensureSessionWhiteboard(ds);
       const prompt = await buildPrompt();
-      rememberLastCliInput(ds, promptBody, prompt);
       await noteTurnReceived(ds, anchor, promptBody);
+      rememberLastCliInput(ds, promptBody, prompt);
       forkWorker(ds, prompt);
       logger.info(`[auto-start:入群] ${chatId.substring(0, 12)} 无默认目录且无可选项目，直接开工`);
     }
@@ -7216,7 +7232,9 @@ async function handleThreadReply(data: any, ctx: RoutingContext): Promise<void> 
 
   // `let` (not const): the v3 grill gate below may replace this with a
   // skill-trigger prompt when the user sends `/workflow [new] <目标>` mid-thread.
-  let promptContent = buildQuoteHint(parsed, scope, anchor, localeForBot(larkAppId)) + botSenderPrefix + parsed.content;
+  const initialCodexAppMessageContext = buildQuoteHint(parsed, scope, anchor, localeForBot(larkAppId)) + botSenderPrefix;
+  const initialPromptContent = initialCodexAppMessageContext + parsed.content;
+  let promptContent = initialPromptContent;
   const existingHookSession = activeSessions.get(sessionKey(anchor, larkAppId));
   emitHookEvent('thread.reply', {
     larkAppId,
@@ -7549,6 +7567,14 @@ async function handleThreadReply(data: any, ctx: RoutingContext): Promise<void> 
     return;
   }
 
+  // When a command path rewrites the model prompt (for example /workflow),
+  // keep the Lark-authored bytes visible and move the rewritten instruction
+  // into hidden untrusted context. Simple quote/bot prefixes use only the
+  // prefix as context, avoiding a duplicate copy of the user text.
+  const codexAppMessageContext = promptContent === initialPromptContent
+    ? initialCodexAppMessageContext
+    : promptContent;
+
   // Download attachments
   const effectiveAppId = ds?.larkAppId ?? larkAppId;
   const { attachments, needLogin } = await downloadResources(effectiveAppId, parsed.messageId, resources);
@@ -7581,15 +7607,21 @@ async function handleThreadReply(data: any, ctx: RoutingContext): Promise<void> 
   // If waiting for repo selection, buffer the message and remind user
   if (ds?.pendingRepo) {
     // Enrich content with attachment hints and mention metadata (same as normal send)
-    let enriched = attachments.length > 0
-      ? `${promptContent}${formatAttachmentsHint(attachments)}`
+    const codexAppFollowUpContextParts: string[] = [];
+    if (codexAppMessageContext) codexAppFollowUpContextParts.push(codexAppMessageContext);
+    const attachmentHint = attachments.length > 0 ? formatAttachmentsHint(attachments) : '';
+    let enriched = attachmentHint
+      ? `${promptContent}${attachmentHint}`
       : promptContent;
+    if (attachmentHint) codexAppFollowUpContextParts.push(attachmentHint);
     if (parsed.mentions && parsed.mentions.length > 0) {
       const mentionLines = parsed.mentions.map(m => {
         const idPart = m.openId ? ` → open_id: ${m.openId}` : '';
         return `- @${m.name}${idPart}`;
       });
-      enriched += `\n\n${tr('daemon.enriched_mentions_label', undefined, localeForBot(larkAppId))}\n${mentionLines.join('\n')}`;
+      const mentionContext = `${tr('daemon.enriched_mentions_label', undefined, localeForBot(larkAppId))}\n${mentionLines.join('\n')}`;
+      enriched += `\n\n${mentionContext}`;
+      codexAppFollowUpContextParts.push(mentionContext);
     }
     // Stamp a buffered follow-up with its own <sender> tag ONLY when it comes
     // from a different user than the first message (ds.pendingSender) — the
@@ -7607,10 +7639,17 @@ async function handleThreadReply(data: any, ctx: RoutingContext): Promise<void> 
       const followUpSenderBlock = renderBufferedSenderBlock(
         followUpSender, getBot(larkAppId).config.cliId, localeForBot(larkAppId),
       );
-      if (followUpSenderBlock) enriched = `${followUpSenderBlock}\n${enriched}`;
+      if (followUpSenderBlock) {
+        enriched = `${followUpSenderBlock}\n${enriched}`;
+        codexAppFollowUpContextParts.unshift(followUpSenderBlock);
+      }
     }
     if (!ds.pendingFollowUps) ds.pendingFollowUps = [];
     ds.pendingFollowUps.push(enriched);
+    if (!ds.pendingCodexAppFollowUps) ds.pendingCodexAppFollowUps = [];
+    ds.pendingCodexAppFollowUps.push(parsed.content);
+    if (!ds.pendingCodexAppFollowUpContexts) ds.pendingCodexAppFollowUpContexts = [];
+    ds.pendingCodexAppFollowUpContexts.push(codexAppFollowUpContextParts.join('\n\n'));
     // Auto-worktree pending (worktreeCreating) has no repo card to point at — the
     // message IS buffered (folded on commit), so just say "hold on, building worktree"
     // instead of the misleading "pick a repo from the card above".
@@ -7696,6 +7735,8 @@ async function handleThreadReply(data: any, ctx: RoutingContext): Promise<void> 
       hasHistory: false,
       pendingRepo: !pinnedWorkingDir || autoWt,
       pendingPrompt: promptContent,
+      pendingCodexAppText: parsed.content,
+      pendingCodexAppMessageContext: codexAppMessageContext,
       pendingAttachments: attachments.length > 0 ? attachments : undefined,
       pendingMentions: parsed.mentions,
       pendingSubstituteTrigger: substituteTrigger,
@@ -7725,9 +7766,9 @@ async function handleThreadReply(data: any, ctx: RoutingContext): Promise<void> 
       if (await replyInvalidWorkingDirs(anchor, larkAppId, newDs)) return;
       const selfBot = getBot(larkAppId);
       ensureSessionWhiteboard(newDs);
-      const prompt = buildNewTopicPrompt(promptContent, session.sessionId, botCfg.cliId, botCfg.cliPathOverride, attachments, parsed.mentions, await getAvailableBots(larkAppId, autoCreateChatId), undefined, { name: selfBot.botName, openId: selfBot.botOpenId }, localeForBot(larkAppId), autoCreateSender, { larkAppId, chatId: autoCreateChatId, whiteboardId: newDs.session.whiteboardId, substituteTrigger });
-      rememberLastCliInput(newDs, promptContent, prompt);
+      const prompt = buildNewTopicCliInput(promptContent, session.sessionId, botCfg.cliId, botCfg.cliPathOverride, attachments, parsed.mentions, await getAvailableBots(larkAppId, autoCreateChatId), undefined, { name: selfBot.botName, openId: selfBot.botOpenId }, localeForBot(larkAppId), autoCreateSender, { larkAppId, chatId: autoCreateChatId, whiteboardId: newDs.session.whiteboardId, substituteTrigger, codexAppText: parsed.content, codexAppMessageContext });
       await noteTurnReceived(newDs, parsed.messageId, parsed.content, autoCreateSender, parsed.messageId, substituteTrigger ? SUBSTITUTE_RECEIVED_REACTION_EMOJI_TYPE : undefined);
+      rememberLastCliInput(newDs, promptContent, prompt);
       forkWorker(newDs, prompt);
       const reason = oncallEntry
         ? `oncall-bound chat ${autoCreateChatId}`
@@ -7757,9 +7798,9 @@ async function handleThreadReply(data: any, ctx: RoutingContext): Promise<void> 
       newDs.pendingRepo = false;
       const selfBot = getBot(larkAppId);
       ensureSessionWhiteboard(newDs);
-      const prompt = buildNewTopicPrompt(promptContent, session.sessionId, botCfg.cliId, botCfg.cliPathOverride, attachments, parsed.mentions, await getAvailableBots(larkAppId, autoCreateChatId), undefined, { name: selfBot.botName, openId: selfBot.botOpenId }, localeForBot(larkAppId), autoCreateSender, { larkAppId, chatId: autoCreateChatId, whiteboardId: newDs.session.whiteboardId, substituteTrigger });
-      rememberLastCliInput(newDs, promptContent, prompt);
+      const prompt = buildNewTopicCliInput(promptContent, session.sessionId, botCfg.cliId, botCfg.cliPathOverride, attachments, parsed.mentions, await getAvailableBots(larkAppId, autoCreateChatId), undefined, { name: selfBot.botName, openId: selfBot.botOpenId }, localeForBot(larkAppId), autoCreateSender, { larkAppId, chatId: autoCreateChatId, whiteboardId: newDs.session.whiteboardId, substituteTrigger, codexAppText: parsed.content, codexAppMessageContext });
       await noteTurnReceived(newDs, parsed.messageId, parsed.content, autoCreateSender, parsed.messageId, substituteTrigger ? SUBSTITUTE_RECEIVED_REACTION_EMOJI_TYPE : undefined);
+      rememberLastCliInput(newDs, promptContent, prompt);
       forkWorker(newDs, prompt);
     }
 
@@ -7780,28 +7821,31 @@ async function handleThreadReply(data: any, ctx: RoutingContext): Promise<void> 
     const isBridge = !!ds.adoptedFrom;
     const selfBot = getBot(ds.larkAppId);
     if (!isBridge) ensureSessionWhiteboard(ds);
-    const msgContent = isBridge
-      ? buildBridgeInputContent(promptContent, {
+    const effectiveCliId = ds.session.cliId ?? dsBotCfgForMsg.cliId;
+    const cliInput = isBridge
+      ? { content: buildBridgeInputContent(promptContent, {
           attachments,
           mentions: parsed.mentions,
           selfMention: { name: selfBot.botName, openId: selfBot.botOpenId },
-        })
-      : buildFollowUpContent(promptContent, ds.session.sessionId, {
+        }) }
+      : buildFollowUpCliInput(promptContent, ds.session.sessionId, {
           attachments,
           mentions: parsed.mentions,
           isAdoptMode: false,
-          cliId: dsBotCfgForMsg.cliId,
-          cliPathOverride: dsBotCfgForMsg.cliPathOverride,
+          cliId: effectiveCliId,
+          cliPathOverride: ds.session.cliPathOverride ?? dsBotCfgForMsg.cliPathOverride,
           sender: await getThreadSender(),
           larkAppId,
           chatId: ds.session.chatId,
           whiteboardId: ds.session.whiteboardId,
           substituteTrigger,
+          codexAppText: parsed.content,
+          codexAppMessageContext,
         });
     beginNewTurn(ds, parsed.content);
-    rememberLastCliInput(ds, promptContent, msgContent);
     await noteTurnReceived(ds, parsed.messageId, parsed.content, await getThreadSender(), parsed.messageId, substituteTrigger ? SUBSTITUTE_RECEIVED_REACTION_EMOJI_TYPE : undefined);
-    ds.worker.send({ type: 'message', content: msgContent, turnId: parsed.messageId } as DaemonToWorker);
+    rememberLastCliInput(ds, promptContent, cliInput);
+    sendWorkerInput(ds, cliInput, parsed.messageId);
   } else {
     // Worker not running — re-fork with resume. This is a NEW turn, so drop
     // any restored streaming-card reference; worker_ready will POST a fresh
@@ -7850,21 +7894,44 @@ async function handleThreadReply(data: any, ctx: RoutingContext): Promise<void> 
     // 待办池(queued)会话：CLI 从没起过，暂存的任务内容(queuedPrompt，已按角色包装好)
     // 必须当首轮发出去——否则群里来的这第一条消息会顶替掉它、把用户分配的任务丢掉。
     // 把暂存任务前置、用户这条消息拼在后面，一并作为首轮。forkWorker 随后清 queued。
-    const reforkContent = ds.session.queued && ds.session.queuedPrompt
+    const queuedDashboardTurn = !!(ds.session.queued && ds.session.queuedPrompt);
+    const reforkContent = queuedDashboardTurn
       ? `${ds.session.queuedPrompt}\n\n${promptContent}`
       : promptContent;
-    const wrappedPrompt = buildReforkPrompt(ds, reforkContent, {
+    const queuedCodexAppText = ds.session.queuedCodexAppText ?? ds.pendingCodexAppText;
+    const reforkCodexApp = mergeQueuedCodexAppTurn({
+      queued: queuedDashboardTurn,
+      queuedText: queuedCodexAppText,
+      queuedMessageContext: ds.session.queuedCodexAppMessageContext ?? ds.pendingCodexAppMessageContext,
+      currentText: parsed.content,
+      currentMessageContext: codexAppMessageContext,
+    });
+    const builtReforkInput = buildReforkCliInput(ds, reforkContent, {
       attachments,
       mentions: parsed.mentions,
-      cliId: dsBotCfgForFork.cliId,
-      cliPathOverride: dsBotCfgForFork.cliPathOverride,
+      cliId: ds.session.cliId ?? dsBotCfgForFork.cliId,
+      cliPathOverride: ds.session.cliPathOverride ?? dsBotCfgForFork.cliPathOverride,
       selfMention: { name: selfBot.botName, openId: selfBot.botOpenId },
       sender: await getThreadSender(),
+      substituteTrigger,
+      codexAppText: reforkCodexApp.text,
+      codexAppMessageContext: reforkCodexApp.messageContext,
     });
-    rememberLastCliInput(ds, promptContent, wrappedPrompt);
-    await noteTurnReceived(ds, parsed.messageId, parsed.content, await getThreadSender(), parsed.messageId);
+    const wrappedInput = applyQueuedCodexAppLegacyFallback(builtReforkInput, {
+      queued: queuedDashboardTurn,
+      queuedText: queuedCodexAppText,
+    });
+    if (wrappedInput !== builtReforkInput && dsBotCfgForFork.codexAppCleanInput === true) {
+      // Backlog sessions persisted before clean-input have no raw queued text.
+      // Keep this activation entirely legacy: reforkContent already contains
+      // queuedPrompt + the current reply, whereas a structured turn could only
+      // contain the reply and would silently discard the original task.
+      logger.warn(`[${tag(ds)}] Legacy queued dashboard task has no clean-input text; using the full legacy activation prompt`);
+    }
+    await noteTurnReceived(ds, parsed.messageId, parsed.content, await getThreadSender(), parsed.messageId, substituteTrigger ? SUBSTITUTE_RECEIVED_REACTION_EMOJI_TYPE : undefined);
+    rememberLastCliInput(ds, promptContent, wrappedInput);
     sessionStore.updateSession(ds.session);
-    forkWorker(ds, wrappedPrompt, ds.hasHistory);
+    forkWorker(ds, wrappedInput, ds.hasHistory);
   }
 }
 
@@ -8002,7 +8069,7 @@ async function handleDocComment(ctx: DocCommentContext): Promise<boolean> {
   const sender = ctx.authorOpenId ? await resolveSender(larkAppId, ctx.authorOpenId, 'user') : undefined;
   const authorName = sender?.name || ctx.authorOpenId?.slice(0, 8) || '?';
   const dsBotCfg = getBot(ds.larkAppId).config;
-  const promptContent = buildDocCommentPrompt({
+  const promptInput = {
     fileToken: sub.fileToken,
     fileType: sub.fileType,
     question: text,
@@ -8014,7 +8081,7 @@ async function handleDocComment(ctx: DocCommentContext): Promise<boolean> {
     })),
     brand: normalizeBrand(dsBotCfg.brand),
     locale: loc,
-  });
+  };
 
   // 记录本轮回评论的落点。两条路都要覆盖：
   //   • ds.docCommentTurns（内存，按 turnId）→ deliverFinalOutput「兜底」分流用
@@ -8036,25 +8103,21 @@ async function handleDocComment(ctx: DocCommentContext): Promise<boolean> {
   if (ds.worker && !ds.worker.killed) {
     const isBridge = !!ds.adoptedFrom;
     if (!isBridge) ensureSessionWhiteboard(ds);
-    const msgContent = isBridge
-      ? buildBridgeInputContent(promptContent, {
-          selfMention: { name: selfBot.botName, openId: selfBot.botOpenId },
-        })
-      : buildFollowUpContent(promptContent, ds.session.sessionId, {
-          isAdoptMode: false,
-          cliId: dsBotCfg.cliId,
-          cliPathOverride: dsBotCfg.cliPathOverride,
-          sender,
-          larkAppId,
-          chatId: ds.session.chatId,
-          whiteboardId: ds.session.whiteboardId,
-        });
+    const { promptContent, cliInput } = buildDocCommentTurnInput({
+      ds,
+      promptInput,
+      botCliId: dsBotCfg.cliId,
+      botCliPathOverride: dsBotCfg.cliPathOverride,
+      botIdentity: { name: selfBot.botName, openId: selfBot.botOpenId },
+      sender,
+      mode: 'live',
+    });
     beginNewTurn(ds, text);
     (ds.session.docCommentTargets ??= {})[turnId] = docTarget; // per-turn map，不覆盖其他并发轮
-    rememberLastCliInput(ds, promptContent, msgContent);
     sessionStore.updateSession(ds.session); // 先落盘，botmux send 子进程才读得到落点
     await noteTurnReceived(ds, commentId, text, sender, turnId);
-    ds.worker.send({ type: 'message', content: msgContent, turnId } as DaemonToWorker);
+    rememberLastCliInput(ds, promptContent, cliInput);
+    sendWorkerInput(ds, cliInput, turnId);
     logger.info(`[${tag(ds)}] doc-comment turn injected (turn ${turnId.slice(0, 8)})`);
   } else {
     // Worker 挂起 / 已退出 —— resume 重 fork（与 handleThreadReply 同路）。
@@ -8071,17 +8134,20 @@ async function handleDocComment(ctx: DocCommentContext): Promise<boolean> {
     // Skip whiteboard ensure for adopted (bridge) sessions on re-fork — mirrors
     // the live-worker branch above (if (!isBridge) ensure…).
     if (!ds.adoptedFrom) ensureSessionWhiteboard(ds);
-    const wrappedPrompt = buildReforkPrompt(ds, promptContent, {
-      cliId: dsBotCfg.cliId,
-      cliPathOverride: dsBotCfg.cliPathOverride,
-      selfMention: { name: selfBot.botName, openId: selfBot.botOpenId },
+    const { promptContent, cliInput: wrappedInput } = buildDocCommentTurnInput({
+      ds,
+      promptInput,
+      botCliId: dsBotCfg.cliId,
+      botCliPathOverride: dsBotCfg.cliPathOverride,
+      botIdentity: { name: selfBot.botName, openId: selfBot.botOpenId },
       sender,
+      mode: 'refork',
     });
     (ds.session.docCommentTargets ??= {})[turnId] = docTarget; // per-turn map，不覆盖其他并发轮
-    rememberLastCliInput(ds, promptContent, wrappedPrompt);
     await noteTurnReceived(ds, commentId, text, sender, turnId);
+    rememberLastCliInput(ds, promptContent, wrappedInput);
     sessionStore.updateSession(ds.session);
-    forkWorker(ds, wrappedPrompt, { resume: ds.hasHistory, turnId });
+    forkWorker(ds, wrappedInput, { resume: ds.hasHistory, turnId });
   }
   return true;
   } catch (err) {
