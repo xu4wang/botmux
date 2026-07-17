@@ -163,7 +163,7 @@ export const messages: Record<string, string> = {
   // ─── /relay picker card (pull mode) ─────────────────────────────────────
   'card.relay.title': '📋 Pick a session to relay into this chat',
   'card.relay.title_p2p': '📋 Pick a session to relay into this DM',
-  'card.relay.empty': 'No relayable sessions.\n(Picker only lists sessions you own, on this bot, in other chats.)',
+  'card.relay.empty': 'No relayable sessions.\n(Only your **active** sessions on this bot are listed — including DMs (shown as "direct message"); closed sessions do not appear.)',
   'card.relay.btn_pull': 'Pull into this chat',
   'card.relay.btn_confirm': 'Confirm relay into this chat',
   'card.relay.btn_confirm_p2p': 'Confirm relay into this DM',
@@ -173,7 +173,7 @@ export const messages: Record<string, string> = {
   'card.relay.status_idle': '⚪ Idle',
   'card.relay.selected_tag': 'selected',
   'card.relay.hint_pick_first': 'Tap any session above to select it, then press Confirm to relay.',
-  'card.relay.search_placeholder': '🔍 Search sessions (title / chat / path)',
+  'card.relay.search_placeholder': '🔍 Search sessions (title / chat / path; try "dm" for direct messages)',
   'card.relay.btn_search': 'Search',
   'card.relay.btn_prev_page': '← Prev',
   'card.relay.btn_next_page': 'Next →',
