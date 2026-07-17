@@ -398,7 +398,7 @@ export const AVATAR_IMAGE_MAX_BYTES = 2 * 1024 * 1024;
 
 const PNG_MAGIC = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
 // PNG 规范：魔数(8) 后必须紧跟 IHDR chunk —— 长度(4，恒为 13) + 类型 'IHDR'(4)
-// + 数据 13（宽 4 + 高 4 + 位深等 5）+ CRC(4)，合计头部至少 41 字节。
+// + 数据 13（宽 4 + 高 4 + 位深等 5）+ CRC(4)，合计头部至少 33 字节。
 const PNG_MIN_HEADER_BYTES = 8 + 4 + 4 + 13 + 4;
 const PNG_IHDR_DATA_LENGTH = 13;
 
