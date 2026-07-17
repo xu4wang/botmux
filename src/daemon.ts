@@ -15644,9 +15644,11 @@ export async function startDaemon(botIndex?: number): Promise<void> {
     return r;
   });
   // 机器人真·改头像（dashboard 档案头头像入口）：开放平台自动化换飞书应用头像并
-  // 发布新版本（群内头像跟随已发布版本，同 rename）。成功后先用上传返回的 url
-  // 同步内存 botAvatarUrl / descriptor / bots-info 让 dashboard 立即换图；周期性
-  // 的 /bot/v3/info probe 之后会把它收敛成飞书侧的 canonical 头像 URL。
+  // 发布新版本（群内头像跟随已发布版本，同 rename）。成功后用上传返回的 url
+  // 同步内存 botAvatarUrl / descriptor / bots-info 让 dashboard 立即换图——该 url
+  // 是飞书 CDN 上的持久资源，与 /bot/v3/info 的 canonical avatar_url 指向同一张图，
+  // 会一直沿用到下次 daemon 重启时 probeBotOpenId 重新拉取（probe 在 botOpenId
+  // 已知时不会重复请求，进程内没有周期性刷新）。
   setBotAvatarChanger(async (image) => {
     const r = await changeBotAvatarOnOpenPlatform(cfg.larkAppId, image, cfg.brand);
     if (!r.ok) return r;

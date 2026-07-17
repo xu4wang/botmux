@@ -2030,11 +2030,12 @@ ipcRoute('PUT', '/api/bot-rename', async (req, res) => {
 // 时前端引导扫码重登）。响应：{ ok, avatarUrl?, versionId? } | { ok:false, error, message }。
 ipcRoute('PUT', '/api/bot-avatar', async (req, res) => {
   if (!cachedLarkAppId) return jsonRes(res, 503, { error: 'larkAppId_not_set' });
-  let body: { imageBase64?: unknown };
-  try { body = await readJsonBody<{ imageBase64?: unknown }>(req); }
+  let body: { imageBase64?: unknown } | null;
+  try { body = await readJsonBody<{ imageBase64?: unknown } | null>(req); }
   catch { return jsonRes(res, 400, { ok: false, error: 'bad_json' }); }
 
-  const rawB64 = typeof body.imageBase64 === 'string'
+  // JSON 顶层可以是 null / 数组 / 标量——属性访问前先收窄成普通对象（400 而非 500）。
+  const rawB64 = typeof body?.imageBase64 === 'string'
     ? body.imageBase64.replace(/^data:image\/[a-z+.-]+;base64,/i, '').trim()
     : '';
   if (!rawB64) return jsonRes(res, 400, { ok: false, error: 'image_required' });

@@ -617,10 +617,14 @@ function BotAvatarControl(props: { bot: BotDefaultsRow; name: string; patchBot: 
 
   async function handleFile(file: File | undefined): Promise<void> {
     if (!file || busy) return;
+    // 归一化阶段就置 busy：canvas 解码大图有可感知耗时，这个窗口里不该还能
+    // 再开一次选图/触发并发提交（服务端另有 per-app 串行队列兜底）。
+    setBusy(true);
     let dataUrl: string;
     try {
       dataUrl = await normalizeAvatarImage(file);
     } catch {
+      setBusy(false);
       setStatus({ text: `✗ ${tr('botDefaults.avatarBadImage')}` });
       return;
     }

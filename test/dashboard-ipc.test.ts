@@ -1372,6 +1372,15 @@ describe('PUT /api/bot-avatar', () => {
       expect(missing.status).toBe(400);
       expect(await missing.json()).toMatchObject({ ok: false, error: 'image_required' });
 
+      // JSON 顶层为 null：属性访问前必须收窄，返回 400 而不是 500。
+      const nullBody = await fetch(`${base}/api/bot-avatar`, {
+        method: 'PUT',
+        headers: { 'content-type': 'application/json' },
+        body: 'null',
+      });
+      expect(nullBody.status).toBe(400);
+      expect(await nullBody.json()).toMatchObject({ ok: false, error: 'image_required' });
+
       const huge = await fetch(`${base}/api/bot-avatar`, {
         method: 'PUT',
         headers: { 'content-type': 'application/json' },

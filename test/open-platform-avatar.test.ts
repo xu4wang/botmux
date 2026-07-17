@@ -8,9 +8,11 @@
  * Run: pnpm vitest run test/open-platform-avatar.test.ts
  */
 import { describe, it, expect } from 'vitest';
+import { crc32 } from 'node:zlib';
 import {
   AVATAR_IMAGE_MAX_BYTES,
   changeBotAvatarOnOpenPlatform,
+  renameBotOnOpenPlatform,
   validateAvatarPng,
 } from '../src/services/open-platform-rename.js';
 import { type StoredCookie } from '../src/setup/open-platform-automation.js';
@@ -49,14 +51,17 @@ function fakeClient(calls: Call[], overrides: Record<string, unknown | ((body: u
   });
 }
 
-/** Minimal buffer that satisfies validateAvatarPng: PNG magic + IHDR dims. */
-function fakePng(width = 512, height = 512): Buffer {
-  const b = Buffer.alloc(33);
+/** Minimal buffer that satisfies validateAvatarPng: PNG magic + structurally
+ *  valid IHDR chunk (length=13, type, dims, correct CRC over type+data). */
+function fakePng(width = 512, height = 512, opts: { corruptCrc?: boolean } = {}): Buffer {
+  const b = Buffer.alloc(33); // 8 magic + 4 len + 4 'IHDR' + 13 data + 4 crc
   Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]).copy(b, 0);
   b.writeUInt32BE(13, 8);
   b.write('IHDR', 12);
   b.writeUInt32BE(width, 16);
   b.writeUInt32BE(height, 20);
+  const crc = crc32(b.subarray(12, 29)) >>> 0;
+  b.writeUInt32BE(opts.corruptCrc ? (crc ^ 0xdeadbeef) >>> 0 : crc, 29);
   return b;
 }
 
@@ -96,6 +101,29 @@ describe('validateAvatarPng', () => {
     const huge = Buffer.alloc(AVATAR_IMAGE_MAX_BYTES + 1);
     fakePng().copy(huge, 0);
     expect(validateAvatarPng(huge)).toMatchObject({ ok: false });
+  });
+
+  it('rejects magic-only pseudo-PNGs without a real IHDR chunk, and corrupted IHDR CRCs', () => {
+    // codex 二审复现样本：24 字节，仅 PNG 魔数 + 在 offset 16/20 伪造 512×512，
+    // 没有 IHDR chunk（长度/类型字段是垃圾）——必须本地拒绝，不得送上 console。
+    const pseudo = Buffer.alloc(24);
+    Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]).copy(pseudo, 0);
+    pseudo.writeUInt32BE(512, 16);
+    pseudo.writeUInt32BE(512, 20);
+    expect(validateAvatarPng(pseudo)).toMatchObject({ ok: false });
+
+    // 结构齐全但 CRC 不对（手工拼接的伪头）。
+    expect(validateAvatarPng(fakePng(512, 512, { corruptCrc: true }))).toMatchObject({ ok: false });
+
+    // 同样的伪文件走完整入口必须是 invalid_image、零 cookie/网络。
+    let cookiesLoaded = 0;
+    return changeBotAvatarOnOpenPlatform('cli_x', pseudo, undefined, {
+      loadCookies: () => { cookiesLoaded++; return COOKIES; },
+      clientFactory: fakeClient([]),
+    }).then(r => {
+      expect(r).toMatchObject({ ok: false, reason: 'invalid_image' });
+      expect(cookiesLoaded).toBe(0);
+    });
   });
 });
 
@@ -205,7 +233,7 @@ describe('changeBotAvatarOnOpenPlatform', () => {
     const r = await changeBotAvatarOnOpenPlatform('cli_x', fakePng(), undefined, {
       loadCookies: () => COOKIES,
       clientFactory: fakeClient(calls, {
-        '/developers/v1/app/cli_x': { data: { desc: 'no name field', langs: ['zh_cn'] } },
+        '/developers/v1/app/cli_x': { data: { desc: 'no name field', langs: ['zh_cn'], i18n: { zh_cn: { description: 'x' } } } },
         '/developers/v1/visible/online/cli_x': ONLINE_VISIBLE,
         '/developers/v1/app_version/list/cli_x': VERSION_LIST,
       }),
@@ -213,6 +241,32 @@ describe('changeBotAvatarOnOpenPlatform', () => {
     expect(r).toMatchObject({ ok: false, reason: 'api_error' });
     if (!r.ok) expect(r.message).toContain('当前名称');
     expect(calls.every(c => !c.path.includes('/base_info/') && !c.path.includes('/app_version/create/') && !c.path.includes('/upload/image'))).toBe(true);
+  });
+
+  it('aborts (zero mutation) when desc or a configured i18n block is unreadable — base_info is a full overwrite', async () => {
+    // desc 缺失：不允许用 '' 顶替把线上描述清掉。
+    const calls1: Call[] = [];
+    const noDesc = await changeBotAvatarOnOpenPlatform('cli_x', fakePng(), undefined, {
+      loadCookies: () => COOKIES,
+      clientFactory: fakeClient(calls1, {
+        '/developers/v1/app/cli_x': { data: { name: '小助手', langs: ['zh_cn'], i18n: { zh_cn: { name: '小助手' } } } },
+      }),
+    });
+    expect(noDesc).toMatchObject({ ok: false, reason: 'api_error' });
+    if (!noDesc.ok) expect(noDesc.message).toContain('desc');
+    expect(calls1.every(c => !c.path.includes('/base_info/') && !c.path.includes('/upload/image') && !c.path.includes('/app_version/create/'))).toBe(true);
+
+    // 已配语言缺 i18n 块：不允许重建成仅含 name 的空块清掉本地化字段。
+    const calls2: Call[] = [];
+    const noBlock = await changeBotAvatarOnOpenPlatform('cli_x', fakePng(), undefined, {
+      loadCookies: () => COOKIES,
+      clientFactory: fakeClient(calls2, {
+        '/developers/v1/app/cli_x': { data: { name: '小助手', desc: 'd', langs: ['zh_cn', 'en_us'], i18n: { zh_cn: { name: '小助手' } } } },
+      }),
+    });
+    expect(noBlock).toMatchObject({ ok: false, reason: 'api_error' });
+    if (!noBlock.ok) expect(noBlock.message).toContain('en_us');
+    expect(calls2.every(c => !c.path.includes('/base_info/') && !c.path.includes('/upload/image') && !c.path.includes('/app_version/create/'))).toBe(true);
   });
 
   it('aborts before base_info when the upload returns no url', async () => {
@@ -247,6 +301,118 @@ describe('changeBotAvatarOnOpenPlatform', () => {
     });
     expect(r).toMatchObject({ ok: false, reason: 'api_error' });
     expect(calls.every(c => !c.path.includes('/upload/image') && !c.path.includes('/base_info/') && !c.path.includes('/publish/commit/'))).toBe(true);
+  });
+
+  it('fails closed on structurally-broken visibility payloads (data:null / empty / missing keys / non-array collections / missing blackList)', async () => {
+    const brokenShapes: Array<{ label: string; response: unknown; expectIn: string }> = [
+      { label: 'data:null', response: { data: null }, expectIn: 'data' },
+      { label: 'data:{}', response: { data: {} }, expectIn: 'whiteList' },
+      // whiteList 存在但缺 groups 键（残缺块不允许默认为空集合）。
+      { label: 'whiteList missing groups', response: { data: { whiteList: { departments: [], isAll: 0, members: [] }, blackList: { departments: [], groups: [], isAll: 0, members: [] } } }, expectIn: 'whiteList.groups' },
+      // 集合存在但不是数组——不能静默当空。
+      { label: 'members non-array', response: { data: { whiteList: { departments: [], groups: [], isAll: 0, members: 'bogus' }, blackList: { departments: [], groups: [], isAll: 0, members: [] } } }, expectIn: 'whiteList.members' },
+      // 现行契约 white/black 成对出现；黑名单丢失会把被拉黑的人放出来。
+      { label: 'blackList missing', response: { data: { whiteList: { departments: [], groups: [], isAll: 0, members: [{ id: 'u1' }] } } }, expectIn: 'blackList' },
+    ];
+    for (const shape of brokenShapes) {
+      const calls: Call[] = [];
+      const r = await changeBotAvatarOnOpenPlatform('cli_x', fakePng(), undefined, {
+        loadCookies: () => COOKIES,
+        clientFactory: fakeClient(calls, {
+          '/developers/v1/app/cli_x': BASE_INFO,
+          '/developers/v1/visible/online/cli_x': shape.response,
+        }),
+      });
+      expect(r, shape.label).toMatchObject({ ok: false, reason: 'api_error' });
+      if (!r.ok) expect(r.message, shape.label).toContain(shape.expectIn);
+      // 零副作用：没上传、没写 base_info、没建版、没发布。
+      expect(
+        calls.every(c => !c.path.includes('/upload/image') && !c.path.includes('/base_info/') && !c.path.includes('/app_version/create/') && !c.path.includes('/publish/commit/')),
+        shape.label,
+      ).toBe(true);
+    }
+  });
+
+  it('still parses the legacy top-level visibility shape (no whiteList container)', async () => {
+    const calls: Call[] = [];
+    const r = await changeBotAvatarOnOpenPlatform('cli_x', fakePng(), undefined, {
+      loadCookies: () => COOKIES,
+      clientFactory: fakeClient(calls, {
+        '/developers/v1/app/cli_x': BASE_INFO,
+        '/developers/v1/app/upload/image': UPLOADED,
+        '/developers/v1/base_info/cli_x': { code: 0 },
+        // 旧形态：可见范围直接铺在 data 顶层，没有 whiteList/blackList/groups 容器。
+        '/developers/v1/visible/online/cli_x': { data: { departments: [], isAll: 0, members: [{ id: 'u9' }] } },
+        '/developers/v1/app_version/list/cli_x': VERSION_LIST,
+        '/developers/v1/app_version/create/cli_x': { data: { versionId: 'v-legacy' } },
+        '/developers/v1/publish/commit/cli_x/v-legacy': { code: 0 },
+      }),
+    });
+    expect(r).toMatchObject({ ok: true });
+    const createCall = calls.find(c => c.path.startsWith('/developers/v1/app_version/create/'))!;
+    expect(createCall.body).toMatchObject({
+      visibleSuggest: { departments: [], groups: [], isAll: 0, members: ['u9'] },
+      blackVisibleSuggest: { departments: [], groups: [], isAll: 0, members: [] },
+    });
+  });
+
+  it('serializes concurrent avatar × rename chains on the same app (TOCTOU lost-update guard)', async () => {
+    const order: string[] = [];
+    let releaseUpload!: () => void;
+    const uploadGate = new Promise<void>(resolve => { releaseUpload = resolve; });
+
+    const canned = (path: string): unknown => {
+      if (path.startsWith('/developers/v1/app/cli_race')) return BASE_INFO;
+      if (path.startsWith('/developers/v1/visible/online/')) return ONLINE_VISIBLE;
+      if (path.startsWith('/developers/v1/app_version/list/')) return VERSION_LIST;
+      if (path.startsWith('/developers/v1/base_info/')) return { code: 0 };
+      if (path.startsWith('/developers/v1/app_version/create/')) return { data: { versionId: 'v-race' } };
+      if (path.startsWith('/developers/v1/publish/commit/')) return { code: 0 };
+      throw new Error(`unexpected console call: ${path}`);
+    };
+    const factory = (label: string, gateUpload: boolean) => async () => ({
+      ok: true as const,
+      client: {
+        apiOrigin: 'https://open.feishu.cn',
+        async postJson(path: string): Promise<unknown> {
+          order.push(`${label}:${path}`);
+          return canned(path);
+        },
+        async postForm(path: string): Promise<unknown> {
+          order.push(`${label}:${path}`);
+          if (gateUpload) await uploadGate; // 复刻 codex 的交错窗口：卡在 upload
+          return UPLOADED;
+        },
+      },
+    });
+
+    const avatarP = changeBotAvatarOnOpenPlatform('cli_race', fakePng(), undefined, {
+      loadCookies: () => COOKIES,
+      clientFactory: factory('avatar', true),
+    });
+    // 等 avatar 链路真正开始（读到 base info 并卡在 upload）。
+    for (let i = 0; i < 400 && !order.some(x => x === 'avatar:/developers/v1/app/upload/image'); i++) {
+      await new Promise(resolve => setTimeout(resolve, 5));
+    }
+    expect(order.some(x => x === 'avatar:/developers/v1/app/upload/image')).toBe(true);
+
+    const renameP = renameBotOnOpenPlatform('cli_race', '并发新名', undefined, {
+      loadCookies: () => COOKIES,
+      clientFactory: factory('rename', false),
+    });
+    // avatar 未完成前，rename 不得发起任何 console 调用（否则就会拿旧快照回写）。
+    await new Promise(resolve => setTimeout(resolve, 40));
+    expect(order.some(x => x.startsWith('rename:'))).toBe(false);
+
+    releaseUpload();
+    const [avatarResult, renameResult] = await Promise.all([avatarP, renameP]);
+    expect(avatarResult).toMatchObject({ ok: true });
+    expect(renameResult).toMatchObject({ ok: true, name: '并发新名' });
+
+    // 两条链路零交错：rename 的第一个调用晚于 avatar 的最后一个调用。
+    const firstRename = order.findIndex(x => x.startsWith('rename:'));
+    const lastAvatar = order.reduce((last, x, i) => (x.startsWith('avatar:') ? i : last), -1);
+    expect(firstRename).toBeGreaterThan(lastAvatar);
   });
 
   it('rejects lark-brand tenants and reports no_session when cookies are absent', async () => {
