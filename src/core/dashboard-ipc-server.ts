@@ -2281,7 +2281,7 @@ ipcRoute('PUT', '/api/bot-env', async (req, res) => {
 /** riff 配置里 dashboard 可编辑的字段——PUT /bot-riff 只覆盖这些，其余保留。 */
 // sandboxCluster / injectStatusLines 已从 dashboard UI 移除（前者极少用、后者
 // 恒默认开启）——不在此集合中意味着存量 bots.json 值按「隐藏字段」原样保留。
-const RIFF_UI_EDITABLE_KEYS = new Set(['baseUrl', 'agent', 'model', 'jwtEnv', 'systemPrompt', 'setupCommands']);
+const RIFF_UI_EDITABLE_KEYS = new Set(['baseUrl', 'model', 'reasoningEffort', 'jwtEnv', 'systemPrompt', 'setupCommands']);
 
 /** 发给浏览器前脱敏：明文 jwt / env（可能含各类密钥）绝不进 dashboard 响应。 */
 function redactRiffForClient(riff: unknown): Record<string, unknown> | null {
