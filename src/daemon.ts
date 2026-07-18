@@ -13284,13 +13284,15 @@ function resolveBotDefaultWorkingDir(larkAppId: string): string | undefined {
  *      this bot — cross-bot dir alignment is handled by layer 4 inherit-peer)
  *   2) this bot's defaultOncall — auto-binds a brand-new chat when the flag is on
  *      (this WRITES state, so it must run identically on every spawn path)
- *   3) this bot's OWN effective `defaultWorkingDir` (legacy `defaultWorkingDir`,
+ *   3) when auto-worktree is enabled, a sibling session's workingDir if
+ *      "bot@bot 同目录拉起" is on. Reusing the already-running collaborator's
+ *      exact dir must win over creating a second, unrelated worktree.
+ *   4) this bot's OWN effective `defaultWorkingDir` (legacy `defaultWorkingDir`,
  *      or the `defaultOncall.workingDir` all-sessions fallback — see
  *      {@link resolveBotDefaultWorkingDir}). An explicit per-bot config is the
- *      bot's own intent, so it OUTRANKS cross-bot inheritance: a sibling's
- *      incidental session dir must never override a dir this bot configured for
- *      itself. Only a bot that configured nothing of its own falls to layer 4.
- *   4) a sibling session's workingDir (cross-bot / chat-scope inheritance) —
+ *      bot's own intent and normally OUTRANKS cross-bot inheritance. The sole
+ *      exception is the auto-worktree conflict described in layer 3.
+ *   5) a sibling session's workingDir (cross-bot / chat-scope inheritance) —
  *      last-resort convenience so a freshly @mentioned collaborator bot with no
  *      dir of its own follows the topic instead of bouncing through a repo card.
  * Returns the dir plus the oncall / inherited source so callers can log the reason.
@@ -13308,27 +13310,29 @@ async function resolvePinnedWorkingDir(ctx: {
   if (!oncallEntry) {
     oncallEntry = await maybeAutoBindDefaultOncall(ctx.larkAppId, ctx.chatId, ctx.chatType);
   }
-  // Layer 3: this bot's own effective default. Resolved BEFORE inheritance so an
-  // explicit per-bot dir wins over a sibling bot's active session dir.
+  // Resolve the bot default first so we know whether inheritance is only the
+  // ordinary last-resort fallback or must preempt an auto-created worktree.
   const botDefaultWorkingDir = !oncallEntry
     ? resolveBotDefaultWorkingDir(ctx.larkAppId)
     : undefined;
-  // Layer 4: sibling/peer inheritance — only when this bot has neither an oncall
-  // binding nor any default dir of its own.
-  const inheritedFrom = (!oncallEntry && !botDefaultWorkingDir)
+  const preferPeerOverAutoWorktree = !oncallEntry
+    && !!botDefaultWorkingDir
+    && botAutoWorktreeEnabled(ctx.larkAppId);
+  // Peer inheritance is normally the fallback after this bot's own default. When
+  // that default would create a fresh worktree, however, "bot@bot 同目录拉起"
+  // takes priority: a valid same-anchor peer suppresses auto-worktree for this
+  // session. The per-bot gate is enforced inside findInheritablePeer.
+  const inheritedFrom = (!oncallEntry && (!botDefaultWorkingDir || preferPeerOverAutoWorktree))
     ? findInheritablePeer({
         scope: ctx.scope, anchor: ctx.anchor, chatId: ctx.chatId, chatType: ctx.chatType,
         selfAppId: ctx.larkAppId,
         botToBotSameDir: getBot(ctx.larkAppId).config.botToBotSameDir !== false,
       })
     : null;
-  const pinnedWorkingDir = oncallEntry?.workingDir ?? botDefaultWorkingDir ?? inheritedFrom?.workingDir;
-  // Did the pinned dir come from this bot's OWN 仅默认目录 (layer 3)? Only that layer
-  // opts into auto-worktree — oncall bindings / sibling inheritance never do. When
-  // there's no oncall entry, pinnedWorkingDir IS botDefaultWorkingDir whenever the
-  // latter is set (it wins over inherit), so `!oncallEntry && botDefaultWorkingDir`
-  // fully characterizes "came from the bot's own default".
-  const pinnedFromBotDefault = !oncallEntry && !!botDefaultWorkingDir;
+  const pinnedWorkingDir = oncallEntry?.workingDir ?? inheritedFrom?.workingDir ?? botDefaultWorkingDir;
+  // Only the bot-default winner opts into auto-worktree. A same-dir peer winner
+  // keeps its exact workingDir and therefore suppresses worktree creation.
+  const pinnedFromBotDefault = !oncallEntry && !inheritedFrom && !!botDefaultWorkingDir;
   return { pinnedWorkingDir, oncallEntry, inheritedFrom, pinnedFromBotDefault };
 }
 
