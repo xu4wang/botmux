@@ -65,6 +65,7 @@ describe('plugin MCP Gateway installer', () => {
     expect(text).toContain('[mcp_servers.keep]');
     expect(text).toContain('[mcp_servers.botmux]');
     expect(text).toContain(`command = ${JSON.stringify(join(home, '.botmux', 'bin', 'botmux'))}`);
+    expect(text).toContain('env_vars = ["BOTMUX_SESSION_ID"]');
     expect(text.match(/\[mcp_servers\.botmux\]/g)).toHaveLength(1);
     expect(text).not.toContain('botmux plugin demo');
     expect(text).not.toContain('legacy-without-leading-marker');
@@ -88,7 +89,10 @@ describe('plugin MCP Gateway installer', () => {
       type: 'stdio',
       command: join(home, '.botmux', 'bin', 'botmux'),
       args: ['mcp', 'serve'],
-      env: { BOTMUX_MCP_GATEWAY: '1' },
+      env: {
+        BOTMUX_MCP_GATEWAY: '1',
+        BOTMUX_SESSION_ID: '${BOTMUX_SESSION_ID:-}',
+      },
     });
 
     expect(removeGatewayEntry(adapter).state).toBe('removed');

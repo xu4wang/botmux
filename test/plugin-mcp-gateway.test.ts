@@ -131,7 +131,7 @@ describe('plugin MCP Gateway', () => {
     await gateway.close();
   });
 
-  it('recovers the Botmux session from the CLI ancestor marker', () => {
+  it('uses one Botmux session id resolver for marker and isolated-env contexts', () => {
     const markerPid = 24680;
     const markerDir = join(home, '.botmux', 'data', '.botmux-cli-pids');
     mkdirSync(markerDir, { recursive: true });
@@ -139,6 +139,7 @@ describe('plugin MCP Gateway', () => {
 
     const resolved = resolveGatewayEnvironment({ HOME: home }, markerPid);
     expect(resolved.BOTMUX_SESSION_ID).toBe('session-from-marker');
+    rmSync(markerDir, { recursive: true, force: true });
     expect(resolveGatewayEnvironment({ BOTMUX_SESSION_ID: 'session-from-env' }, markerPid).BOTMUX_SESSION_ID)
       .toBe('session-from-env');
   });

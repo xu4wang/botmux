@@ -10,6 +10,7 @@ import { readMaterializedPlugin } from '../materializer.js';
 const GATEWAY_START = '# >>> botmux mcp gateway';
 const GATEWAY_END = '# <<< botmux mcp gateway';
 const GATEWAY_OWNER_ENV = 'BOTMUX_MCP_GATEWAY';
+const GATEWAY_SESSION_ENV = 'BOTMUX_SESSION_ID';
 
 export interface GatewayEntryReport {
   cliId: string;
@@ -113,6 +114,7 @@ function renderCodexEntry(entry: GatewayEntry): string {
     '[mcp_servers.botmux]',
     `command = ${JSON.stringify(entry.command)}`,
     `args = [${entry.args.map(value => JSON.stringify(value)).join(', ')}]`,
+    `env_vars = [${JSON.stringify(GATEWAY_SESSION_ENV)}]`,
     GATEWAY_END,
   ].join('\n');
 }
@@ -141,7 +143,12 @@ function gatewayJsonValue(entry: GatewayEntry): Record<string, unknown> {
     type: 'stdio',
     command: entry.command,
     args: entry.args,
-    env: { [GATEWAY_OWNER_ENV]: '1' },
+    env: {
+      [GATEWAY_OWNER_ENV]: '1',
+      // Claude expands this from the owning CLI process when it starts the
+      // stdio server. The default keeps standalone Claude runs valid.
+      [GATEWAY_SESSION_ENV]: `\${${GATEWAY_SESSION_ENV}:-}`,
+    },
   };
 }
 

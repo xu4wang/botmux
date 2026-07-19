@@ -51,8 +51,11 @@ export function resolveGatewayEnvironment(
   env: NodeJS.ProcessEnv = process.env,
   startPid: number = process.ppid,
 ): NodeJS.ProcessEnv {
-  if (env.BOTMUX_SESSION_ID?.trim()) return env;
-  const sessionId = resolveSessionContext(config.session.dataDir, undefined, startPid)?.sessionId.trim();
+  const sessionId = resolveSessionContext(
+    config.session.dataDir,
+    env.BOTMUX_SESSION_ID?.trim() || undefined,
+    startPid,
+  )?.sessionId.trim();
   return sessionId ? { ...env, BOTMUX_SESSION_ID: sessionId } : env;
 }
 
