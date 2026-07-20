@@ -247,7 +247,7 @@ function SchedulesPage() {
 
   async function handleSubmit(data: {
     name: string; schedule: string; prompt: string;
-    deliver: 'origin' | 'new-topic'; silent: boolean;
+    deliver: 'origin' | 'new-topic'; deliverTouched: boolean; silent: boolean;
     chatId: string; larkAppId: string;
   }): Promise<void> {
     setFormError(null);
@@ -256,8 +256,10 @@ function SchedulesPage() {
       const method = editing ? 'PATCH' : 'POST';
       // When editing, chatId/larkAppId are immutable (PATCH ignores them);
       // when creating, larkAppId selects the owning bot/daemon.
+      // Only include `deliver` in the PATCH when the user explicitly changed it,
+      // so legacy 'local' tasks aren't silently rewritten to 'origin'.
       const payload = editing
-        ? { name: data.name, schedule: data.schedule, prompt: data.prompt, deliver: data.deliver, silent: data.silent }
+        ? { name: data.name, schedule: data.schedule, prompt: data.prompt, silent: data.silent, ...(data.deliverTouched ? { deliver: data.deliver } : {}) }
         : data;
       const r = await fetch(url, {
         method,
@@ -432,6 +434,10 @@ interface ScheduleFormData {
   schedule: string;
   prompt: string;
   deliver: 'origin' | 'new-topic';
+  /** Whether the user explicitly changed the deliver radio. When false (e.g.
+   *  editing a legacy 'local' task), deliver is omitted from the PATCH so we
+   *  don't silently rewrite the task's delivery mode. */
+  deliverTouched: boolean;
   silent: boolean;
   chatId: string;
   larkAppId: string;
@@ -452,6 +458,7 @@ function ScheduleFormModal(props: {
   const [deliver, setDeliver] = useState<'origin' | 'new-topic'>(
     editing?.deliver === 'new-topic' ? 'new-topic' : 'origin',
   );
+  const [deliverTouched, setDeliverTouched] = useState(false);
   const [silent, setSilent] = useState(editing?.silent === true);
   const [chatId, setChatId] = useState(editing?.chatId ?? '');
   const [larkAppId, setLarkAppId] = useState(editing?.larkAppId ?? bots[0]?.larkAppId ?? '');
@@ -471,7 +478,7 @@ function ScheduleFormModal(props: {
     e.preventDefault();
     if (silentNewTopicConflict) return;
     if (!editing && !larkAppId) return;
-    props.onSubmit({ name, schedule, prompt, deliver, silent, chatId, larkAppId });
+    props.onSubmit({ name, schedule, prompt, deliver, deliverTouched, silent, chatId, larkAppId });
   }
 
   return (
@@ -552,7 +559,7 @@ function ScheduleFormModal(props: {
                   name="deliver"
                   value="origin"
                   checked={deliver === 'origin'}
-                  onChange={() => setDeliver('origin')}
+                  onChange={() => { setDeliver('origin'); setDeliverTouched(true); }}
                 />
                 {tr('schedules.deliveryOrigin')}
               </label>
@@ -562,7 +569,7 @@ function ScheduleFormModal(props: {
                   name="deliver"
                   value="new-topic"
                   checked={deliver === 'new-topic'}
-                  onChange={() => setDeliver('new-topic')}
+                  onChange={() => { setDeliver('new-topic'); setDeliverTouched(true); }}
                   disabled={silent}
                 />
                 {tr('schedules.deliveryNewTopic')}

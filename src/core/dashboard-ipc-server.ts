@@ -1297,7 +1297,14 @@ ipcRoute('POST', '/api/schedules', async (req, res) => {
   const schedule = typeof b.schedule === 'string' ? b.schedule.trim() : '';
   const prompt = typeof b.prompt === 'string' ? b.prompt : '';
   const chatId = typeof b.chatId === 'string' ? b.chatId.trim() : '';
-  const silent = b.silent === true;
+  // Validate silent type — if present, must be boolean (no silent degradation).
+  let silent = false;
+  if (b.silent !== undefined) {
+    if (typeof b.silent !== 'boolean') {
+      return jsonRes(res, 400, { ok: false, error: 'invalid_field', field: 'silent' });
+    }
+    silent = b.silent;
+  }
   // `local` (log-only, no delivery) is not implemented in the executor —
   // reject it from the dashboard API rather than silently degrading to origin.
   let deliver: 'origin' | 'new-topic' = 'origin';
@@ -1312,19 +1319,13 @@ ipcRoute('POST', '/api/schedules', async (req, res) => {
   if (!schedule) return jsonRes(res, 400, { ok: false, error: 'invalid_field', field: 'schedule' });
   if (!prompt.trim()) return jsonRes(res, 400, { ok: false, error: 'invalid_field', field: 'prompt' });
   if (!chatId) return jsonRes(res, 400, { ok: false, error: 'invalid_field', field: 'chatId' });
-  // Verify this bot is a member of the target chat — otherwise the task will
-  // fire but fail to deliver every time. listChatBotMembers returns [] both
-  // when the bot is absent AND when the API is unavailable (it swallows
-  // is_in_chat errors), so we only block on a non-empty result that excludes
-  // us. An empty list is treated as "unknown" → fail-open, let the task fire.
-  try {
-    const members = await listChatBotMembers(cachedLarkAppId, chatId).catch(() => [] as ChatBotMember[]);
-    if (members.length > 0 && !members.some(m => m.larkAppId === cachedLarkAppId)) {
-      return jsonRes(res, 400, { ok: false, error: 'bot_not_in_chat', field: 'chatId' });
-    }
-  } catch {
-    // Best-effort: never block creation on membership check failure.
-  }
+  // Note: bot↔chat membership is intentionally NOT validated here.
+  // listChatBotMembers returns [] both when the API is unavailable and when
+  // no bot has been observed in the chat yet, so we cannot reliably tell
+  // "bot not in chat" (should 400) from "unknown" (should fail-open).
+  // A task whose bot is not in the target chat will fail at fire time with
+  // a clear lastError, which is the pre-existing behavior for CLI-created
+  // tasks. Adding a flaky gate here would block valid creates.
   try {
     const task = scheduler.addTask({
       name,
