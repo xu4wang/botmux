@@ -45,6 +45,16 @@ describe('dashboard schedules React page helpers', () => {
     expect(page).toContain("s.deliver === 'local' || s.silent ? null : (");
   });
 
+  it('marks deliverTouched when silent auto-switches new-topic to origin (regression for silent_new_topic_exclusive)', () => {
+    const page = readFileSync(new URL('../src/dashboard/web/schedules-page.tsx', import.meta.url), 'utf8');
+    // When checking Silent on a new-topic task, the UI auto-switches deliver to
+    // origin. deliverTouched must be set true so the PATCH carries deliver:'origin'
+    // — otherwise the backend still sees new-topic + silent:true and rejects.
+    expect(page).toContain('setDeliverTouched(true)');
+    // The silent onChange handler must flip deliver to origin AND mark touched.
+    expect(page).toMatch(/setSilent\(e\.target\.checked\)[\s\S]*?setDeliver\('origin'\)[\s\S]*?setDeliverTouched\(true\)/);
+  });
+
   it('formats in the given schedule timezone, not the browser zone', () => {
     // 2026-07-08T01:00Z = 09:00 in Asia/Shanghai. Rendering with the effective
     // schedule tz must show 09 (+ a zone suffix), regardless of the test host zone.
