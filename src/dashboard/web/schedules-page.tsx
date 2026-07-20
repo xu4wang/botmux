@@ -158,6 +158,16 @@ function SchedulesPage() {
   const [formOpen, setFormOpen] = useState(false);
   const [editing, setEditing] = useState<ScheduleRow | null>(null);
   const [formError, setFormError] = useState<string | null>(null);
+  const [bots, setBots] = useState<Array<{ larkAppId: string; botName?: string }>>([]);
+
+  useEffect(() => {
+    fetch('/api/bots')
+      .then(r => r.json())
+      .then(b => {
+        if (Array.isArray(b?.bots)) setBots(b.bots);
+      })
+      .catch(() => undefined);
+  }, []);
 
   const rows = useMemo(
     () => filterSchedules(scheduleRows, filters),
@@ -237,17 +247,22 @@ function SchedulesPage() {
 
   async function handleSubmit(data: {
     name: string; schedule: string; prompt: string;
-    deliver: 'origin' | 'local' | 'new-topic'; silent: boolean;
-    chatId: string;
+    deliver: 'origin' | 'new-topic'; silent: boolean;
+    chatId: string; larkAppId: string;
   }): Promise<void> {
     setFormError(null);
     try {
       const url = editing ? `/api/schedules/${encodeURIComponent(editing.id)}` : '/api/schedules';
       const method = editing ? 'PATCH' : 'POST';
+      // When editing, chatId/larkAppId are immutable (PATCH ignores them);
+      // when creating, larkAppId selects the owning bot/daemon.
+      const payload = editing
+        ? { name: data.name, schedule: data.schedule, prompt: data.prompt, deliver: data.deliver, silent: data.silent }
+        : data;
       const r = await fetch(url, {
         method,
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(data),
+        body: JSON.stringify(payload),
       });
       const body = await r.json().catch(() => ({}));
       if (!r.ok || body.ok === false) {
@@ -335,6 +350,7 @@ function SchedulesPage() {
         <ScheduleFormModal
           editing={editing}
           error={formError}
+          bots={bots}
           tr={tr}
           onClose={() => setFormOpen(false)}
           onSubmit={data => void handleSubmit(data)}
@@ -415,27 +431,30 @@ interface ScheduleFormData {
   name: string;
   schedule: string;
   prompt: string;
-  deliver: 'origin' | 'local' | 'new-topic';
+  deliver: 'origin' | 'new-topic';
   silent: boolean;
   chatId: string;
+  larkAppId: string;
 }
 
 function ScheduleFormModal(props: {
   editing: ScheduleRow | null;
   error: string | null;
+  bots: Array<{ larkAppId: string; botName?: string }>;
   tr: ReturnType<typeof useT>;
   onClose(): void;
   onSubmit(data: ScheduleFormData): void;
 }) {
-  const { editing, tr } = props;
+  const { editing, tr, bots } = props;
   const [name, setName] = useState(editing?.name ?? '');
   const [schedule, setSchedule] = useState(editing?.schedule ?? '');
   const [prompt, setPrompt] = useState(editing?.prompt ?? '');
-  const [deliver, setDeliver] = useState<'origin' | 'local' | 'new-topic'>(
-    (editing?.deliver as 'origin' | 'local' | 'new-topic') ?? 'origin',
+  const [deliver, setDeliver] = useState<'origin' | 'new-topic'>(
+    editing?.deliver === 'new-topic' ? 'new-topic' : 'origin',
   );
   const [silent, setSilent] = useState(editing?.silent === true);
   const [chatId, setChatId] = useState(editing?.chatId ?? '');
+  const [larkAppId, setLarkAppId] = useState(editing?.larkAppId ?? bots[0]?.larkAppId ?? '');
 
   // silent + new-topic are mutually exclusive
   const silentNewTopicConflict = silent && deliver === 'new-topic';
@@ -443,7 +462,8 @@ function ScheduleFormModal(props: {
   function handleSubmit(e: React.FormEvent): void {
     e.preventDefault();
     if (silentNewTopicConflict) return;
-    props.onSubmit({ name, schedule, prompt, deliver, silent, chatId });
+    if (!editing && !larkAppId) return;
+    props.onSubmit({ name, schedule, prompt, deliver, silent, chatId, larkAppId });
   }
 
   return (
@@ -456,6 +476,22 @@ function ScheduleFormModal(props: {
       >
         <h2>{editing ? tr('schedules.edit') : tr('schedules.create')}</h2>
         <form onSubmit={handleSubmit} className="schedule-form">
+          {!editing ? (
+            <label className="schedule-form-field">
+              <span className="schedule-form-label">{tr('schedules.form.bot')}</span>
+              <select
+                value={larkAppId}
+                onChange={e => setLarkAppId(e.target.value)}
+                required
+              >
+                {bots.map(b => (
+                  <option key={b.larkAppId} value={b.larkAppId}>
+                    {b.botName ?? b.larkAppId}
+                  </option>
+                ))}
+              </select>
+            </label>
+          ) : null}
           <label className="schedule-form-field">
             <span className="schedule-form-label">{tr('schedules.form.name')}</span>
             <input
@@ -487,16 +523,18 @@ function ScheduleFormModal(props: {
             />
             <small className="schedule-form-help">{tr('schedules.form.promptHelp')}</small>
           </label>
-          <label className="schedule-form-field">
-            <span className="schedule-form-label">{tr('schedules.form.chat')}</span>
-            <input
-              type="text"
-              value={chatId}
-              onChange={e => setChatId(e.target.value)}
-              placeholder="oc_..."
-              required
-            />
-          </label>
+          {!editing ? (
+            <label className="schedule-form-field">
+              <span className="schedule-form-label">{tr('schedules.form.chat')}</span>
+              <input
+                type="text"
+                value={chatId}
+                onChange={e => setChatId(e.target.value)}
+                placeholder="oc_..."
+                required
+              />
+            </label>
+          ) : null}
           <div className="schedule-form-field">
             <span className="schedule-form-label">{tr('schedules.form.deliver')}</span>
             <div className="schedule-form-radio-group">
@@ -520,16 +558,6 @@ function ScheduleFormModal(props: {
                   disabled={silent}
                 />
                 {tr('schedules.deliveryNewTopic')}
-              </label>
-              <label>
-                <input
-                  type="radio"
-                  name="deliver"
-                  value="local"
-                  checked={deliver === 'local'}
-                  onChange={() => setDeliver('local')}
-                />
-                {tr('schedules.deliveryLocal')}
               </label>
             </div>
           </div>
@@ -560,7 +588,7 @@ function ScheduleFormModal(props: {
             <button
               type="submit"
               className="schedule-form-submit"
-              disabled={silentNewTopicConflict}
+              disabled={silentNewTopicConflict || (!editing && !larkAppId)}
             >
               {editing ? tr('schedules.form.save') : tr('schedules.form.create')}
             </button>

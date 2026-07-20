@@ -1288,26 +1288,29 @@ ipcRoute('POST', '/api/schedules', async (req, res) => {
   if (!cachedLarkAppId) return jsonRes(res, 503, { ok: false, error: 'larkAppId_not_set' });
   let body: unknown;
   try { body = await readJsonBody(req); } catch { return jsonRes(res, 400, { ok: false, error: 'invalid_json' }); }
-  const b = body as {
-    name?: string; schedule?: string; prompt?: string;
-    deliver?: 'origin' | 'local' | 'new-topic'; silent?: boolean;
-    chatId?: string; workingDir?: string;
-  };
-  if (!b.name || !b.schedule || !b.prompt || !b.chatId) {
+  const b = body as Record<string, unknown>;
+  // Runtime validation — never trust the TS cast alone.
+  const name = typeof b.name === 'string' ? b.name.trim() : '';
+  const schedule = typeof b.schedule === 'string' ? b.schedule.trim() : '';
+  const prompt = typeof b.prompt === 'string' ? b.prompt : '';
+  const chatId = typeof b.chatId === 'string' ? b.chatId.trim() : '';
+  const deliver = b.deliver === 'new-topic' ? 'new-topic' : b.deliver === 'local' ? 'local' : 'origin';
+  const silent = b.silent === true;
+  if (!name || !schedule || !prompt || !chatId) {
     return jsonRes(res, 400, { ok: false, error: 'missing_fields', fields: ['name', 'schedule', 'prompt', 'chatId'] });
   }
   try {
     const task = scheduler.addTask({
-      name: b.name,
-      schedule: b.schedule,
-      prompt: b.prompt,
-      workingDir: b.workingDir ?? process.cwd(),
-      chatId: b.chatId,
+      name,
+      schedule,
+      prompt,
+      workingDir: typeof b.workingDir === 'string' ? b.workingDir : process.cwd(),
+      chatId,
       scope: 'chat',
       chatType: 'group',
       larkAppId: cachedLarkAppId,
-      deliver: b.deliver ?? 'origin',
-      silent: b.silent === true,
+      deliver,
+      silent,
     });
     dashboardEventBus.publish({ type: 'schedule.created', body: { schedule: composeScheduleRow(task) } });
     jsonRes(res, 200, { ok: true, task: composeScheduleRow(task) });
@@ -1321,17 +1324,17 @@ ipcRoute('POST', '/api/schedules', async (req, res) => {
 ipcRoute('PATCH', '/api/schedules/:id', async (req, res, p) => {
   let body: unknown;
   try { body = await readJsonBody(req); } catch { return jsonRes(res, 400, { ok: false, error: 'invalid_json' }); }
-  const b = body as {
+  const b = body as Record<string, unknown>;
+  const updates: {
     name?: string; prompt?: string; schedule?: string;
     deliver?: 'origin' | 'local' | 'new-topic'; silent?: boolean;
-  };
-  const result = scheduler.updateTask(p.id, {
-    name: b.name,
-    prompt: b.prompt,
-    schedule: b.schedule,
-    deliver: b.deliver,
-    silent: b.silent,
-  });
+  } = {};
+  if (typeof b.name === 'string') updates.name = b.name.trim();
+  if (typeof b.prompt === 'string') updates.prompt = b.prompt;
+  if (typeof b.schedule === 'string') updates.schedule = b.schedule.trim();
+  if (b.deliver === 'origin' || b.deliver === 'local' || b.deliver === 'new-topic') updates.deliver = b.deliver;
+  if (typeof b.silent === 'boolean') updates.silent = b.silent;
+  const result = scheduler.updateTask(p.id, updates);
   if (!result.ok) return jsonRes(res, 400, result);
   const task = scheduleStore.getTask(p.id);
   jsonRes(res, 200, { ok: true, task: task ? composeScheduleRow(task) : undefined });

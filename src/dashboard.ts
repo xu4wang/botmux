@@ -3044,6 +3044,52 @@ const server = createServer(async (req, res) => {
       return;
     }
 
+    // Create a new scheduled task. Body must include `larkAppId` to select
+    // which bot/daemon owns the task (multi-bot dashboards cannot guess).
+    if (req.method === 'POST' && url.pathname === '/api/schedules') {
+      let body: unknown;
+      try { body = await readJsonBody(req); } catch { return jsonRes(res, 400, { ok: false, error: 'bad_json' }); }
+      const b = body as Record<string, unknown>;
+      const larkAppId = typeof b.larkAppId === 'string' ? b.larkAppId : '';
+      if (!larkAppId) return jsonRes(res, 400, { ok: false, error: 'larkAppId_required' });
+      const upstream = await proxyToDaemon(larkAppId, '/api/schedules', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify(body),
+      });
+      res.writeHead(upstream.status, { 'content-type': 'application/json' });
+      res.end(await upstream.text());
+      return;
+    }
+
+    // Update an existing task (PATCH) or delete it (DELETE). Both route to
+    // the daemon that owns the task via scheduleOwnerOf.
+    if (req.method === 'PATCH' && (m = url.pathname.match(/^\/api\/schedules\/([^/]+)$/))) {
+      const id = decodeURIComponent(m[1]);
+      const owner = aggregator.scheduleOwnerOf(id);
+      if (!owner) return jsonRes(res, 404, { ok: false, error: 'unknown_schedule' });
+      let body: unknown;
+      try { body = await readJsonBody(req); } catch { return jsonRes(res, 400, { ok: false, error: 'bad_json' }); }
+      const upstream = await proxyToDaemon(owner, `/api/schedules/${id}`, {
+        method: 'PATCH',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify(body),
+      });
+      res.writeHead(upstream.status, { 'content-type': 'application/json' });
+      res.end(await upstream.text());
+      return;
+    }
+
+    if (req.method === 'DELETE' && (m = url.pathname.match(/^\/api\/schedules\/([^/]+)$/))) {
+      const id = decodeURIComponent(m[1]);
+      const owner = aggregator.scheduleOwnerOf(id);
+      if (!owner) return jsonRes(res, 404, { ok: false, error: 'unknown_schedule' });
+      const upstream = await proxyToDaemon(owner, `/api/schedules/${id}`, { method: 'DELETE' });
+      res.writeHead(upstream.status, { 'content-type': 'application/json' });
+      res.end(await upstream.text());
+      return;
+    }
+
     // v3 workflow runs. Reads project directly from disk; cancel resolves the
     // immutable run owner and proxies to that daemon (the dashboard never
     // writes the v3 journal itself).

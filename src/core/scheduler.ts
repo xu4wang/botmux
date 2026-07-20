@@ -762,7 +762,12 @@ export function updateTask(
 
   // Re-parse + recompute next run when the schedule expression changes.
   if (updates.schedule !== undefined && updates.schedule !== task.schedule) {
-    const parsed = parseSchedule(updates.schedule);
+    let parsed: ParsedSchedule;
+    try {
+      parsed = parseSchedule(updates.schedule);
+    } catch (err) {
+      return { ok: false, error: `invalid_schedule: ${err instanceof Error ? err.message : String(err)}` };
+    }
     patch.schedule = updates.schedule;
     patch.parsed = parsed;
     const next = computeNextRun(parsed);
@@ -778,7 +783,7 @@ export function updateTask(
 }
 
 /**
- * Delete a scheduled task. Emits a `schedule.removed` event so the dashboard
+ * Delete a scheduled task. Emits a `schedule.deleted` event so the dashboard
  * drops the row immediately without waiting for the next poll.
  */
 export function removeTaskForDashboard(id: string): { ok: boolean; error?: string } {
