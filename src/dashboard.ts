@@ -890,15 +890,32 @@ let lastSuccessfulUpdatePlan: GlobalInstallPlan | undefined;
 const LATEST_TTL_MS = 30 * 60_000;
 const CHANGELOG_TTL_MS = 15 * 60_000;
 const FAILURE_TTL_MS = 60_000;
-let latestVersionCache: { value: string | null; at: number } | null = null;
+type LatestVersionCache = { value: string | null; at: number; lookupOk: boolean };
+let latestVersionCache: LatestVersionCache | null = null;
+let latestVersionLookupInFlight: Promise<LatestVersionCache> | null = null;
 let changelogCache: { key: string; value: ChangelogResult; at: number } | null = null;
 
-async function cachedLatestVersion(now = Date.now(), force = false): Promise<string | null> {
-  const ttl = latestVersionCache?.value ? LATEST_TTL_MS : FAILURE_TTL_MS;
-  if (!force && latestVersionCache && now - latestVersionCache.at < ttl) return latestVersionCache.value;
-  const value = await fetchLatestVersion();
-  latestVersionCache = { value, at: now };
-  return value;
+async function cachedLatestVersion(force = false): Promise<LatestVersionCache> {
+  const now = Date.now();
+  const ttl = latestVersionCache?.lookupOk ? LATEST_TTL_MS : FAILURE_TTL_MS;
+  if (!force && latestVersionCache && now - latestVersionCache.at < ttl) return latestVersionCache;
+  if (latestVersionLookupInFlight) return latestVersionLookupInFlight;
+
+  const lookup = (async () => {
+    const value = await fetchLatestVersion();
+    latestVersionCache = {
+      value: value ?? latestVersionCache?.value ?? null,
+      at: Date.now(),
+      lookupOk: value !== null,
+    };
+    return latestVersionCache;
+  })();
+  latestVersionLookupInFlight = lookup;
+  try {
+    return await lookup;
+  } finally {
+    if (latestVersionLookupInFlight === lookup) latestVersionLookupInFlight = null;
+  }
 }
 
 async function cachedChangelog(current: string, now = Date.now()): Promise<ChangelogResult> {
@@ -2437,7 +2454,8 @@ const server = createServer(async (req, res) => {
       // button installs `@latest`). isNewerVersion uses semver precedence, so a
       // canary running AHEAD of the latest stable (e.g. 2.87.0-canary.0 vs
       // 2.86.0) is NOT flagged behind — exactly the canary case we want.
-      const latest = await cachedLatestVersion(Date.now(), url.searchParams.get('refresh') === '1');
+      const latestResult = await cachedLatestVersion(url.searchParams.get('refresh') === '1');
+      const latest = latestResult.value;
       const cliUpdates = listCliRuntimeUpdateEntries(config.session.dataDir).map((entry) => ({
         cliId: entry.cliId,
         binPath: entry.binPath,
@@ -2451,6 +2469,7 @@ const server = createServer(async (req, res) => {
       return jsonRes(res, 200, {
         current,
         latest,
+        versionLookupOk: latestResult.lookupOk,
         behind: !!latest && isNewerVersion(latest, current),
         cliBehind: cliUpdates.some((entry) => entry.updateAvailable),
         cliUpdates,

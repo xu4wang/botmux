@@ -7263,70 +7263,80 @@ button.sidebar-create-btn:focus-visible {
   margin: -2px 0 0 37px;
 }
 button.dashboard-version-chip {
+  position: relative;
+  isolation: isolate;
   display: inline-flex;
   align-items: center;
   gap: 6px;
   min-height: 22px;
   margin: 0;
-  padding: 0 8px;
-  border: 1px solid color-mix(in srgb, var(--success) 24%, var(--border-soft));
+  padding: 0 7px 0 9px;
+  border: 1px solid transparent;
   border-radius: var(--radius-full);
-  background: color-mix(in srgb, var(--surface) 72%, transparent);
-  color: var(--success);
+  background: color-mix(in srgb, var(--surface) 42%, transparent);
+  color: var(--muted);
   box-shadow: none;
   cursor: pointer;
-  font-family: "Geist Mono", var(--mono);
+  font-family: inherit;
   font-size: 11px;
   font-weight: 700;
   line-height: 1;
+  white-space: nowrap;
+  user-select: none;
+}
+button.dashboard-version-chip::before {
+  content: "";
+  position: absolute;
+  inset: -1px;
+  z-index: 0;
+  padding: 1px;
+  border-radius: inherit;
+  background: linear-gradient(135deg, var(--brand-accent-cyan), var(--brand-accent), var(--brand-accent-pink));
+  -webkit-mask:
+    linear-gradient(#000 0 0) content-box,
+    linear-gradient(#000 0 0);
+  -webkit-mask-composite: xor;
+  mask:
+    linear-gradient(#000 0 0) content-box,
+    linear-gradient(#000 0 0);
+  mask-composite: exclude;
+  pointer-events: none;
+}
+button.dashboard-version-chip > span {
+  position: relative;
+  z-index: 1;
 }
 button.dashboard-version-chip:hover,
 .dashboard-version-control.is-open button.dashboard-version-chip {
-  border-color: color-mix(in srgb, var(--accent) 46%, var(--border-soft));
   background: color-mix(in srgb, var(--accent) 7%, var(--surface));
-  color: var(--success);
+  color: var(--fg);
 }
-button.dashboard-version-chip.has-update {
-  border-color: color-mix(in srgb, var(--accent) 38%, var(--border-soft));
-  background: color-mix(in srgb, var(--accent) 6%, var(--surface));
-  color: var(--accent-strong);
+.dashboard-version-state {
+  display: grid;
+  place-items: center;
+  flex: none;
+  width: 14px;
+  height: 14px;
+  border-radius: var(--radius-full);
+  font-size: 9px;
+  font-weight: 800;
+  line-height: 1;
 }
-button.dashboard-version-chip.has-update:hover,
-.dashboard-version-control.is-open button.dashboard-version-chip.has-update {
-  border-color: color-mix(in srgb, var(--accent) 58%, var(--border-soft));
-  background: color-mix(in srgb, var(--accent) 10%, var(--surface));
+.dashboard-version-state.is-current {
+  background: var(--success-soft);
+  color: var(--fg);
 }
-button.dashboard-version-chip.is-unknown {
-  border-color: var(--border-soft);
-  background: color-mix(in srgb, var(--surface) 72%, transparent);
-  color: var(--muted);
+.dashboard-version-state.has-update {
+  background: var(--warning-soft);
+  color: var(--fg);
 }
-button.dashboard-version-chip.is-unknown:hover,
-.dashboard-version-control.is-open button.dashboard-version-chip.is-unknown {
-  border-color: color-mix(in srgb, var(--accent) 46%, var(--border-soft));
-  background: color-mix(in srgb, var(--accent) 7%, var(--surface));
-  color: var(--accent-strong);
+.dashboard-version-state.is-unknown {
+  background: var(--surface-muted);
+  color: var(--fg);
 }
-button.dashboard-version-chip.is-error {
-  border-color: color-mix(in srgb, var(--danger) 34%, var(--border-soft));
-  background: color-mix(in srgb, var(--danger) 6%, var(--surface));
-  color: var(--danger);
-}
-button.dashboard-version-chip.is-error:hover,
-.dashboard-version-control.is-open button.dashboard-version-chip.is-error {
-  border-color: color-mix(in srgb, var(--danger) 58%, var(--border-soft));
-  background: color-mix(in srgb, var(--danger) 9%, var(--surface));
-}
-.dashboard-version-dot {
-  width: 6px;
-  height: 6px;
-  border-radius: 50%;
-  background: currentColor;
-  box-shadow: 0 0 0 2px color-mix(in srgb, currentColor 14%, transparent);
-}
-button.dashboard-version-chip.has-update .dashboard-version-dot {
-  background: var(--warning);
-  box-shadow: 0 0 0 2px color-mix(in srgb, var(--warning) 14%, transparent);
+.dashboard-version-state.is-error {
+  background: var(--danger-soft);
+  color: var(--fg);
 }
 .dashboard-version-popover {
   position: absolute;
@@ -7428,15 +7438,19 @@ button.dashboard-version-refresh.is-refreshing svg {
 }
 .dashboard-version-current > span.is-current {
   background: var(--success-soft);
-  color: var(--success);
+  color: var(--fg);
 }
 .dashboard-version-current > span.has-update {
-  background: var(--accent-soft);
-  color: var(--accent-strong);
+  background: var(--warning-soft);
+  color: var(--fg);
 }
 .dashboard-version-current > span.is-unknown {
   background: var(--surface-muted);
-  color: var(--muted);
+  color: var(--fg);
+}
+.dashboard-version-current > span.is-error {
+  background: var(--danger-soft);
+  color: var(--fg);
 }
 .dashboard-version-message {
   max-width: 290px;

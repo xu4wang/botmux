@@ -42,6 +42,7 @@ type TopbarStatusSummary = {
 type BotmuxUpdateStatus = {
   current: string;
   latest: string | null;
+  versionLookupOk: boolean;
   behind: boolean;
   localDevInstall: boolean;
   updateSupported: boolean;
@@ -527,6 +528,10 @@ function TopbarVersionControl(props: {
     setErrorDetail('');
   }, [status?.current, status?.latest]);
 
+  useEffect(() => {
+    if (status) setRefreshFailed(status.versionLookupOk === false);
+  }, [status]);
+
   useEffect(() => () => clearReconnectTimer(), []);
 
   useEffect(() => {
@@ -627,7 +632,7 @@ function TopbarVersionControl(props: {
       : phase === 'error'
         ? t('update.updateFailed', { detail: errorDetail })
         : refreshFailed
-          ? t('update.checkUnavailable')
+          ? t('update.topbarRefreshFailed')
           : behind
           ? automatic
             ? t('update.versionUpgradePrompt', { version: latestVersion })
@@ -642,6 +647,13 @@ function TopbarVersionControl(props: {
       : phase === 'idle'
         ? t('update.topbarAction')
         : t('update.topbarWorking');
+  const versionSignal = phase === 'error' || (refreshFailed && unknown)
+    ? { className: 'is-error', symbol: '!' }
+    : behind
+      ? { className: 'has-update', symbol: '↑' }
+      : unknown
+        ? { className: 'is-unknown', symbol: '?' }
+        : { className: 'is-current', symbol: '✓' };
 
   return (
     <div ref={rootRef} className={`dashboard-version-control${open ? ' is-open' : ''}`}>
@@ -651,15 +663,17 @@ function TopbarVersionControl(props: {
         className={`dashboard-version-chip${behind ? ' has-update' : ''}${unknown ? ' is-unknown' : ''}${phase === 'error' ? ' is-error' : ''}`}
         aria-haspopup="dialog"
         aria-expanded={open}
+        aria-label={`${currentVersion}. ${message}`}
         title={message}
         onClick={() => setOpen(value => !value)}
       >
         <span>{currentVersion}</span>
         {busy
           ? <span className="dashboard-update-spinner" aria-hidden="true" />
-          : behind
-            ? <span className="dashboard-version-dot" aria-hidden="true" />
-            : null}
+          : <span
+              className={`dashboard-version-state ${versionSignal.className}`}
+              aria-hidden="true"
+            >{versionSignal.symbol}</span>}
       </button>
       {open ? (
         <section
@@ -695,8 +709,8 @@ function TopbarVersionControl(props: {
           <div className="dashboard-version-popover-body">
             <div className="dashboard-version-current">
               <strong>{currentVersion}</strong>
-              <span className={behind ? 'has-update' : unknown ? 'is-unknown' : 'is-current'} aria-hidden="true">
-                {busy ? <span className="dashboard-update-spinner" /> : behind ? '↑' : unknown ? '?' : '✓'}
+              <span className={versionSignal.className} aria-hidden="true">
+                {busy ? <span className="dashboard-update-spinner" /> : versionSignal.symbol}
               </span>
             </div>
             <p
@@ -1028,7 +1042,7 @@ async function checkUpdateBadge(force = false): Promise<boolean> {
       latestVersion = null;
     }
     renderShell();
-    return true;
+    return j.versionLookupOk !== false;
   } catch {
     return false;
   }
