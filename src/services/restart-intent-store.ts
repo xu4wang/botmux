@@ -102,7 +102,14 @@ export function hasActiveRestartLeaseTo(dir: string, nowMs: number): boolean {
   if (!lease.pid) return age <= RESTART_LEASE_CLAIM_MS;
   if (lease.procStart) {
     const liveStart = readProcessStartIdentity(lease.pid);
-    if (liveStart !== undefined) return liveStart === lease.procStart;
+    if (liveStart !== undefined) {
+      if (liveStart !== lease.procStart) return false;
+      // A stuck driver must not hold the lease forever: even if the process
+      // is still alive (and its start time matches), expire after MAX_MS so a
+      // new restart can be attempted.
+      if (age > RESTART_LEASE_MAX_MS) return false;
+      return true;
+    }
   }
   if (age > RESTART_LEASE_MAX_MS) return false;
   try { process.kill(lease.pid, 0); return true; } catch { return false; }
