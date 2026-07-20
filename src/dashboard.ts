@@ -2562,14 +2562,18 @@ const server = createServer(async (req, res) => {
       } catch { /* empty / bad body → plain restart */ }
       const upd = body.update && typeof body.update === 'object' ? body.update as Record<string, unknown> : null;
       let acquired = false;
+      let leaseId: string | null = null;
+      let activePackageRoot: string | undefined;
+      let shouldLaunch = false;
       try {
         await withFileLock(globalInstallUpdateLockTarget(), async () => {
           acquired = true;
-          const leaseId = claimRestartLease();
-          if (!leaseId) {
+          const claimed = claimRestartLease();
+          if (!claimed) {
             jsonRes(res, 202, { ok: true, alreadyScheduled: true });
             return;
           }
+          leaseId = claimed;
           try {
             if (upd && typeof upd.oldVersion === 'string' && typeof upd.newVersion === 'string' && upd.oldVersion !== upd.newVersion) {
               writeRestartIntent({ kind: 'update', oldVersion: upd.oldVersion, newVersion: upd.newVersion, at: new Date().toISOString() });
@@ -2578,6 +2582,7 @@ const server = createServer(async (req, res) => {
             }
           } catch (error) {
             clearRestartLease(leaseId);
+            leaseId = null;
             jsonRes(res, 500, {
               ok: false,
               error: 'restart_intent_failed',
@@ -2585,38 +2590,38 @@ const server = createServer(async (req, res) => {
             });
             return;
           }
-          const activePackageRoot = (lastSuccessfulUpdatePlan ?? tryResolveGlobalInstallPlan())?.activePackageRoot;
-          // Finish the acknowledgement before the detached driver tears down
-          // this process, while retaining the update lock until launch.
-          await new Promise<void>((resolveLaunch) => {
-            let launched = false;
-            const launch = () => {
-              if (launched) return;
-              launched = true;
-              try {
-                const child = spawnDetachedRestart('dashboard', activePackageRoot, leaseId);
-                if (!child.pid) throw new Error('restart driver did not start');
-              } catch (error) {
-                clearRestartLease(leaseId);
-                logger.error(`[dashboard] restart launch failed: ${error instanceof Error ? error.message : error}`);
-              } finally {
-                resolveLaunch();
-              }
-            };
-            res.once('finish', launch);
-            res.once('close', launch);
-            try {
-              jsonRes(res, 202, { ok: true });
-            } finally {
-              if (res.destroyed || res.writableFinished) launch();
-            }
-          });
+          activePackageRoot = (lastSuccessfulUpdatePlan ?? tryResolveGlobalInstallPlan())?.activePackageRoot;
+          // Send acknowledgement while holding the lock, then release immediately.
+          // The lease itself prevents concurrent restarts — no need to hold the
+          // lock across the network round-trip waiting for res.finish.
+          jsonRes(res, 202, { ok: true });
+          shouldLaunch = true;
         }, { maxWaitMs: 2_000 });
-        return;
       } catch (error) {
         if (!acquired) return jsonRes(res, 409, { ok: false, error: 'update_in_flight' });
         throw error;
       }
+      // Spawn the detached driver after the lock is released. The lease guards
+      // against double-restart; if launch fails we clear the lease so a retry
+      // can succeed.
+      if (shouldLaunch && leaseId) {
+        const launch = () => {
+          try {
+            const child = spawnDetachedRestart('dashboard', activePackageRoot, leaseId!);
+            if (!child.pid) throw new Error('restart driver did not start');
+          } catch (error) {
+            clearRestartLease(leaseId!);
+            logger.error(`[dashboard] restart launch failed: ${error instanceof Error ? error.message : error}`);
+          }
+        };
+        if (res.destroyed || res.writableFinished) {
+          launch();
+        } else {
+          res.once('finish', launch);
+          res.once('close', launch);
+        }
+      }
+      return;
     }
 
     if (req.method === 'GET' && url.pathname === '/api/skills') {

@@ -7,6 +7,8 @@ export interface BotmuxUpdateResult {
   restarted: boolean;
   /** Populated when the update succeeded but the restart handoff failed. */
   restartError?: string;
+  /** True when a restart was already in progress (another driver claimed the lease). */
+  alreadyScheduled?: boolean;
 }
 
 type FetchLike = (input: string, init?: RequestInit) => Promise<Response>;
@@ -63,5 +65,8 @@ export async function updateAndRestartBotmux(
     return { ...result, restarted: false, restartError: responseError(restartResponse, restart).message };
   }
   if (restart.ok !== true) throw new Error('Invalid restart response');
-  return { ...result, restarted: true };
+  const alreadyScheduled = restart.alreadyScheduled === true;
+  return alreadyScheduled
+    ? { ...result, restarted: true, alreadyScheduled: true }
+    : { ...result, restarted: true };
 }
