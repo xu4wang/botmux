@@ -561,15 +561,15 @@ export type DaemonToWorker =
 /** Messages sent from Worker to Daemon */
 export type WorkerToDaemon =
   | { type: 'ready'; port: number; token: string; viewToken?: string; turnId?: string; dispatchAttempt?: number }
-  | { type: 'cli_session_id'; cliSessionId: string }
+  | { type: 'cli_session_id'; cliSessionId: string; turnId?: string; dispatchAttempt?: number }
   | { type: 'claude_exit'; code: number | null; signal: string | null; logTail?: string; canParkDiagnostic?: boolean; turnId?: string; dispatchAttempt?: number }
   | { type: 'prompt_ready' }
   | { type: 'screen_update'; content: string; status: ScreenStatus; usageLimit?: CliUsageLimitState; turnId?: string; dispatchAttempt?: number }
   | { type: 'error'; message: string; turnId?: string; dispatchAttempt?: number }
   | { type: 'bridge_source_session'; bridge: 'hermes'; sourceSessionId: string }
   | { type: 'tui_prompt'; description: string; options: Array<{ label?: string; text: string; selected: boolean; type?: string; keys?: string[] }>; multiSelect?: boolean; turnId?: string; dispatchAttempt?: number }
-  | { type: 'tui_prompt_resolved'; selectedText?: string }
-  | { type: 'screenshot_uploaded'; imageKey: string; status: ScreenStatus; usageLimit?: CliUsageLimitState }
+  | { type: 'tui_prompt_resolved'; selectedText?: string; turnId?: string; dispatchAttempt?: number }
+  | { type: 'screenshot_uploaded'; imageKey: string; status: ScreenStatus; usageLimit?: CliUsageLimitState; turnId?: string; dispatchAttempt?: number }
   | { type: 'user_notify'; message: string; turnId?: string; dispatchAttempt?: number }
   | { type: 'receiver_reset_ready'; sessionId: string; turnId: string; dispatchAttempt: number }
   /** Runtime lease recovery ACK. Emitted only after the exact durable attempt
@@ -632,5 +632,5 @@ export type WorkerToDaemon =
       errorCode?: string;
     }
   | { type: 'adopt_preamble'; userText: string; assistantText: string; turnId?: string }
-  | { type: 'riff_access_url'; accessUrl: string; directAccessUrl?: string }
+  | { type: 'riff_access_url'; accessUrl: string; directAccessUrl?: string; turnId?: string; dispatchAttempt?: number }
   | { type: 'riff_task_id'; taskId: string | null };

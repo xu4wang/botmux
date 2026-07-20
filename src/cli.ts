@@ -4575,6 +4575,7 @@ interface CurrentSession {
   workingDir?: string;
   larkAppId?: string;
   chatType?: 'group' | 'p2p';
+  scope?: 'thread' | 'chat';
 }
 
 /** Detect current session info from ancestor marker + session files. */
@@ -4591,6 +4592,7 @@ function detectCurrentSession(): CurrentSession | null {
     workingDir: s.workingDir,
     larkAppId: s.larkAppId,
     chatType: s.chatType,
+    scope: s.scope,
   };
 }
 
@@ -4980,6 +4982,7 @@ async function cmdSchedule(sub: string, rest: string[]): Promise<void> {
       creatorRootMessageId: cur?.rootMessageId,
       creatorLarkAppId: cur?.larkAppId,
       chatType: cur?.chatType === 'p2p' ? 'p2p' : 'topic_group',
+      scope: cur?.scope,
       deliver,
       silent,
     });

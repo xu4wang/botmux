@@ -4,6 +4,7 @@
  * session restoration, and scheduled task execution.
  */
 import { existsSync, statSync } from 'node:fs';
+import { randomUUID } from 'node:crypto';
 import { join, resolve } from 'node:path';
 import { expandHome } from './working-dir.js';
 import { config } from '../config.js';
@@ -53,6 +54,7 @@ import { parseWorkingDirList } from '../utils/working-dir.js';
 import { resolveRoleInjection } from './role-resolver.js';
 import { ensureDefaultWhiteboard, getWhiteboard, whiteboardEnabled } from '../services/whiteboard-store.js';
 import { botAutoWorktreeEnabled } from '../services/default-worktree.js';
+import { armSilentScheduledTurn, disarmSilentScheduledTurn } from './silent-schedule-turns.js';
 
 function sessionCreatedAtMs(session: { createdAt?: string }): number {
   return session.createdAt ? (Date.parse(session.createdAt) || Date.now()) : Date.now();
@@ -1115,9 +1117,6 @@ export function rememberLastCliInput(
   // A real CLI input means the post-restart silence is over — let the normal
   // card flow resume for this and subsequent turns.
   ds.suppressRecoveryCard = undefined;
-  // Same lifecycle for silent scheduled fires: the next real input un-hushes
-  // the session. executeScheduledTask re-sets the flag AFTER this call.
-  ds.silentScheduledTurn = undefined;
   ds.lastUserPrompt = userPrompt;
   const normalized = typeof cliInput === 'string' ? { content: cliInput } : cliInput;
   ds.lastCliInput = normalized.content;
@@ -1868,6 +1867,10 @@ export async function executeScheduledTask(
   const firePrompt = silent
     ? `${buildSilentScheduleHint(task.name, localeForBot(larkAppId))}\n\n${task.prompt}`
     : task.prompt;
+  // Every fire gets a stable identity before it enters a worker queue. Silent
+  // output suppression follows this exact id instead of mutable session state,
+  // so overlapping/queued normal turns retain their own delivery semantics.
+  const scheduledTurnId = `schedule:${task.id}:${randomUUID()}`;
 
   // Inject into a live session if one already exists at this anchor.
   const existing = activeSessions.get(sessionKey(anchor, larkAppId));
@@ -1885,21 +1888,15 @@ export async function executeScheduledTask(
         whiteboardId: existing.session.whiteboardId,
       });
       rememberLastCliInput(existing, task.prompt, input);
-      if (silent) {
-        // Session-scoped hush for the scheduled turn: no streaming card, no
-        // bridge final_output forwarding, until the next REAL user input
-        // clears it (rememberLastCliInput). Skipped when the CLI is visibly
-        // busy — a user turn may be in flight and must keep its card/answer.
-        if (existing.lastScreenStatus === undefined || existing.lastScreenStatus === 'idle') {
-          existing.silentScheduledTurn = true;
-        } else {
-          logger.info(`[scheduler] Silent task "${task.name}" injected while session busy (${existing.lastScreenStatus}); keeping card/output live`);
-        }
+      if (silent) armSilentScheduledTurn(existing, scheduledTurnId);
+      if (!sendWorkerInput(existing, input, scheduledTurnId)) {
+        if (silent) disarmSilentScheduledTurn(existing, scheduledTurnId);
+        throw new Error('worker unavailable');
       }
-      sendWorkerInput(existing, input);
       logger.info(`[scheduler] Task "${task.name}" injected into live session ${existing.session.sessionId}${silent ? ' (silent)' : ''}`);
       return;
     } catch (err: any) {
+      if (silent) disarmSilentScheduledTurn(existing, scheduledTurnId);
       logger.warn(`[scheduler] Failed to inject into live session (${err.message}); spawning fresh worker`);
     }
   }
@@ -1940,9 +1937,13 @@ export async function executeScheduledTask(
   const prompt = buildNewTopicCliInput(firePrompt, session.sessionId, bot.config.cliId, bot.config.cliPathOverride, undefined, undefined, undefined, undefined, { name: bot.botName, openId: bot.botOpenId }, localeForBot(larkAppId), undefined, { larkAppId, chatId: task.chatId, whiteboardId: ds.session.whiteboardId });
   activeSessions.set(sessionKey(anchor, larkAppId), ds);
   rememberLastCliInput(ds, task.prompt, prompt);
-  // After rememberLastCliInput — it clears the flag on every real input.
-  if (silent) ds.silentScheduledTurn = true;
-  forkWorker(ds, prompt);
+  if (silent) armSilentScheduledTurn(ds, scheduledTurnId);
+  try {
+    forkWorker(ds, prompt, scheduledTurnId);
+  } catch (err) {
+    if (silent) disarmSilentScheduledTurn(ds, scheduledTurnId);
+    throw err;
+  }
 
   logger.info(`[scheduler] Task "${task.name}" spawned (session: ${session.sessionId}, scope: ${scope}, anchor: ${anchor}, continuation: ${isContinuation}${silent ? ', silent' : ''})`);
 }

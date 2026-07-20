@@ -91,6 +91,7 @@ import {
 import { neutralizeLarkAtTags } from '../services/send-policy.js';
 import { recordVcMeetingListenerMessage } from '../services/vc-meeting-listener-message-store.js';
 import { isLocalCliOpenEnabled, isLocalCliOpenReady } from '../services/local-cli-opener.js';
+import { isSilentScheduledTurn } from './silent-schedule-turns.js';
 
 type WindowsForkOptions = ForkOptions & { windowsHide?: boolean };
 
@@ -308,7 +309,7 @@ export function writableTerminalLinkFor(ds: DaemonSession): string | undefined {
 }
 
 function scheduleLocalCliOpenReadinessPatch(ds: DaemonSession): void {
-  if (!isLocalCliOpenEnabled() || streamingCardDisabled(ds) || ds.suppressRecoveryCard || ds.silentScheduledTurn) {
+  if (!isLocalCliOpenEnabled() || streamingCardDisabled(ds) || ds.suppressRecoveryCard) {
     ds.pendingLocalCliButtonRefresh = undefined;
     return;
   }
@@ -358,7 +359,7 @@ function flushPendingLocalCliOpenReadinessPatch(ds: DaemonSession): void {
  * in-card writable link would stay stale until the next status-edge PATCH.
  */
 export function scheduleRiffAccessUrlPatch(ds: DaemonSession): void {
-  if (streamingCardDisabled(ds) || ds.suppressRecoveryCard || ds.silentScheduledTurn) {
+  if (streamingCardDisabled(ds) || ds.suppressRecoveryCard) {
     ds.pendingRiffUrlCardRefresh = undefined;
     return;
   }
@@ -2015,7 +2016,9 @@ export function forkWorker(
     },
   } as WindowsForkOptions);
   const startupState: WorkerStartupState = {
-    ready: false, failureNotified: false, initTurnId, initDispatchAttempt,
+    ready: false, failureNotified: false,
+    initTurnId: initAttributionTurnId,
+    initDispatchAttempt,
   };
 
   // A fork-level failure (spawn ENOENT, etc.) emits 'error'; without a handler
@@ -2026,28 +2029,28 @@ export function forkWorker(
     logger.error(`[${t}] Worker fork error: ${reason}`);
     if (startupState.failureNotified) return;
     startupState.failureNotified = true;
-    // A dedicated VC receiver has no auxiliary Lark output channel. Durable
-    // failures stay on the receipt/lease chain, and exact IM turns may only
-    // produce their ledgered final reply — never a fork diagnostic.
-    if (ds.session.vcMeetingReceiver) {
+    emitSessionLifecycleHook(ds, 'session.requires_attention', {
+      reason: 'worker_fork_error',
+      message: reason,
+    });
+    // A dedicated VC receiver and a silent schedule have no auxiliary Lark
+    // output channel. Keep lifecycle/dashboard state above, but never leak a
+    // fork diagnostic into the chat.
+    if (ds.session.vcMeetingReceiver || isSilentScheduledTurn(ds, initAttributionTurnId)) {
       logger.info(
-        `[${t}] VC receiver fork failure kept out of auxiliary Lark UI `
-        + `turn=${initTurnId?.slice(0, 12) ?? '-'} attempt=${initDispatchAttempt}: ${reason}`,
+        `[${t}] Managed/silent fork failure kept out of auxiliary Lark UI `
+        + `turn=${initAttributionTurnId?.slice(0, 12) ?? '-'} attempt=${initDispatchAttempt}: ${reason}`,
       );
       return;
     }
     const cliName = getCliDisplayName(agentCfg.cliId);
     const message = tr('worker.start_failed', { cliName, reason }, botLocale(botCfg));
-    emitSessionLifecycleHook(ds, 'session.requires_attention', {
-      reason: 'worker_fork_error',
-      message: reason,
-    });
     void cb.sessionReply(
       sessionAnchorId(ds),
       message,
       'text',
       ds.larkAppId,
-      fallbackTurnId(ds, initTurnId),
+      fallbackTurnId(ds, initAttributionTurnId),
       ds.session.vcMeetingReceiver
         ? { sourceSessionId: ds.session.sessionId }
         : undefined,
@@ -2252,6 +2255,7 @@ function setupWorkerHandlers(
   /** Auxiliary worker UI is never an authorized output channel for a dedicated
    * VC receiver. Dashboard/audit state is still updated before these guards. */
   const managedAuxUiSuppressed = (turnId?: string, dispatchAttempt?: number): boolean => {
+    if (isSilentScheduledTurn(ds, turnId)) return true;
     if (ds.session.vcMeetingReceiver) return true;
     return ordinaryManagedSuppression(turnId, dispatchAttempt);
   };
@@ -2261,6 +2265,7 @@ function setupWorkerHandlers(
     turnId?: string,
     dispatchAttempt?: number,
   ): boolean => {
+    if (isSilentScheduledTurn(ds, turnId)) return true;
     if (!ds.session.vcMeetingReceiver) {
       return ordinaryManagedSuppression(turnId, dispatchAttempt);
     }
@@ -2288,6 +2293,10 @@ function setupWorkerHandlers(
   ): Promise<void> => {
     if (startupState.failureNotified) return;
     startupState.failureNotified = true;
+    emitSessionLifecycleHook(ds, 'session.requires_attention', {
+      reason: 'worker_start_failed',
+      message: reason,
+    });
     // A durable VC meeting delivery attempt must not surface its startup/relaunch
     // failure out-of-band. The worker-generation exit is fenced to the receipt
     // (marked ambiguous and retried under the side-effect boundary); a direct
@@ -2295,17 +2304,13 @@ function setupWorkerHandlers(
     // Ordinary IM turns and non-receiver sessions still notify exactly once.
     if (managedAuxUiSuppressed(turnId, dispatchAttempt)) {
       logger.info(
-        `[${t}] VC receiver startup failure kept out of auxiliary Lark UI `
+        `[${t}] Managed/silent startup failure kept out of auxiliary Lark UI `
         + `turn=${turnId?.slice(0, 12) ?? '-'} attempt=${dispatchAttempt}: ${reason}`,
       );
       return;
     }
     const cliName = getCliDisplayName(sessionCliId(ds, botCfg));
     const message = tr('worker.start_failed', { cliName, reason }, loc);
-    emitSessionLifecycleHook(ds, 'session.requires_attention', {
-      reason: 'worker_start_failed',
-      message: reason,
-    });
     try {
       await scopedReply(message, 'text', turnId);
     } catch (err: any) {
@@ -2354,7 +2359,7 @@ function setupWorkerHandlers(
         }
 
         if (managedAuxUiSuppressed(msg.turnId, msg.dispatchAttempt)) {
-          logger.info(`[${t}] Managed VC receiver — suppressing ready/streaming card output`);
+          logger.info(`[${t}] Managed/silent turn — suppressing ready/streaming card output`);
           break;
         }
 
@@ -2377,14 +2382,6 @@ function setupWorkerHandlers(
         // (rememberLastCliInput) and the normal card flow resumes.
         if (ds.suppressRecoveryCard) {
           logger.info(`[${t}] Restored session — suppressing recovery streaming card (silent restart)`);
-          break;
-        }
-
-        // Silent scheduled fire: leave zero daemon-initiated messages in the
-        // group. The model alone decides whether to `botmux send`. Cleared by
-        // the next real user input (rememberLastCliInput).
-        if (ds.silentScheduledTurn) {
-          logger.info(`[${t}] Silent scheduled turn — suppressing streaming card`);
           break;
         }
 
@@ -2623,7 +2620,7 @@ function setupWorkerHandlers(
         // is known, so consumers exclude this session from native parsers
         // before its first positive-delta record exists.
         recordOwnershipForDaemonSession(ds);
-        if (!managedAuxUiSuppressed()
+        if (!managedAuxUiSuppressed(msg.turnId, msg.dispatchAttempt)
           && !wasLocalCliOpenReady
           && isLocalCliOpenReady(ds, { cliId: effectiveCliId })) {
           scheduleLocalCliOpenReadinessPatch(ds);
@@ -2694,9 +2691,6 @@ function setupWorkerHandlers(
         // redraws on resume. Stay silent (no post/patch) until the first real
         // user turn clears the flag. Dashboard SSE above still reflects status.
         if (ds.suppressRecoveryCard) break;
-
-        // Silent scheduled fire — no card post/patch (dashboard SSE unaffected).
-        if (ds.silentScheduledTurn) break;
 
         const readUrl = buildTerminalUrl(ds);
         const turnTitle = ds.currentTurnTitle || ds.session.title || getCliDisplayName(effectiveCliId);
@@ -2802,7 +2796,7 @@ function setupWorkerHandlers(
           content: ds.lastScreenContent ?? '',
         });
         persistStreamCardState(ds);
-        if (managedAuxUiSuppressed()) break;
+        if (managedAuxUiSuppressed(msg.turnId, msg.dispatchAttempt)) break;
         if ((ds.displayMode ?? 'hidden') !== 'screenshot') break;
         if (!ds.streamCardId || ds.streamCardId === CARD_POSTING_SENTINEL || !ds.workerPort) break;
         const readUrl = buildTerminalUrl(ds);
@@ -2857,7 +2851,7 @@ function setupWorkerHandlers(
         // would temporarily overwrite a user-issued /rename until refresh.
         ds.currentTurnTitle = msg.description;
         if (managedAuxUiSuppressed(msg.turnId, msg.dispatchAttempt)) {
-          logger.info(`[${t}] Managed VC receiver — TUI prompt kept in dashboard/audit only`);
+          logger.info(`[${t}] Managed/silent turn — TUI prompt kept in dashboard/audit only`);
           break;
         }
         try {
@@ -2882,7 +2876,7 @@ function setupWorkerHandlers(
       case 'tui_prompt_resolved': {
         // TUI prompt is no longer showing — update card if it exists
         logger.info(`[${t}] TUI prompt resolved${msg.selectedText ? `: ${msg.selectedText}` : ''}`);
-        if (managedAuxUiSuppressed()) {
+        if (managedAuxUiSuppressed(msg.turnId, msg.dispatchAttempt)) {
           ds.tuiPromptCardId = undefined;
           ds.tuiPromptOptions = undefined;
           break;
@@ -3053,7 +3047,7 @@ function setupWorkerHandlers(
         });
         // Refresh the live streaming card (writable/AIO link) — parks a pending
         // flag when the card POST is still in-flight and flushes once it lands.
-        if (!managedAuxUiSuppressed()) scheduleRiffAccessUrlPatch(ds);
+        if (!managedAuxUiSuppressed(msg.turnId, msg.dispatchAttempt)) scheduleRiffAccessUrlPatch(ds);
         break;
       }
 
@@ -3223,14 +3217,6 @@ function setupWorkerHandlers(
         if (shouldDropMismatchedHermesFinalOutput(ds, msg, t)) break;
         if (managedFinalOutputSuppressed(msg.turnId, msg.dispatchAttempt)) {
           logger.debug(`[${t}] final_output captured/discarded for silent turn ${msg.turnId.substring(0, 8)}`);
-          break;
-        }
-        // Silent scheduled fire: bridge CLIs (hermes/codex-app style) forward
-        // the final assistant answer automatically — that would defeat "只有
-        // 符合条件才报警". The silent-schedule prompt hint routes alerts
-        // through `botmux send` instead.
-        if (ds.silentScheduledTurn) {
-          logger.debug(`[${t}] final_output discarded for silent scheduled turn`);
           break;
         }
         if (!msg.sessionId) {

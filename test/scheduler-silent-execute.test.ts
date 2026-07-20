@@ -3,11 +3,11 @@
  *
  * Behavioral tests for executeScheduledTask's silent mode (ScheduledTask.silent):
  *  - silent thread fire: no "🕐 task started" banner / creator notice, anchor
- *    reuses task.rootMessageId, spawned session carries silentScheduledTurn and
+ *    reuses task.rootMessageId, spawned session carries a turn-exact silent id and
  *    the CLI prompt is wrapped with the silent-schedule hint
  *  - loud fire keeps posting the banner (control)
  *  - runtime fallback: silent+new-topic (store-level bypass) fires loud
- *  - live-session injection: silent flag set only when the CLI is idle
+ *  - live-session injection: silent id follows the queued turn even when busy
  *  - converted-topic regression: chat-scope task in a topic-converted group
  *    anchors at rootMessageId (previously clobbered by the trailing
  *    `anchor = task.chatId`) and the runtime session is promoted to thread scope
@@ -54,7 +54,7 @@ vi.mock('../src/im/lark/client.js', () => ({
 }));
 
 const forkWorkerMock = vi.fn();
-const sendWorkerInputMock = vi.fn();
+const sendWorkerInputMock = vi.fn(() => true);
 vi.mock('../src/core/worker-pool.js', () => ({
   forkWorker: (...a: any[]) => forkWorkerMock(...a),
   sendWorkerInput: (...a: any[]) => sendWorkerInputMock(...a),
@@ -126,6 +126,10 @@ function forkedCliInput(): string {
   return typeof arg === 'string' ? arg : arg.content;
 }
 
+function forkedTurnId(): string {
+  return forkWorkerMock.mock.calls[0][2];
+}
+
 beforeEach(() => {
   store.clear();
   sessionSeq = 0;
@@ -138,7 +142,7 @@ beforeEach(() => {
 });
 
 describe('executeScheduledTask — silent thread fire', () => {
-  it('posts nothing, anchors at rootMessageId, sets silentScheduledTurn, wraps the prompt', async () => {
+  it('posts nothing, anchors at rootMessageId, arms the exact forked turn, wraps the prompt', async () => {
     const active = new Map<string, DaemonSession>();
     await executeScheduledTask(baseTask({ rootMessageId: ROOT, scope: 'thread', silent: true }), active, refreshCliVersion);
 
@@ -147,7 +151,8 @@ describe('executeScheduledTask — silent thread fire', () => {
 
     const ds = active.get(sessionKey(ROOT, APP))!;
     expect(ds).toBeTruthy();
-    expect(ds.silentScheduledTurn).toBe(true);
+    expect(forkedTurnId()).toMatch(/^schedule:task0001:/);
+    expect(ds.silentScheduledTurns?.has(forkedTurnId())).toBe(true);
     expect(ds.session.rootMessageId).toBe(ROOT);
 
     expect(forkWorkerMock).toHaveBeenCalledTimes(1);
@@ -164,7 +169,8 @@ describe('executeScheduledTask — silent thread fire', () => {
 
     expect(replyMessageMock).toHaveBeenCalledTimes(1);
     const ds = active.get(sessionKey(ROOT, APP))!;
-    expect(ds.silentScheduledTurn).toBeUndefined();
+    expect(ds.silentScheduledTurns).toBeUndefined();
+    expect(forkedTurnId()).toMatch(/^schedule:task0001:/);
     expect(forkedCliInput()).not.toContain('<botmux_silent_schedule');
   });
 });
@@ -177,7 +183,7 @@ describe('executeScheduledTask — silent runtime fallbacks (creation-time guard
     expect(sendMessageMock).toHaveBeenCalledTimes(1);
     const ds = active.get(sessionKey('om_banner_123', APP))!;
     expect(ds).toBeTruthy();
-    expect(ds.silentScheduledTurn).toBeUndefined();
+    expect(ds.silentScheduledTurns).toBeUndefined();
     expect(forkedCliInput()).not.toContain('<botmux_silent_schedule');
   });
 
@@ -187,7 +193,7 @@ describe('executeScheduledTask — silent runtime fallbacks (creation-time guard
 
     expect(sendMessageMock).toHaveBeenCalledTimes(1);
     const ds = active.get(sessionKey('om_banner_123', APP))!;
-    expect(ds.silentScheduledTurn).toBeUndefined();
+    expect(ds.silentScheduledTurns).toBeUndefined();
   });
 });
 
@@ -201,7 +207,7 @@ describe('executeScheduledTask — silent chat-scope fire', () => {
     const ds = active.get(sessionKey(CHAT, APP))!;
     expect(ds).toBeTruthy();
     expect(ds.scope).toBe('chat');
-    expect(ds.silentScheduledTurn).toBe(true);
+    expect(ds.silentScheduledTurns?.has(forkedTurnId())).toBe(true);
   });
 
   it('suppresses the cross-chat creator notice too', async () => {
@@ -235,7 +241,7 @@ describe('executeScheduledTask — live-session injection', () => {
     };
   }
 
-  it('idle session: injects with silentScheduledTurn set, no banner', async () => {
+  it('idle session: injects with the exact scheduled turn armed, no banner', async () => {
     const active = new Map<string, DaemonSession>();
     const existing = liveSession('idle');
     active.set(sessionKey(ROOT, APP), existing);
@@ -245,13 +251,15 @@ describe('executeScheduledTask — live-session injection', () => {
     expect(replyMessageMock).not.toHaveBeenCalled();
     expect(sendWorkerInputMock).toHaveBeenCalledTimes(1);
     expect(forkWorkerMock).not.toHaveBeenCalled();
-    expect(existing.silentScheduledTurn).toBe(true);
+    const turnId = sendWorkerInputMock.mock.calls[0][2];
+    expect(turnId).toMatch(/^schedule:task0001:/);
+    expect(existing.silentScheduledTurns?.has(turnId)).toBe(true);
     const injected = sendWorkerInputMock.mock.calls[0][1];
     const content = typeof injected === 'string' ? injected : injected.content;
     expect(content).toContain('<botmux_silent_schedule');
   });
 
-  it('busy session: injects WITHOUT hushing (a user turn may be in flight)', async () => {
+  it('busy session: arms only the queued scheduled turn without hushing the user turn', async () => {
     const active = new Map<string, DaemonSession>();
     const existing = liveSession('working');
     active.set(sessionKey(ROOT, APP), existing);
@@ -259,19 +267,22 @@ describe('executeScheduledTask — live-session injection', () => {
     await executeScheduledTask(baseTask({ rootMessageId: ROOT, scope: 'thread', silent: true }), active, refreshCliVersion);
 
     expect(sendWorkerInputMock).toHaveBeenCalledTimes(1);
-    expect(existing.silentScheduledTurn).toBeUndefined();
+    const turnId = sendWorkerInputMock.mock.calls[0][2];
+    expect(existing.silentScheduledTurns?.has(turnId)).toBe(true);
+    expect(existing.silentScheduledTurns?.has('normal-user-turn')).toBe(false);
   });
 });
 
-describe('silentScheduledTurn lifecycle', () => {
-  it('the next real CLI input un-hushes the session (rememberLastCliInput clears the flag)', async () => {
+describe('silent scheduled turn lifecycle', () => {
+  it('a queued real CLI input does not clear the exact silent turn marker', async () => {
     const active = new Map<string, DaemonSession>();
     await executeScheduledTask(baseTask({ rootMessageId: ROOT, scope: 'thread', silent: true }), active, refreshCliVersion);
     const ds = active.get(sessionKey(ROOT, APP))!;
-    expect(ds.silentScheduledTurn).toBe(true);
+    const turnId = forkedTurnId();
+    expect(ds.silentScheduledTurns?.has(turnId)).toBe(true);
 
     rememberLastCliInput(ds, '真实用户消息', '真实用户消息');
-    expect(ds.silentScheduledTurn).toBeUndefined();
+    expect(ds.silentScheduledTurns?.has(turnId)).toBe(true);
   });
 });
 
@@ -298,6 +309,6 @@ describe('executeScheduledTask — converted-topic anchor regression', () => {
     expect(sendMessageMock).not.toHaveBeenCalled();
     const ds = active.get(sessionKey(ROOT, APP))!;
     expect(ds.scope).toBe('thread');
-    expect(ds.silentScheduledTurn).toBe(true);
+    expect(ds.silentScheduledTurns?.has(forkedTurnId())).toBe(true);
   });
 });
