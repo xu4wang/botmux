@@ -1294,8 +1294,15 @@ ipcRoute('POST', '/api/schedules', async (req, res) => {
   const schedule = typeof b.schedule === 'string' ? b.schedule.trim() : '';
   const prompt = typeof b.prompt === 'string' ? b.prompt : '';
   const chatId = typeof b.chatId === 'string' ? b.chatId.trim() : '';
-  const deliver = b.deliver === 'new-topic' ? 'new-topic' : b.deliver === 'local' ? 'local' : 'origin';
   const silent = b.silent === true;
+  // Reject invalid deliver rather than silently degrading to 'origin'.
+  let deliver: 'origin' | 'local' | 'new-topic' = 'origin';
+  if (b.deliver !== undefined) {
+    if (b.deliver !== 'origin' && b.deliver !== 'local' && b.deliver !== 'new-topic') {
+      return jsonRes(res, 400, { ok: false, error: 'invalid_deliver', field: 'deliver' });
+    }
+    deliver = b.deliver;
+  }
   if (!name || !schedule || !prompt || !chatId) {
     return jsonRes(res, 400, { ok: false, error: 'missing_fields', fields: ['name', 'schedule', 'prompt', 'chatId'] });
   }
@@ -1332,7 +1339,12 @@ ipcRoute('PATCH', '/api/schedules/:id', async (req, res, p) => {
   if (typeof b.name === 'string') updates.name = b.name.trim();
   if (typeof b.prompt === 'string') updates.prompt = b.prompt;
   if (typeof b.schedule === 'string') updates.schedule = b.schedule.trim();
-  if (b.deliver === 'origin' || b.deliver === 'local' || b.deliver === 'new-topic') updates.deliver = b.deliver;
+  if (b.deliver !== undefined) {
+    if (b.deliver !== 'origin' && b.deliver !== 'local' && b.deliver !== 'new-topic') {
+      return jsonRes(res, 400, { ok: false, error: 'invalid_deliver', field: 'deliver' });
+    }
+    updates.deliver = b.deliver;
+  }
   if (typeof b.silent === 'boolean') updates.silent = b.silent;
   const result = scheduler.updateTask(p.id, updates);
   if (!result.ok) return jsonRes(res, 400, result);

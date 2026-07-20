@@ -281,7 +281,7 @@ function SchedulesPage() {
           <p className="eyebrow">{tr('nav.schedules')}</p>
           <h1>{tr('schedules.title')}</h1>
         </div>
-        <CreateActionButton onClick={openCreate}>{tr('schedules.create')}</CreateActionButton>
+        <CreateActionButton onClick={openCreate} disabled={bots.length === 0}>{tr('schedules.create')}</CreateActionButton>
       </div>
       <form id="sched-filters" className="filters dashboard-toolbar">
         <input
@@ -455,6 +455,14 @@ function ScheduleFormModal(props: {
   const [silent, setSilent] = useState(editing?.silent === true);
   const [chatId, setChatId] = useState(editing?.chatId ?? '');
   const [larkAppId, setLarkAppId] = useState(editing?.larkAppId ?? bots[0]?.larkAppId ?? '');
+
+  // If the modal opened before /api/bots resolved, default to the first bot
+  // once it arrives so the submit button doesn't stay permanently disabled.
+  useEffect(() => {
+    if (!editing && !larkAppId && bots.length > 0) {
+      setLarkAppId(bots[0].larkAppId);
+    }
+  }, [editing, larkAppId, bots]);
 
   // silent + new-topic are mutually exclusive
   const silentNewTopicConflict = silent && deliver === 'new-topic';
