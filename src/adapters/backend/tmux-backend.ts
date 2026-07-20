@@ -663,7 +663,7 @@ export function buildBotmuxEnvAssignments(
     // in its global env, or the shell rcfile doesn't set them.
     for (const key of PROXY_ENV_KEYS) {
       const val = env[key];
-      if (!val) continue;
+      if (val === undefined) continue;
       out.push(`${key}=${val}`);
     }
   }

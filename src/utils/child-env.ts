@@ -92,6 +92,14 @@ export const PROXY_ENV_KEYS = [
 const TMUX_CLIENT_STRIP_KEYS: ReadonlySet<string> = new Set([
   ...BOTMUX_INJECTED_ENV_KEYS,
   ...REDACTED_CHILD_ENV_KEYS,
+  // Strip proxy vars from the tmux CLIENT env so botmux doesn't seed the
+  // shared server's global env with daemon-side proxy (which may contain
+  // embedded credentials) and leak it to the user's own interactive panes.
+  // Deliberately NOT in TMUX_SERVER_GLOBAL_SCRUB_KEYS: we must not delete
+  // proxy config the user set on their own tmux server. Per-pane injection
+  // via buildBotmuxEnvAssignments reads opts.env directly, so it's unaffected
+  // by this client-side strip.
+  ...PROXY_ENV_KEYS,
 ]);
 
 const TMUX_SERVER_GLOBAL_SCRUB_KEYS: ReadonlySet<string> = new Set([
