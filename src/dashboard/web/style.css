@@ -11991,7 +11991,15 @@ tbody tr[data-chat]:hover {
   white-space: nowrap;
 }
 
-.schedule-row-head .schedule-state {
+.schedule-chip-strip span.schedule-error-chip {
+  border-color: color-mix(in srgb, var(--danger) 35%, var(--border-soft));
+  background: color-mix(in srgb, var(--danger) 10%, var(--surface));
+  color: var(--danger);
+  max-width: 320px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  cursor: help;
+}
   align-self: center;
   min-width: 42px;
   padding: 0 10px;
