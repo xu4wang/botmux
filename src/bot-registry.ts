@@ -1074,8 +1074,11 @@ export interface BotConfig {
    * canTalk（oncall 群成员 / allowedChatGroups / chatGrant / globalGrant / p2pOpen 私聊
    * 等对话放行腿）。与 passthrough 无关——命令仍由 daemon 自己处理，只是准入门槛不同。
    * 解析时归一化（转小写、自动补 `/`、去重），且**只接受 DAEMON_COMMANDS 内的命令**，
-   * 其余条目丢弃。带 handler 内部第二道 owner 闸的命令（/card /term /insight /land）
+   * 其余条目丢弃并 warn。带 handler 内部第二道 owner 闸的命令（/card /term /insight /land）
    * 即使列入也仍会被内部闸拒绝（fail-closed，不视为本字段的适用对象）。
+   * ⚠️ 与 `restrictGrantCommands` 的组合：那个开关在路由里先于本名单生效——开着时
+   * chatGrant/globalGrant 被授权人发任何 slash 命令都被更早的限制闸挡下，本名单
+   * 对他们不生效（oncall / allowedChatGroups / p2pOpen 等其余 canTalk 腿不受影响）。
    * 未配置（undefined）→ 全部 daemon 命令保持 owner-only（现状）。
    */
   canTalkDaemonCommands?: string[];
@@ -1792,15 +1795,19 @@ export function parseBotConfigsFromText(jsonText: string): BotConfig[] {
     // canTalkDaemonCommands：daemon 命令的权限例外名单（canOperate → canTalk）。
     // 归一化同 customPassthroughCommands（小写、补 `/`、去重），但语义相反——
     // **只接受 DAEMON_COMMANDS 内的命令**（这里列的是 daemon 自己处理的命令，
-    // 不是透传）；不在集合内的条目（passthrough、拼错的）直接丢弃。
+    // 不是透传）；不在集合内的条目（passthrough、拼错的）丢弃并 warn——丢弃是
+    // fail-closed 安全的，但静默会让配错的 owner 以为已生效。
     let canTalkDaemonCommands: string[] | undefined;
     if (Array.isArray(entry.canTalkDaemonCommands)) {
-      const normalized = entry.canTalkDaemonCommands
+      const strs = entry.canTalkDaemonCommands
         .filter((x: any): x is string => typeof x === 'string')
         .map((x: string) => x.trim().toLowerCase())
-        .map((x: string) => (x.startsWith('/') ? x : `/${x}`))
-        .filter((x: string) => DAEMON_COMMANDS.has(x));
-      const uniq = [...new Set<string>(normalized)];
+        .map((x: string) => (x.startsWith('/') ? x : `/${x}`));
+      const dropped = strs.filter((x: string) => !DAEMON_COMMANDS.has(x));
+      if (dropped.length > 0) {
+        logger.warn(`[bot-registry:${entry.larkAppId}] canTalkDaemonCommands 丢弃非 daemon 命令条目: ${[...new Set(dropped)].join(' ')}（仅接受 daemon 命令，透传命令写 customPassthroughCommands）`);
+      }
+      const uniq = [...new Set<string>(strs.filter((x: string) => DAEMON_COMMANDS.has(x)))];
       if (uniq.length > 0) canTalkDaemonCommands = uniq;
     }
 
