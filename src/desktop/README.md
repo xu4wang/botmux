@@ -1,6 +1,18 @@
-# Botmux Desktop 本地源码安装
+# Botmux Desktop
 
-Botmux Desktop 目前没有 Apple Developer ID 签名和公证包，所以暂不提供可直接分发给他人的安装包。想体验 App 的用户需要下载源码，在自己的机器上本地构建和安装。
+正式版本会随 `v*` tag 在 GitHub Release 中提供 Apple Developer ID 签名并完成公证的 Universal DMG 和 ZIP，同时支持 Intel 与 Apple Silicon Mac。源码 checkout 仍可按下述方式进行本地 ad-hoc 构建和安装。
+
+## 正式发布
+
+`.github/workflows/release.yml` 在 macOS runner 上完成 Universal 构建、Developer ID 签名、Apple 公证和 stapling，再把 DMG/ZIP 作为附件加入同一个 GitHub Release。仓库需要配置以下 Actions Secrets：
+
+需要为已有版本重新生成桌面附件时，可以手动运行 `Release` workflow 并填写 `release_tag`。该模式只覆盖对应 Release 的 macOS 附件并校验上传内容，不会再次发布 npm、修改 tag 或改写 Release 正文。
+
+- `MAC_CSC_LINK`
+- `MAC_CSC_KEY_PASSWORD`
+- `APPLE_API_KEY_P8`
+- `APPLE_API_KEY_ID`
+- `APPLE_API_ISSUER`
 
 ## 要求
 
