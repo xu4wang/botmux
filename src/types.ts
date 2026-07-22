@@ -594,6 +594,15 @@ export type DaemonToWorker =
 /** Messages sent from Worker to Daemon */
 export type WorkerToDaemon =
   | { type: 'ready'; port: number; token: string; viewToken?: string; turnId?: string; dispatchAttempt?: number }
+  /** Trusted worker observation used only by the host activation transaction.
+   * PID markers are child-writable diagnostics and are never security proof. */
+  | {
+      type: 'local_process_attestation';
+      backendType: BackendType;
+      credentialIsolated: boolean;
+      cliPid?: number;
+      cliProcStart?: string;
+    }
   | { type: 'cli_session_id'; cliSessionId: string; turnId?: string; dispatchAttempt?: number }
   | { type: 'claude_exit'; code: number | null; signal: string | null; logTail?: string; canParkDiagnostic?: boolean; turnId?: string; dispatchAttempt?: number }
   | { type: 'prompt_ready' }

@@ -275,6 +275,93 @@ describe('runtime service', () => {
     expect(pathEntries.indexOf('/Users/me/.nvm/versions/node/v22.22.2/bin')).toBeLessThan(pathEntries.indexOf('/usr/bin'));
   });
 
+  it('gets device status through the host CLI and exposes only the public DTO', async () => {
+    const run = vi.fn().mockResolvedValue({
+      code: 0,
+      stderr: '',
+      stdout: JSON.stringify({
+        schemaVersion: 1,
+        enrolled: true,
+        issuer: 'https://platform.example.test',
+        deviceExp: 1_800_000_000_000,
+        savedAt: '2026-07-22T06:00:00.000Z',
+      }),
+    });
+    const svc = createRuntimeService({
+      paths,
+      appVersion: '1.0.0',
+      execPath: '/Electron',
+      env: { PATH: '/usr/bin' },
+      fs: { existsSync: () => false, readFileSync: () => '' },
+      run,
+      externalRuntime: globalCli(),
+    });
+
+    const status = await svc.getDeviceStatus();
+
+    expect(run).toHaveBeenCalledWith(expect.objectContaining({
+      command: '/usr/local/bin/botmux',
+      args: ['device', 'status', '--json'],
+    }), { maxOutputBytes: 4 * 1024 });
+    expect(status).toEqual({
+      ok: true,
+      status: {
+        schemaVersion: 1,
+        enrolled: true,
+        issuer: 'https://platform.example.test',
+        deviceExp: 1_800_000_000_000,
+        savedAt: '2026-07-22T06:00:00.000Z',
+      },
+    });
+  });
+
+  it('returns a fixed device-status failure when no host CLI is installed', async () => {
+    const run = vi.fn();
+    const svc = createRuntimeService({
+      paths,
+      appVersion: '1.0.0',
+      execPath: '/Electron',
+      env: {},
+      fs: { existsSync: () => false, readFileSync: () => '' },
+      run,
+    });
+
+    await expect(svc.getDeviceStatus()).resolves.toEqual({
+      ok: false,
+      reason: 'cli_unavailable',
+    });
+    expect(run).not.toHaveBeenCalled();
+  });
+
+  it('kills a replacement CLI before buffering oversized device-status output', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'botmux-device-status-limit-'));
+    const script = join(dir, 'oversized-status');
+    writeFileSync(script, '#!/usr/bin/env node\nprocess.stdout.write("x".repeat(128 * 1024));\n');
+    chmodSync(script, 0o755);
+    try {
+      const svc = createRuntimeService({
+        paths,
+        appVersion: '1.0.0',
+        execPath: '/Electron',
+        env: { PATH: process.env.PATH },
+        fs: { existsSync: () => false, readFileSync: () => '' },
+        externalRuntime: {
+          ...globalCli(),
+          root: dir,
+          cliPath: join(dir, 'dist/cli.js'),
+          binPath: script,
+        },
+      });
+
+      await expect(svc.getDeviceStatus()).resolves.toEqual({
+        ok: false,
+        reason: 'command_failed',
+      });
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   it('reports stopped when global CLI is installed and no botmux PM2 app is running', async () => {
     const svc = createRuntimeService({
       paths,
@@ -356,7 +443,7 @@ describe('runtime service', () => {
       externalRuntime: globalCli(),
       dashboardEndpoint: vi.fn().mockResolvedValue({
         ok: true,
-        url: 'https://m-test.botmux.bytedance.net/?t=platform-token',
+        url: 'https://m-test.botmux.example.test/?t=platform-token',
         localUrl: 'http://10.92.89.226:7891/?t=local-token',
       }),
     });
@@ -365,7 +452,7 @@ describe('runtime service', () => {
 
     expect(result).toMatchObject({ code: 0, stderr: '' });
     expect(result.stdout).toBe([
-      'https://m-test.botmux.bytedance.net/?t=platform-token',
+      'https://m-test.botmux.example.test/?t=platform-token',
       '本地直连(平台异常时可用): http://10.92.89.226:7891/?t=local-token',
     ].join('\n'));
   });

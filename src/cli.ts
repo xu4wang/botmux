@@ -12,6 +12,7 @@
  *   botmux logs [--lines] — view daemon logs
  *   botmux status         — show daemon status
  *   botmux upgrade|update — upgrade to latest version
+ *   botmux device enroll|status|logout — manage the host desktop device credential
  *   botmux list           — interactive session picker (TUI), attach to tmux
  *   botmux list --plain   — plain table output (for piping / scripts)
  *   botmux delete <id>    — close a session by ID prefix
@@ -4448,6 +4449,8 @@ botmux v${getVersion()} — IM ↔ AI 编程 CLI 桥接
   status      查看 daemon 状态
   upgrade     升级到最新版本（别名：update）
   dashboard   打印新的 Web Dashboard 一次性登录 URL（旧 token 同时失效）
+  device enroll|status|logout
+              在宿主终端注册、查看或清除 desktop device 凭证（AI CLI 会话内拒绝）
   list        列出活跃会话（交互式选择并连接 tmux）
               --plain  纯文本表格输出（管道/脚本场景）
   delete <id>      关闭指定会话（支持 ID 前缀匹配）
@@ -9027,6 +9030,11 @@ switch (command) {
     // `botmux bind <code>` — 把本机绑定到中心化平台
     const { cmdBind } = await import('./platform/bind.js');
     await cmdBind(process.argv.slice(3));
+    break;
+  }
+  case 'device': {
+    const { runDeviceCommand } = await import('./platform/device-command.js');
+    process.exitCode = await runDeviceCommand(process.argv.slice(3));
     break;
   }
   case 'list':

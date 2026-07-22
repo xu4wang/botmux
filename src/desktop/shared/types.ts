@@ -30,6 +30,26 @@ export interface DesktopRuntimeState {
   message?: string;
 }
 
+/** Safe, renderer-visible subset of ~/.botmux/device-auth/device.json. Credentials are
+ * never part of this protocol; Electron main reconstructs this shape from the
+ * host CLI's allow-listed JSON response before crossing IPC. */
+export type DesktopDevicePublicStatus =
+  | { schemaVersion: 1; enrolled: false }
+  | {
+      schemaVersion: 1;
+      enrolled: true;
+      issuer: string;
+      deviceExp: number;
+      savedAt: string;
+    };
+
+export type DesktopDeviceStatusResult =
+  | { ok: true; status: DesktopDevicePublicStatus }
+  | {
+      ok: false;
+      reason: 'cli_unavailable' | 'command_failed' | 'invalid_response';
+    };
+
 export interface LogTarget {
   id: string;
   label: string;

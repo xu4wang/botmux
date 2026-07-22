@@ -4,6 +4,7 @@ import { callDashboard, type DashboardResult } from '../../cli/dashboard-endpoin
 import type { DesktopPaths, DesktopRuntimeState, RuntimeSource } from '../shared/types.js';
 import { buildBundledBotmuxCommand, buildExternalBotmuxCommand, type BotmuxCommand } from './node-command.js';
 import { classifyRuntimeSource, countActiveBotmuxDaemonApps, type Pm2AppSummary } from './runtime-source.js';
+import { sanitizeDeviceStatusCommandResult } from './device-status.js';
 
 export interface RunResult {
   code: number;
@@ -12,9 +13,16 @@ export interface RunResult {
   signal?: NodeJS.Signals | null;
 }
 
-type RunCommand = (cmd: BotmuxCommand) => Promise<RunResult>;
+interface RunCommandOptions {
+  timeoutMs?: number;
+  maxOutputBytes?: number;
+}
+
+type RunCommand = (cmd: BotmuxCommand, options?: RunCommandOptions) => Promise<RunResult>;
 type DashboardEndpointCaller = (path: '/__cli/current') => Promise<DashboardResult>;
 const defaultCommandTimeoutMs = 30_000;
+const defaultCommandOutputLimitBytes = 1024 * 1024;
+const deviceStatusOutputLimitBytes = 4 * 1024;
 
 export interface ExternalRuntimeCandidate {
   kind: 'external';
@@ -37,18 +45,28 @@ export interface BundledRuntimeCandidate {
 
 export type RuntimeLaunchTarget = ExternalRuntimeCandidate | BundledRuntimeCandidate;
 
-function defaultRun(cmd: BotmuxCommand, timeoutMs = defaultCommandTimeoutMs): Promise<RunResult> {
+function defaultRun(
+  cmd: BotmuxCommand,
+  timeoutMs = defaultCommandTimeoutMs,
+  maxOutputBytes = defaultCommandOutputLimitBytes,
+): Promise<RunResult> {
   return new Promise(resolve => {
     const child = spawn(cmd.command, cmd.args, { env: cmd.env, stdio: ['ignore', 'pipe', 'pipe'] });
     let stdout = '';
     let stderr = '';
+    let outputBytes = 0;
     let settled = false;
+    let forceKillTimer: NodeJS.Timeout | undefined;
     const timer = setTimeout(() => {
       if (settled) return;
       settled = true;
       // Timeout is surfaced as an ordinary failed action so renderer controls
       // can recover and show the last error without waiting for child close.
       child.kill();
+      forceKillTimer = setTimeout(() => {
+        if (child.exitCode === null && child.signalCode === null) child.kill('SIGKILL');
+      }, 1_000);
+      forceKillTimer.unref?.();
       resolve({
         code: 1,
         stdout,
@@ -64,16 +82,36 @@ function defaultRun(cmd: BotmuxCommand, timeoutMs = defaultCommandTimeoutMs): Pr
       resolve(result);
     };
 
+    const appendOutput = (target: 'stdout' | 'stderr', chunk: Buffer | string) => {
+      if (settled) return;
+      const text = String(chunk);
+      const bytes = Buffer.byteLength(text);
+      if (outputBytes + bytes > maxOutputBytes) {
+        child.kill('SIGKILL');
+        finish({
+          code: 1,
+          stdout,
+          stderr: `Command output exceeded ${maxOutputBytes} bytes`,
+          signal: null,
+        });
+        return;
+      }
+      outputBytes += bytes;
+      if (target === 'stdout') stdout += text;
+      else stderr += text;
+    };
+
     child.stdout.on('data', chunk => {
-      stdout += String(chunk);
+      appendOutput('stdout', chunk);
     });
     child.stderr.on('data', chunk => {
-      stderr += String(chunk);
+      appendOutput('stderr', chunk);
     });
     child.on('error', error => {
       finish({ code: 1, stdout, stderr: stderr || error.message, signal: null });
     });
     child.on('close', (code, signal) => {
+      if (forceKillTimer) clearTimeout(forceKillTimer);
       // Signal-only exits still represent a failed desktop action to the UI.
       finish({
         code: code ?? 1,
@@ -115,7 +153,11 @@ export interface RuntimeServiceDeps {
 }
 
 export function createRuntimeService(deps: RuntimeServiceDeps) {
-  const run = deps.run ?? ((cmd: BotmuxCommand) => defaultRun(cmd, deps.commandTimeoutMs));
+  const run = deps.run ?? ((cmd: BotmuxCommand, options?: RunCommandOptions) => defaultRun(
+    cmd,
+    options?.timeoutMs ?? deps.commandTimeoutMs,
+    options?.maxOutputBytes ?? defaultCommandOutputLimitBytes,
+  ));
   const botsPath = join(deps.paths.botmuxHome, 'bots.json');
   const installCliMessage = deps.bundledRuntime
     ? 'The bundled botmux runtime is unavailable. Reinstall Botmux Desktop.'
@@ -386,6 +428,17 @@ export function createRuntimeService(deps: RuntimeServiceDeps) {
             path: '/__cli/current',
           });
       return dashboardEndpointResultToRunResult(result);
+    },
+    async getDeviceStatus() {
+      const runtime = activeRuntime();
+      if (!runtime) return { ok: false as const, reason: 'cli_unavailable' as const };
+      // Device credentials stay inside the host CLI. Electron receives only the
+      // command's public status JSON, then reconstructs an allow-listed DTO
+      // before anything can cross the renderer IPC boundary.
+      const result = await run(command(runtime, ['device', 'status', '--json']), {
+        maxOutputBytes: deviceStatusOutputLimitBytes,
+      });
+      return sanitizeDeviceStatusCommandResult(result);
     },
   };
   return service;

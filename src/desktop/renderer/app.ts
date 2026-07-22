@@ -1,4 +1,10 @@
-import type { DashboardLocateResult, DesktopRuntimeState, LogTail, LogTarget } from '../shared/types.js';
+import type {
+  DashboardLocateResult,
+  DesktopDeviceStatusResult,
+  DesktopRuntimeState,
+  LogTail,
+  LogTarget,
+} from '../shared/types.js';
 import {
   currentDashboardUrlFromSrc,
   dashboardRouteFromUrl,
@@ -35,6 +41,7 @@ type DesktopLocale = 'zh' | 'en';
 
 interface BotmuxDesktopApi {
   getState: () => Promise<unknown>;
+  getDeviceStatus?: () => Promise<DesktopDeviceStatusResult>;
   start: () => Promise<RunResult>;
   stop: () => Promise<RunResult>;
   restart: () => Promise<RunResult>;
