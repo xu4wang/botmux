@@ -85,7 +85,7 @@ jobs:
           retention-days: 7
 
   release:
-    if: github.event_name == 'push'
+    if: always() && github.event_name == 'push' && (needs.desktop.result == 'success' || needs.desktop.result == 'skipped')
     needs: desktop
     runs-on: ubuntu-latest
     permissions:
@@ -121,6 +121,12 @@ jobs:
           echo "tag=$NPM_TAG"           >> "$GITHUB_OUTPUT"
           echo "prerelease=$PRERELEASE" >> "$GITHUB_OUTPUT"
           echo "Publishing $VERSION → npm dist-tag=$NPM_TAG, prerelease=$PRERELEASE"
+
+      - name: Require signed macOS assets for stable releases
+        if: steps.dist_tag.outputs.tag == 'latest' && needs.desktop.result != 'success'
+        run: |
+          echo "REFUSING: stable releases require macOS signing by deepcoldy."
+          exit 1
 
       - name: Guard against downgrading npm latest
         # 防止把比 npm 当前 latest 还小的版本号发到 latest dist-tag（曾发生
@@ -222,18 +228,27 @@ jobs:
           } >> "$GITHUB_OUTPUT"
 
       - name: Download macOS release assets
+        if: needs.desktop.result == 'success'
         uses: actions/download-artifact@v4
         with:
           name: botmux-macos
           path: release-assets
 
-      - name: Create GitHub Release
+      - name: Create GitHub Release with macOS assets
+        if: needs.desktop.result == 'success'
         uses: softprops/action-gh-release@v3
         with:
           body: ${{ steps.changelog.outputs.body }}
           prerelease: ${{ steps.dist_tag.outputs.prerelease == 'true' }}
           files: release-assets/*
           fail_on_unmatched_files: true
+
+      - name: Create GitHub prerelease without macOS assets
+        if: needs.desktop.result == 'skipped' && steps.dist_tag.outputs.prerelease == 'true'
+        uses: softprops/action-gh-release@v3
+        with:
+          body: ${{ steps.changelog.outputs.body }}
+          prerelease: true
 
   refresh-desktop-assets:
     if: github.event_name == 'workflow_dispatch'
