@@ -1038,6 +1038,11 @@ describe('handleCommand', () => {
     vi.mocked(findOncallChat).mockReturnValue(undefined);
     vi.mocked(scheduler.parseNaturalSchedule).mockReturnValue(null);
     vi.mocked(scheduler.extractDeliveryMode).mockImplementation((prompt: string) => ({ deliver: 'origin' as const, prompt }));
+    vi.mocked(scheduler.extractScheduleModifiers).mockImplementation((prompt: string) => ({
+      deliver: 'origin' as const,
+      silent: false,
+      prompt,
+    }));
     // Shared fs mocks: other describes set existsSync=false / throwing statSync
     // without always restoring, and the schedule workingDir validation depends
     // on them — pin the factory defaults so tests pass in any order (shuffle).
@@ -2602,8 +2607,10 @@ describe('handleCommand', () => {
         prompt: '新话题 生成值班日报',
         name: '新话题 生成值班日报',
       });
-      vi.mocked(scheduler.extractDeliveryMode).mockReturnValue({
+      vi.mocked(scheduler.extractScheduleModifiers).mockReturnValue({
         deliver: 'new-topic',
+        executionPosition: 'new-topic',
+        silent: false,
         prompt: '生成值班日报',
       });
       vi.mocked(scheduler.addTask).mockReturnValue({ id: 'task-new' } as any);
@@ -2619,6 +2626,8 @@ describe('handleCommand', () => {
       // workingDir must be the bot's defaultWorkingDir, NOT ~
       expect(callArgs.workingDir).toBe('~/repo/oncall');
       expect(callArgs.workingDir).not.toBe('~');
+      expect(callArgs.executionPosition).toBe('new-topic');
+      expect(callArgs.scope).toBe('chat');
     });
 
     it('should inherit defaultOncall.workingDir when Oncall mode is enabled', async () => {
@@ -2639,8 +2648,10 @@ describe('handleCommand', () => {
         prompt: '新话题 生成值班日报',
         name: '新话题 生成值班日报',
       });
-      vi.mocked(scheduler.extractDeliveryMode).mockReturnValue({
+      vi.mocked(scheduler.extractScheduleModifiers).mockReturnValue({
         deliver: 'new-topic',
+        executionPosition: 'new-topic',
+        silent: false,
         prompt: '生成值班日报',
       });
       vi.mocked(scheduler.addTask).mockReturnValue({ id: 'task-oncall' } as any);
@@ -2834,7 +2845,7 @@ describe('handleCommand', () => {
       expect(replyContent).toContain('静默模式');
     });
 
-    it('静默 + 新话题 conflict: rejects with a hint and creates nothing', async () => {
+    it('rejects 静默 + 新话题 because creating a topic requires a visible seed', async () => {
       vi.mocked(scheduler.parseNaturalSchedule).mockReturnValue({
         parsed: { kind: 'cron', expr: '0 9 * * *', display: '每日 09:00' },
         prompt: '静默 新话题 生成日报',
@@ -2842,9 +2853,12 @@ describe('handleCommand', () => {
       });
       vi.mocked(scheduler.extractScheduleModifiers).mockReturnValue({
         deliver: 'new-topic',
+        executionPosition: 'new-topic',
         silent: true,
         prompt: '生成日报',
       });
+      vi.mocked(scheduler.addTask).mockReturnValue({ id: 'task-legacy-new-topic', prompt: '生成日报' } as any);
+      vi.mocked(scheduler.getNextRun).mockReturnValue(new Date('2026-03-28T09:00:00+08:00'));
 
       const ds = makeDaemonSession();
       const deps = makeDeps(ds);
@@ -2852,7 +2866,8 @@ describe('handleCommand', () => {
 
       expect(scheduler.addTask).not.toHaveBeenCalled();
       const replyContent = (deps.sessionReply as ReturnType<typeof vi.fn>).mock.calls[0][1] as string;
-      expect(replyContent).toContain('不能同时使用');
+      expect(replyContent).toContain('新话题');
+      expect(replyContent).toContain('静默');
     });
   });
 

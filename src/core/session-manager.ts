@@ -55,6 +55,8 @@ import { ensureDefaultWhiteboard, getWhiteboard, whiteboardEnabled } from '../se
 import { botAutoWorktreeEnabled } from '../services/default-worktree.js';
 import { armSilentScheduledTurn, disarmSilentScheduledTurn } from './silent-schedule-turns.js';
 import { getAttachmentsDir } from './attachment-path.js';
+import { resolveRegularGroupMode } from '../services/chat-reply-mode-store.js';
+import { beginReplyTargetTurn } from './reply-target.js';
 
 export { getAttachmentsDir } from './attachment-path.js';
 
@@ -1684,6 +1686,38 @@ export function buildSilentScheduleHint(taskName: string, locale?: Locale): stri
   ].join('\n');
 }
 
+/**
+ * Resolve the durable execution position of a scheduled task.
+ *
+ * Schedule execution position is task-level state: top-level starts from the
+ * group top level, topic continues under a retained root, and new-topic posts a
+ * fresh seed on every run. Legacy `deliver:new-topic` rows resolve to that third
+ * state until the store normalizes them.
+ *
+ * A malformed/legacy `scope:'thread'` task without a root cannot reply in a
+ * thread. Treat it as chat-scope so silent runs remain genuinely silent rather
+ * than posting a banner merely to manufacture an anchor.
+ */
+export function resolveScheduledTaskScope(
+  task: Pick<ScheduledTask, 'executionPosition' | 'scope' | 'rootMessageId' | 'deliver'>,
+): 'thread' | 'chat' {
+  if (task.executionPosition === 'topic' && task.rootMessageId) return 'thread';
+  if (task.executionPosition === 'top-level' || task.executionPosition === 'new-topic') return 'chat';
+  if (task.deliver === 'new-topic') return 'chat';
+  if (task.scope === 'chat') return 'chat';
+  return task.rootMessageId ? 'thread' : 'chat';
+}
+
+export function resolveScheduledTaskExecutionPosition(
+  task: Pick<ScheduledTask, 'executionPosition' | 'scope' | 'rootMessageId' | 'deliver'>,
+): 'top-level' | 'topic' | 'new-topic' {
+  if (task.executionPosition === 'new-topic') return 'new-topic';
+  if (task.executionPosition === 'topic' && task.rootMessageId) return 'topic';
+  if (task.executionPosition === 'top-level') return 'top-level';
+  if (task.deliver === 'new-topic') return 'new-topic';
+  return task.scope !== 'chat' && task.rootMessageId ? 'topic' : 'top-level';
+}
+
 export async function executeScheduledTask(
   task: ScheduledTask,
   activeSessions: Map<string, DaemonSession>,
@@ -1711,30 +1745,24 @@ export async function executeScheduledTask(
 
   const { getChatMode, sendMessage, replyMessage } = await import('../im/lark/client.js');
 
-  // Scope resolution — explicit task.scope wins; otherwise fall back to legacy
-  // semantics (rootMessageId present → thread, absent → chat). Restoring an
-  // older schedule without scope keeps current behaviour.
-  const scope: 'thread' | 'chat' = task.scope === 'chat'
-    ? 'chat'
-    : task.scope === 'thread'
-      ? 'thread'
-      : (task.rootMessageId ? 'thread' : 'chat');
+  // Prefer the explicit three-state position, with scope/deliver fallbacks for
+  // schedules persisted by older versions.
+  const executionPosition = resolveScheduledTaskExecutionPosition(task);
+  const scope = resolveScheduledTaskScope(task);
 
   // Silent execution: post no "🕐 task started" banner / creator notice and
   // reuse the pre-existing anchor (thread rootMessageId or chatId) directly.
-  // Paths where the banner message ITSELF creates the anchor (new-topic, or a
-  // thread task without rootMessageId) cannot be silent — creation rejects
-  // those combinations; if a stored task still reaches here, fall back to a
-  // loud fire rather than dropping the run.
-  let silent = task.silent === true;
-  if (silent && task.deliver === 'new-topic') {
-    logger.warn(`[scheduler] Task ${task.id} is silent+new-topic (should be rejected at creation); firing loud`);
-    silent = false;
+  // Top-level and retained-topic positions already have anchors, so silent is
+  // valid there. Fresh-topic execution needs a visible seed and is rejected.
+  const silent = task.silent === true;
+  if (executionPosition === 'new-topic' && silent) {
+    throw new Error('silent_new_topic_exclusive');
   }
-  if (silent && scope === 'thread' && !task.rootMessageId) {
-    logger.warn(`[scheduler] Silent task ${task.id} has no thread anchor; firing loud`);
-    silent = false;
-  }
+
+  // Every fire gets a stable identity before it enters a worker queue. Besides
+  // silent-output suppression, this identifies the exact shared-topic reply
+  // target when a chat-scope session already has another turn queued.
+  const scheduledTurnId = `schedule:${task.id}:${randomUUID()}`;
 
   // Decide where to route the "🕐 task started" notification and where the
   // session conversation lands.
@@ -1748,68 +1776,78 @@ export async function executeScheduledTask(
   //     post in the chat (one-shot session)
   //
   // Chat-scope (auto-adopt / 普通群): post the start notification straight to
-  // the chat without reply_in_thread; the chat IS the session anchor.
+  // the chat without reply_in_thread. The bot/chat regular-group mode then
+  // decides whether that top-level trigger stays flat, opens a shared topic, or
+  // starts an independent topic/session. Silent fires have no trigger message,
+  // so they remain chat-scoped until the model chooses to send an alert.
   let anchor: string;
   let isContinuation = false;
+  let sharedTopicRootId: string | undefined;
 
-  if (task.deliver === 'new-topic') {
-    // Every fire opens a brand-new topic and runs in a fresh session. A
-    // top-level sendMessage in a topic group creates a new topic; in a plain
-    // group it's just a new top-level message. Either way we never reply
-    // in-thread and never reuse a prior session, so successive runs stay fully
-    // isolated. The returned message_id becomes this run's thread anchor.
-    anchor = await sendMessage(larkAppId, task.chatId, t('scheduler.task_started', { name: task.name }, localeForBot(larkAppId)));
+  if (executionPosition === 'new-topic') {
+    if (task.creatorRootMessageId && task.creatorChatId !== task.chatId) {
+      const creatorAppId = task.creatorLarkAppId ?? larkAppId;
+      replyMessage(
+        creatorAppId,
+        task.creatorRootMessageId,
+        t('scheduler.task_triggered_target_chat', { name: task.name }, localeForBot(creatorAppId)),
+        'text',
+        true,
+      ).catch((err: any) => {
+        logger.warn(`[scheduler] Failed to notify creator thread ${task.creatorRootMessageId} (${err.message})`);
+      });
+    }
+    const topicSeed = task.topicTitle?.trim()
+      || t('scheduler.task_started', { name: task.name }, localeForBot(larkAppId));
+    anchor = await sendMessage(larkAppId, task.chatId, topicSeed);
     isContinuation = false;
   } else if (scope === 'chat') {
-    // A group may have been converted from 普通群 to 话题群 after the schedule
-    // was created. In topic mode, a top-level sendMessage creates a new topic;
-    // keep scheduled continuations in the original thread when we have one.
+    // Explicit task choice: chat scope always starts at the group top level.
+    // A retained rootMessageId is only a bookmark that lets the user switch the
+    // task back to topic execution later; it must not override this choice.
     const chatMode = await getChatMode(larkAppId, task.chatId, { forceRefresh: true });
-    if (chatMode === 'topic' && task.rootMessageId) {
-      if (silent) {
-        // No banner probe — trust the stored anchor. If the topic was deleted,
-        // the model's own `botmux send` surfaces the failure.
-        anchor = task.rootMessageId;
-        isContinuation = true;
-      } else {
-        try {
-          await replyMessage(larkAppId, task.rootMessageId, t('scheduler.task_started', { name: task.name }, localeForBot(larkAppId)), 'text', true);
-          anchor = task.rootMessageId;
-          isContinuation = true;
-        } catch (err: any) {
-          logger.warn(`[scheduler] Failed to reply in converted topic chat ${task.rootMessageId} (${err.message}); falling back to new thread`);
-          anchor = await sendMessage(larkAppId, task.chatId, t('scheduler.task_started', { name: task.name }, localeForBot(larkAppId)));
-        }
-      }
+    let topLevelTriggerId: string | undefined;
+    if (silent) {
+      // No banner / creator notice — the chat itself is the anchor.
+    } else if (task.creatorRootMessageId && task.creatorChatId !== task.chatId) {
+      const creatorAppId = task.creatorLarkAppId ?? larkAppId;
+      replyMessage(
+        creatorAppId,
+        task.creatorRootMessageId,
+        t('scheduler.task_triggered_target_chat', { name: task.name }, localeForBot(creatorAppId)),
+        'text',
+        true,
+      ).catch((err: any) => {
+        logger.warn(`[scheduler] Failed to notify creator thread ${task.creatorRootMessageId} (${err.message})`);
+      });
     } else {
-      if (silent) {
-        // No banner / creator notice — the chat itself is the anchor.
-      } else if (task.creatorRootMessageId && task.creatorChatId !== task.chatId) {
-        const creatorAppId = task.creatorLarkAppId ?? larkAppId;
-        replyMessage(
-          creatorAppId,
-          task.creatorRootMessageId,
-          t('scheduler.task_triggered_target_chat', { name: task.name }, localeForBot(creatorAppId)),
-          'text',
-          true,
-        ).catch((err: any) => {
-          logger.warn(`[scheduler] Failed to notify creator thread ${task.creatorRootMessageId} (${err.message})`);
-        });
-      } else {
-        // Same-chat: post the start banner to the chat as a plain message.
-        try {
-          await sendMessage(larkAppId, task.chatId, t('scheduler.task_started', { name: task.name }, localeForBot(larkAppId)));
-        } catch (err: any) {
-          logger.warn(`[scheduler] Failed to post start banner in chat ${task.chatId} (${err.message})`);
-        }
+      // Same-chat: post the start banner to the chat as a plain message.
+      try {
+        topLevelTriggerId = await sendMessage(larkAppId, task.chatId, t('scheduler.task_started', { name: task.name }, localeForBot(larkAppId)));
+      } catch (err: any) {
+        logger.warn(`[scheduler] Failed to post start banner in chat ${task.chatId} (${err.message})`);
       }
-      // Assign the chat anchor ONLY on this branch. This used to run
-      // unconditionally after the whole chain, clobbering the converted-topic
-      // branch's rootMessageId anchor — which made the runtimeScope 'thread'
-      // promotion below unreachable and re-posted every scheduled reply as a
-      // new top-level topic in converted groups.
+    }
+
+    // Mirror ordinary top-level message routing. A topic group always owns a
+    // thread per top-level message; a regular group only forks an independent
+    // thread when its resolved mode is `new-topic`. `shared` keeps the stable
+    // chat-scope session but routes this exact turn's output under the banner.
+    const regularGroupMode = task.chatType === 'p2p'
+      ? 'chat'
+      : resolveRegularGroupMode(larkAppId, task.chatId);
+    const opensIndependentTopic = !!topLevelTriggerId
+      && (chatMode === 'topic' || regularGroupMode === 'new-topic');
+
+    if (opensIndependentTopic) {
+      anchor = topLevelTriggerId!;
+      isContinuation = false;
+    } else {
       anchor = task.chatId;
       isContinuation = !!activeSessions.get(sessionKey(anchor, larkAppId));
+      if (topLevelTriggerId && chatMode === 'group' && regularGroupMode === 'shared') {
+        sharedTopicRootId = topLevelTriggerId;
+      }
     }
   } else {
     // thread-scope path (existing logic)
@@ -1867,17 +1905,16 @@ export async function executeScheduledTask(
   const firePrompt = silent
     ? `${buildSilentScheduleHint(task.name, localeForBot(larkAppId))}\n\n${task.prompt}`
     : task.prompt;
-  // Every fire gets a stable identity before it enters a worker queue. Silent
-  // output suppression follows this exact id instead of mutable session state,
-  // so overlapping/queued normal turns retain their own delivery semantics.
-  const scheduledTurnId = `schedule:${task.id}:${randomUUID()}`;
-
   // Inject into a live session if one already exists at this anchor.
   const existing = activeSessions.get(sessionKey(anchor, larkAppId));
   if (isContinuation && existing?.worker && !existing.worker.killed) {
     markSessionActivity(existing);
     try {
       ensureSessionWhiteboard(existing);
+      if (sharedTopicRootId) {
+        beginReplyTargetTurn(existing, sharedTopicRootId, scheduledTurnId);
+        sessionStore.updateSession(existing.session);
+      }
       const input = buildFollowUpCliInput(firePrompt, existing.session.sessionId, {
         isAdoptMode: false,
         cliId: existing.session.cliId ?? bot.config.cliId,
@@ -1907,9 +1944,7 @@ export async function executeScheduledTask(
   // formerly chat-scope task was redirected into a converted topic chat, promote
   // the runtime session to thread-scope so follow-up replies stay in-thread.
   const runtimeScope: 'thread' | 'chat' =
-    task.deliver === 'new-topic' ? 'thread'
-      : scope === 'chat' && anchor !== task.chatId ? 'thread'
-        : scope;
+    scope === 'chat' && anchor !== task.chatId ? 'thread' : scope;
   const session = sessionStore.createSession(task.chatId, anchor, `${t('schedule.title_prefix', undefined, localeForBot(larkAppId))} ${task.name}`, task.chatType === 'p2p' ? 'p2p' : 'group');
   const now = Date.now();
   session.larkAppId = larkAppId;
@@ -1933,6 +1968,10 @@ export async function executeScheduledTask(
     hasHistory: isContinuation,
     workingDir: task.workingDir,
   };
+  if (sharedTopicRootId) {
+    beginReplyTargetTurn(ds, sharedTopicRootId, scheduledTurnId);
+    sessionStore.updateSession(ds.session);
+  }
   ensureSessionWhiteboard(ds);
   const prompt = buildNewTopicCliInput(firePrompt, session.sessionId, bot.config.cliId, bot.config.cliPathOverride, undefined, undefined, undefined, undefined, { name: bot.botName, openId: bot.botOpenId }, localeForBot(larkAppId), undefined, { larkAppId, chatId: task.chatId, whiteboardId: ds.session.whiteboardId });
   activeSessions.set(sessionKey(anchor, larkAppId), ds);
@@ -1945,7 +1984,7 @@ export async function executeScheduledTask(
     throw err;
   }
 
-  logger.info(`[scheduler] Task "${task.name}" spawned (session: ${session.sessionId}, scope: ${scope}, anchor: ${anchor}, continuation: ${isContinuation}${silent ? ', silent' : ''})`);
+  logger.info(`[scheduler] Task "${task.name}" spawned (session: ${session.sessionId}, scope: ${runtimeScope}, anchor: ${anchor}, continuation: ${isContinuation}${silent ? ', silent' : ''})`);
 }
 
 // ─── Dashboard「创建会话」spawn / activate ───────────────────────────────────

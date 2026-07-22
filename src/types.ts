@@ -424,6 +424,8 @@ export interface ParsedSchedule {
   display: string;
 }
 
+export type ScheduleExecutionPosition = 'top-level' | 'topic' | 'new-topic';
+
 export interface ScheduledTask {
   id: string;
   name: string;
@@ -438,10 +440,18 @@ export interface ScheduledTask {
    *  execution replies into this thread instead of creating a new one. */
   rootMessageId?: string;
   chatType?: 'group' | 'p2p' | 'topic_group';
-  /** Mirrors Session.scope. Determines whether the scheduled fire posts as
-   *  reply_in_thread to rootMessageId (thread) or as a plain message to
-   *  chatId (chat). Absent → 'thread' for legacy compat. */
+  /** Low-level session scope retained for compatibility. `thread` replies
+   *  under rootMessageId; `chat` starts at group top level and then follows
+   *  the Bot/chat ordinary-group reply mode. */
   scope?: 'thread' | 'chat';
+  /** Explicit task-level routing. `new-topic` posts a fresh top-level seed on
+   *  every run and then executes in the new thread, independent of the Bot's
+   *  ordinary-group reply mode. Older rows derive this from scope/root. */
+  executionPosition?: ScheduleExecutionPosition;
+  /** Optional first-message text for `new-topic`; Lark uses the seed message
+   *  as the visible topic title. Blank/absent falls back to the standard task
+   *  start notice. */
+  topicTitle?: string;
   larkAppId?: string;
   /** Where the user originally created the task (for cross-thread tasks where
    *  --chat-id / --root-msg-id retarget execution to a different chat).
@@ -461,17 +471,17 @@ export interface ScheduledTask {
   repeat?: { times: number | null; completed: number };
   /** Delivery target:
    *  - 'origin' (default): reply into the original thread, or post to the chat
-   *  - 'new-topic': every fire opens a brand-new topic in the chat and runs in
-   *    a fresh session (never reuses a prior session / never replies in-thread)
+   *  - 'new-topic': compatibility input meaning a fresh topic per run;
+   *    new writes express this as executionPosition='new-topic'
    *  - 'local': log only, no delivery */
   deliver?: 'origin' | 'local' | 'new-topic';
   /** Silent execution: fires post NO "🕐 task started" banner / creator notice,
    *  and the spawned turn suppresses daemon-initiated group output (streaming
    *  card, bridge final_output forwarding). The prompt is wrapped with a hint
    *  telling the model to `botmux send` only when its alert condition is met —
-   *  "符合条件报警、不符合条件静默". Incompatible with deliver:'new-topic'
-   *  (a new topic can only be opened by a first message); creation rejects the
-   *  combination and a runtime encounter falls back to a loud fire. */
+   *  "符合条件报警、不符合条件静默". Supported for both chat-scope (group
+   *  top-level) and thread-scope (existing topic) schedules, but incompatible
+   *  with executionPosition='new-topic' because that needs a visible seed. */
   silent?: boolean;
   // DEPRECATED — kept only for backward-compat migration
   type?: 'cron' | 'interval' | 'once';
