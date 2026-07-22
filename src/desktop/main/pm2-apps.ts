@@ -11,6 +11,8 @@ interface Pm2ListDeps {
   execPath?: string;
   env?: NodeJS.ProcessEnv;
   timeoutMs?: number;
+  /** Probed user shell PATH for bundled runtimes (see probeShellPathEnv). */
+  pathEnv?: string;
 }
 
 export const defaultPm2ListTimeoutMs = 25_000;
@@ -34,8 +36,11 @@ export function listPm2Apps(
     ...baseEnv,
     // External PM2 bins use /usr/bin/env node; Finder-launched apps need a
     // repaired PATH so discovery does not depend on the user's shell startup.
+    // jlist may be the first pm2 contact and thus start the pm2 daemon, whose
+    // env sticks and propagates into resurrected apps — so the bundled branch
+    // must carry the probed shell PATH too, not only the daemon-start spawn.
     PATH: runtime.kind === 'bundled'
-      ? withRuntimePath(baseEnv.PATH, runtime.nodePath, undefined)
+      ? withRuntimePath(baseEnv.PATH, runtime.nodePath, deps.pathEnv)
       : withRuntimePath(baseEnv.PATH, runtime.binPath, runtime.pathEnv),
     PM2_HOME: paths.pm2Home,
     SESSION_DATA_DIR: paths.dataDir,

@@ -28,6 +28,8 @@ export interface BuildBundledBotmuxCommandInput {
   botmuxHome: string;
   args: string[];
   baseEnv: NodeJS.ProcessEnv;
+  /** Probed user shell PATH (zsh/bash, profile+rc) — see probeShellPathEnv. */
+  pathEnv?: string;
 }
 
 export function buildBotmuxCommand(input: BuildBotmuxCommandInput): BotmuxCommand {
@@ -48,6 +50,13 @@ export function buildBotmuxCommand(input: BuildBotmuxCommandInput): BotmuxComman
 export function buildBundledBotmuxCommand(input: BuildBundledBotmuxCommandInput): BotmuxCommand {
   const env: NodeJS.ProcessEnv = {
     ...input.baseEnv,
+    // Finder-launched apps only carry launchd's minimal PATH. The daemon this
+    // command starts must still find per-bot CLIs (claude/codex/traex/... via
+    // nvm/fnm/homebrew) and a `node` for their `#!/usr/bin/env node` shebangs,
+    // so repair PATH: user's shell PATH first (their nvm node keeps winning,
+    // matching terminal behavior), bundled node as fallback, then well-known
+    // install dirs.
+    PATH: buildBundledPath(input.baseEnv.PATH, input.nodePath, input.pathEnv),
     PM2_HOME: join(input.botmuxHome, 'pm2'),
     SESSION_DATA_DIR: join(input.botmuxHome, 'data'),
   };
@@ -76,6 +85,18 @@ export function buildExternalBotmuxCommand(input: BuildExternalBotmuxCommandInpu
     args: input.args,
     env,
   };
+}
+
+function buildBundledPath(current: string | undefined, nodePath: string, pathEnv: string | undefined): string {
+  return joinPathEntries([
+    pathEnv,
+    dirname(nodePath),
+    '/opt/homebrew/bin',
+    '/usr/local/bin',
+    '/usr/bin',
+    '/bin',
+    current,
+  ]);
 }
 
 function buildExternalPath(current: string | undefined, binPath: string, pathEnv: string | undefined): string {

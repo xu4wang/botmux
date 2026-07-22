@@ -58,6 +58,40 @@ describe('desktop PM2 app listing', () => {
     );
   });
 
+  it('keeps the probed shell PATH in the bundled PM2 environment', async () => {
+    const child = childProcessStub();
+    const spawn = vi.fn(() => child);
+    const bundled: RuntimeLaunchTarget = {
+      kind: 'bundled',
+      root: '/Applications/Botmux.app/Contents/Resources/runtime',
+      cliPath: '/Applications/Botmux.app/Contents/Resources/runtime/dist/cli.js',
+      nodePath: '/Applications/Botmux.app/Contents/Resources/node/darwin-arm64/bin/node',
+      version: '3.0.0',
+      runtimeSource: 'bundled',
+    };
+    const promise = listPm2Apps(paths, bundled, {
+      existsSync: () => true,
+      spawn: spawn as any,
+      env: { PATH: '/usr/bin:/bin' },
+      pathEnv: '/Users/me/.nvm/versions/node/v22.22.2/bin',
+    });
+
+    child.stdout.emit('data', '[]');
+    child.emit('close', 0);
+    await expect(promise).resolves.toEqual([]);
+    const env = (spawn.mock.calls[0] as unknown as [string, string[], { env: NodeJS.ProcessEnv }])[2].env;
+    // Bundled node stays first (pm2 itself must run on it); the probed shell
+    // PATH follows so the pm2 daemon's sticky env can resolve user CLIs.
+    expect(env.PATH).toBe([
+      '/Applications/Botmux.app/Contents/Resources/node/darwin-arm64/bin',
+      '/Users/me/.nvm/versions/node/v22.22.2/bin',
+      '/opt/homebrew/bin',
+      '/usr/local/bin',
+      '/usr/bin',
+      '/bin',
+    ].join(':'));
+  });
+
   it('rejects when the selected runtime does not contain a PM2 binary', async () => {
     await expect(listPm2Apps(paths, runtime, {
       existsSync: () => false,
