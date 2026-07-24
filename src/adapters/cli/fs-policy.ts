@@ -569,14 +569,24 @@ export function compileToBwrap(policy: FsPolicy, opts: CompileBwrapOpts): BwrapC
       // is listable only for the carve-out's own path (inherent to white-in-black).
       const hasNestedAllow = policy.rules.some(o =>
         o.access !== 'deny' && o.path !== r.path && coversPath(r.path, o.path));
-      // A deny fully shadowed by a SHALLOWER deny, with NO allow carve-out under
-      // it, is REDUNDANT: the ancestor mask already hides everything below. Emit
-      // nothing — mounting a deeper mask onto the ancestor's mode-000 read-only
-      // mask would fail (bwrap can't mkdir the child mountpoint on a RO parent),
-      // and it would add nothing (the ancestor already denies the whole subtree).
-      const shadowedByDeny = !hasNestedAllow && policy.rules.some(o =>
-        o.access === 'deny' && o.path !== r.path && coversPath(o.path, r.path)
-        && exposed.some(e => coversPath(e, o.path)));
+      // A deny is REDUNDANT only when the NEAREST enclosing rule is ALSO a deny:
+      // then this path is already masked by that ancestor and emitting a deeper
+      // mask would (a) add nothing and (b) fail to mount onto the ancestor's
+      // mode-000 read-only mask. Redundancy MUST be judged by the deepest strict
+      // ancestor rule — NOT "any ancestor deny exists" — because an allow can
+      // re-expose the tree between the two denies (deny /outer → allow
+      // /outer/self → deny /outer/self/secret): there the nearest ancestor of
+      // `secret` is the `self` ALLOW, so `secret` is a real leaf deny that MUST
+      // be masked (skipping it leaks the secret). Find the deepest exposed strict
+      // ancestor and skip only when it denies.
+      let nearestAncestor: FsRule | undefined;
+      for (const o of policy.rules) {
+        if (o.path === r.path || !coversPath(o.path, r.path)) continue; // strict ancestor only
+        if (o.access !== 'deny' && !exposed.includes(o.path)) continue; // allow ancestor must be emitted to count
+        if (o.access === 'deny' && !exposed.some(e => coversPath(e, o.path))) continue; // deny ancestor must be reachable
+        if (!nearestAncestor || pathDepth(o.path) > pathDepth(nearestAncestor.path)) nearestAncestor = o;
+      }
+      const shadowedByDeny = !hasNestedAllow && nearestAncestor?.access === 'deny';
       if (shadowedByDeny) continue;
       if (hasNestedAllow) {
         a.push('--tmpfs', r.path);

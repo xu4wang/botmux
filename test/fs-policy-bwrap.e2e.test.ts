@@ -213,6 +213,29 @@ d('bwrap three-tier enforcement (real bubblewrap)', () => {
     rmSync(denied, { recursive: true, force: true });
   });
 
+  it('deny → allow → deny (4 layers): the DEEPEST deny is masked, secret unreadable+unwritable, middle carve-out still works', () => {
+    // Security regression: an ancestor deny must NOT make a deeper deny look
+    // redundant when an allow re-exposed the tree between them. outer denied,
+    // self re-allowed, secret denied again → secret must be a real mask.
+    const outer = join(S, 'proj/dad-outer');
+    const self = join(outer, 'self');
+    const secret = join(self, 'secret');
+    mkdirSync(secret, { recursive: true });
+    writeFileSync(join(secret, 'key'), 'TOPSECRET');
+    writeFileSync(join(self, 'ok'), 'SELF');
+    const { args } = build({ deny: [outer, secret], readWrite: [self] });
+    // middle carve-out reads + writes
+    expect(run(args, `cat ${JSON.stringify(join(self, 'ok'))}`).out).toContain('SELF');
+    expect(run(args, `echo w > ${JSON.stringify(join(self, 'w'))}`).status).toBe(0);
+    // deepest deny: real content NOT readable (was leaking TOPSECRET before the fix)
+    const read = run(args, `cat ${JSON.stringify(join(secret, 'key'))}`);
+    expect(read.status).not.toBe(0);
+    expect(read.out).not.toContain('TOPSECRET');
+    // deepest deny: not writable
+    expect(run(args, `echo x > ${JSON.stringify(join(secret, 'evil'))} && echo WROTE`).out).not.toContain('WROTE');
+    rmSync(outer, { recursive: true, force: true });
+  });
+
   it('redundant nested deny (deny /a + deny /a/b) launches — inner deny skipped, still fully denied', () => {
     // Two stacked denies with no allow between would fail: the inner mask can't
     // mount on the outer mode-000 RO mask. The compiler skips the redundant

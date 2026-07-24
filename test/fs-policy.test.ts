@@ -411,6 +411,30 @@ describe('compileToBwrap', () => {
     expect(maskMounts).toContainEqual({ path: '/home/u/proj/a', kind: 'dir' });
     expect(maskMounts.some(m => m.path === '/home/u/proj/a/b')).toBe(false);
   });
+
+  it('deny → allow → deny: the DEEPEST deny is NOT redundant (an allow re-exposed the tree between the two denies) and MUST be masked', () => {
+    // Security regression: `shadowedByDeny` must judge the NEAREST enclosing
+    // rule, not "any ancestor deny exists". Here outer is denied, self re-allows,
+    // secret is denied again — skipping secret (because outer is an ancestor
+    // deny) leaked TOPSECRET through the tmpfs+bind carve-out.
+    const p = buildFsPolicy(ctx({
+      platform: 'linux', homeDir: '/home/u', botHome: '/home/u/.botmux/bots/cli_self',
+      botmuxHome: '/home/u/.botmux', sessionDataDir: '/home/u/.botmux/data', workingDir: '/home/u/proj',
+      userPaths: {
+        deny: ['/home/u/proj/outer', '/home/u/proj/outer/self/secret'],
+        readWrite: ['/home/u/proj/outer/self'],
+      },
+    }));
+    const { args, maskMounts } = compileToBwrap(p, opts);
+    // outer has a nested allow → tmpfs; self is bound; secret is emitted (masked)
+    expect(args.indexOf('/home/u/proj/outer')).toBeGreaterThanOrEqual(0);
+    expect(args).toContain('/home/u/proj/outer/self');
+    expect(args).toContain('/home/u/proj/outer/self/secret'); // NOT skipped
+    expect(maskMounts).toContainEqual({ path: '/home/u/proj/outer/self/secret', kind: 'dir' });
+    // semantic cross-check: accessForPath agrees the secret is denied
+    expect(accessForPath(p.rules, '/home/u/proj/outer/self/secret/key').access).toBe('deny');
+    expect(accessForPath(p.rules, '/home/u/proj/outer/self/ok').access).toBe('readWrite');
+  });
 });
 
 describe('migrateLegacySandboxFields', () => {
