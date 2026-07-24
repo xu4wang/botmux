@@ -3427,8 +3427,9 @@ export async function startAdoptSession(
   // persisted and "adopted" is never replied — otherwise the session would
   // become a worker=null pseudo-adopt whose next message still routes as a
   // bridge/adopt session. Covers both real host-process adopt entries
-  // (`/adopt <pane>` and the adopt_select card, which both route here).
-  if (adoptSandboxBlocked(getBot(ds.larkAppId ?? larkAppId).config)) {
+  // (`/adopt <pane>` and the adopt_select card, which both route here). Checks
+  // the live bot flag AND the session's frozen sandbox decision (union).
+  if (adoptSandboxBlocked(getBot(ds.larkAppId ?? larkAppId).config, ds.session)) {
     await sessionReply(sessionAnchorId(ds), t('cmd.adopt.sandbox_blocked', undefined, loc));
     return;
   }

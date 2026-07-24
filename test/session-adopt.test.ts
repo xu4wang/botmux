@@ -474,11 +474,15 @@ describe('Adopt card actions', () => {
       expect(replies).not.toContain('已接入'); // never the success message
     });
 
-    it('readIsolation / global BOTMUX_SANDBOX also block via the shared predicate', async () => {
+    it('readIsolation / global BOTMUX_SANDBOX / session frozen decision all block via the shared predicate (union)', async () => {
       const { adoptSandboxBlocked } = await import('../src/core/worker-pool.js');
       expect(adoptSandboxBlocked({ readIsolation: true })).toBe(true);
       expect(adoptSandboxBlocked({ sandbox: true })).toBe(true);
       expect(adoptSandboxBlocked({})).toBe(false);
+      // session's FROZEN decision blocks even when the live bot flag is OFF
+      // (forkWorker treats the frozen decision as authoritative).
+      expect(adoptSandboxBlocked({ sandbox: false }, { sandbox: true })).toBe(true);
+      expect(adoptSandboxBlocked({}, { sandbox: false })).toBe(false);
       vi.stubEnv('BOTMUX_SANDBOX', '1');
       expect(adoptSandboxBlocked({})).toBe(true);
       vi.unstubAllEnvs();

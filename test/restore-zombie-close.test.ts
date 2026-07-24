@@ -69,6 +69,10 @@ const wp = vi.hoisted(() => ({ registry: null as Map<string, any> | null }));
 vi.mock('../src/core/worker-pool.js', () => ({
   forkWorker: vi.fn(),
   forkAdoptWorker: vi.fn(),
+  // Faithful union: any isolation source (live bot flag or the session's frozen
+  // decision) blocks adopt. Mirrors the real predicate for the restore test.
+  adoptSandboxBlocked: vi.fn((botCfg: any, session?: any) =>
+    botCfg?.sandbox === true || botCfg?.readIsolation === true || session?.sandbox === true || process.env.BOTMUX_SANDBOX === '1'),
   killStalePids: vi.fn(),
   getActiveSessionsRegistry: vi.fn(() => wp.registry ?? undefined),
   getCurrentCliVersion: vi.fn(() => '1.0.0-test'),
@@ -154,6 +158,7 @@ vi.mock('../src/core/session-activity.js', () => ({
 import { restoreActiveSessions, closeCliMismatchedSessionsForBot } from '../src/core/session-manager.js';
 import { TmuxBackend } from '../src/adapters/backend/tmux-backend.js';
 import { forkWorker, closeSession } from '../src/core/worker-pool.js';
+import { forkAdoptWorker } from '../src/core/worker-pool.js';
 import { announceSessionRow } from '../src/core/session-activity.js';
 import * as sessionStore from '../src/services/session-store.js';
 import { sessionKey } from '../src/core/types.js';
@@ -401,6 +406,41 @@ describe('restoreActiveSessions — persistent-backend zombie-close decision', (
     expect(forkWorker).toHaveBeenCalled();
     expect(vi.mocked(forkWorker).mock.calls[0]![0].session.sessionId).toBe(s.sessionId);
     expect(map.get(sessionKey('om_exists', 'app_test'))).toBeDefined();
+  });
+
+  // ── blocker #3d: a sandbox session persisted as adopt must be CONVERTED to a
+  // plain cold-start at restore, not re-registered as a (worker=null) adopt. ──
+  it('sandbox adopt session on restore → converted to cold-start (no adopt fork, title normalized, row not adopt, survives next restart)', async () => {
+    probe.result = 'exists';
+    const s = makeActivePersistentSession('om_sbx_adopt');
+    s.sandbox = true; // frozen sandbox decision
+    s.title = 'Adopt: proj';
+    s.adoptedFrom = { source: 'tmux', tmuxTarget: 'ext:0.0', originalCliPid: 111, cliId: 'claude-code', cwd: '/tmp/proj' } as any;
+    sessionStore.updateSession(s);
+    const map = new Map<string, DaemonSession>();
+    wp.registry = map;
+
+    await restoreActiveSessions(map);
+
+    // NOT adopted: no adopt fork, persisted metadata cleared, title normalized
+    expect(forkAdoptWorker).not.toHaveBeenCalled();
+    const persisted = sessionStore.getSession(s.sessionId)!;
+    expect(persisted.adoptedFrom).toBeUndefined();
+    expect(persisted.title).not.toMatch(/^Adopt:/);
+    // registered as an ordinary restored session (row announced, not closed)
+    expect(closeSession).not.toHaveBeenCalledWith(s.sessionId);
+    const restored = map.get(sessionKey('om_sbx_adopt', 'app_test'));
+    expect(restored).toBeDefined();
+    expect(restored!.adoptedFrom).toBeUndefined();
+
+    // A SECOND restart must not hit the legacy title-only "Adopt:" close branch
+    // (the bug: title still started with "Adopt:" after metadata was cleared).
+    const map2 = new Map<string, DaemonSession>();
+    wp.registry = map2;
+    vi.mocked(closeSession).mockClear();
+    await restoreActiveSessions(map2);
+    expect(closeSession).not.toHaveBeenCalledWith(s.sessionId);
+    expect(map2.get(sessionKey('om_sbx_adopt', 'app_test'))).toBeDefined();
   });
 
   it('restores only the latest clean Codex App sidecar after a disk reload and re-attaches it', async () => {

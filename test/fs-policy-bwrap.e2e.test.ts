@@ -48,7 +48,7 @@ d('bwrap three-tier enforcement (real bubblewrap)', () => {
   // Build the bwrap argv the SAME way the worker does (deny masks: mode-000
   // empty sources, missing mountpoints pre-created). Returns the created-mask
   // list too so cleanup tests can assert rmdir-if-empty.
-  function build(extraDeny: string[]) {
+  function build(userPaths: { readWrite?: string[]; readOnly?: string[]; deny?: string[] }) {
     const emptiesDir = join(S, 'sbx/empties');
     const emptyDir = join(S, 'sbx/empty');
     mkdirSync(emptiesDir, { recursive: true });
@@ -61,7 +61,7 @@ d('bwrap three-tier enforcement (real bubblewrap)', () => {
       workingDir: join(S, 'proj'), currentAppId: 'cli_e2e', botHome: join(S, 'botmux-home/bots/cli_e2e'),
       redirectedCliData: true,
       execPaths: [dirname(canonical(process.execPath))],
-      userPaths: { readOnly: [join(S, 'ref')], deny: extraDeny },
+      userPaths: { readOnly: [join(S, 'ref'), ...(userPaths.readOnly ?? [])], readWrite: userPaths.readWrite, deny: userPaths.deny },
       net: true, writeRegexes: [],
     });
     policy.rules = policy.rules.filter(r => r.access === 'deny' || existsSync(r.path));
@@ -78,6 +78,7 @@ d('bwrap three-tier enforcement (real bubblewrap)', () => {
     const compiled = compileToBwrap(policy, { symlinks, emptyDir, emptiesDir, filePaths, chdir: join(S, 'proj') });
     chmodSync(emptyDir, 0o000);
     for (const f of compiled.emptyFiles) writeFileSync(f.path, '', { mode: 0o000 });
+    // Mirror the worker: pre-create missing mask mountpoints (leaf + ancestors).
     const created: { path: string; kind: 'dir' | 'file' }[] = [];
     for (const m of compiled.maskMounts) {
       if (existsSync(m.path)) continue;
@@ -106,20 +107,20 @@ d('bwrap three-tier enforcement (real bubblewrap)', () => {
   afterAll(() => { if (S) rmSync(S, { recursive: true, force: true }); });
 
   it('readWrite: reads AND writes the project', () => {
-    const { args } = build([]);
+    const { args } = build({});
     expect(run(args, `cat ${JSON.stringify(join(S, 'proj/readme.md'))}`).status).toBe(0);
     expect(run(args, `echo hi > ${JSON.stringify(join(S, 'proj/work/new.txt'))}`).status).toBe(0);
   });
 
   it('readOnly: reads but cannot write', () => {
-    const { args } = build([]);
+    const { args } = build({});
     expect(run(args, `cat ${JSON.stringify(join(S, 'ref/doc.md'))}`).status).toBe(0);
     expect(run(args, `echo x > ${JSON.stringify(join(S, 'ref/hack'))}`).status).not.toBe(0);
   });
 
   it('deny DIR (existing): real content unreadable AND the mask itself is unreadable (mode 000)', () => {
     const dir = join(S, 'proj/secrets');
-    const { args } = build([dir]);
+    const { args } = build({ deny: [dir] });
     const read = run(args, `cat ${JSON.stringify(join(dir, 'key.txt'))}`);
     expect(read.status).not.toBe(0);
     expect(read.out).not.toContain('TOPSECRET');
@@ -131,14 +132,14 @@ d('bwrap three-tier enforcement (real bubblewrap)', () => {
   it('deny DIR (existing): NOT writable — regression guard for the writable-tmpfs bug', () => {
     const dir = join(S, 'proj/secrets');
     const evil = join(dir, 'evil.txt');
-    const { args } = build([dir]);
+    const { args } = build({ deny: [dir] });
     expect(run(args, `echo PWNED > ${JSON.stringify(evil)}`).status).not.toBe(0);
     expect(existsSync(evil)).toBe(false); // nothing leaked to the host
   });
 
   it('deny FILE (existing): content hidden, cat fails (000), write rejected', () => {
     const f = join(S, 'proj/.env');
-    const { args } = build([f]);
+    const { args } = build({ deny: [f] });
     const r = run(args, `cat ${JSON.stringify(f)}; echo x > ${JSON.stringify(f)} && echo WROTE`);
     expect(r.out).not.toContain('API_KEY');
     expect(r.out).not.toContain('WROTE');
@@ -147,7 +148,7 @@ d('bwrap three-tier enforcement (real bubblewrap)', () => {
   it('NONEXISTENT deny under a RW parent: sandbox mkdir/write is REJECTED and nothing lands on the host', () => {
     const ghost = join(S, 'proj/ghost'); // never created as a real secret
     expect(existsSync(join(ghost, 'x'))).toBe(false);
-    const { args } = build([ghost]);
+    const { args } = build({ deny: [ghost] });
     const r = run(args, `mkdir -p ${JSON.stringify(join(ghost, 'sub'))} 2>&1; echo LEAK > ${JSON.stringify(join(ghost, 'secret'))} 2>&1 && echo WROTE`);
     expect(r.out).not.toContain('WROTE');
     expect(existsSync(join(ghost, 'secret'))).toBe(false);
@@ -159,7 +160,7 @@ d('bwrap three-tier enforcement (real bubblewrap)', () => {
     // still be installed so a host-created secret is unreadable in-sandbox.
     const priv = join(S, 'ref/private');
     rmSync(priv, { recursive: true, force: true });
-    const { args } = build([priv]);
+    const { args } = build({ deny: [priv] });
     // simulate the host/another process creating the secret AFTER the mask was
     // installed (the compiler is stat-free; the worker pre-created the mount).
     // Under the mask, the in-sandbox view is the mode-000 empty source, so even
@@ -176,7 +177,7 @@ d('bwrap three-tier enforcement (real bubblewrap)', () => {
     const ghostFilled = join(S, 'proj/ghost-filled');
     rmSync(ghostEmpty, { recursive: true, force: true });
     rmSync(ghostFilled, { recursive: true, force: true });
-    const { created } = build([ghostEmpty, ghostFilled]);
+    const { created } = build({ deny: [ghostEmpty, ghostFilled] });
     expect(created.map(m => m.path).sort()).toEqual([ghostFilled, ghostEmpty].sort());
     // host writes into one of them during the session
     writeFileSync(join(ghostFilled, 'hostdata'), 'x');
@@ -187,5 +188,45 @@ d('bwrap three-tier enforcement (real bubblewrap)', () => {
     expect(existsSync(ghostEmpty)).toBe(false); // empty → reclaimed
     expect(existsSync(ghostFilled)).toBe(true); // non-empty → preserved, never rm -rf
     rmSync(ghostFilled, { recursive: true, force: true });
+  });
+
+  it('white-in-black: RW → deny → RW carve-out launches, carve-out readable+writable, denied root hidden+unwritable', () => {
+    // The bug: a mode-000 ro-bind mask at /proj/wib can't host the nested
+    // /proj/wib/self mountpoint (bwrap: "Can't mkdir … Read-only file system").
+    // Fix: tmpfs mask + deferred --remount-ro.
+    const denied = join(S, 'proj/wib');
+    const self = join(denied, 'self');
+    mkdirSync(self, { recursive: true });
+    writeFileSync(join(denied, 'secret'), 'DENIEDSECRET');
+    writeFileSync(join(self, 'ok'), 'SELF');
+    const { args } = build({ deny: [denied], readWrite: [self] });
+    // carve-out reads
+    expect(run(args, `cat ${JSON.stringify(join(self, 'ok'))}`).out).toContain('SELF');
+    // carve-out writes (lands on host)
+    expect(run(args, `echo w > ${JSON.stringify(join(self, 'w'))}`).status).toBe(0);
+    expect(existsSync(join(self, 'w'))).toBe(true);
+    // denied root: real content hidden
+    expect(run(args, `cat ${JSON.stringify(join(denied, 'secret'))}`).out).not.toContain('DENIEDSECRET');
+    // denied root: not writable (remount-ro sealed the tmpfs parent)
+    expect(run(args, `echo x > ${JSON.stringify(join(denied, 'evil'))} && echo WROTE`).out).not.toContain('WROTE');
+    expect(existsSync(join(denied, 'evil'))).toBe(false);
+    rmSync(denied, { recursive: true, force: true });
+  });
+
+  it('redundant nested deny (deny /a + deny /a/b) launches — inner deny skipped, still fully denied', () => {
+    // Two stacked denies with no allow between would fail: the inner mask can't
+    // mount on the outer mode-000 RO mask. The compiler skips the redundant
+    // inner deny; the outer mask still hides everything below.
+    const a = join(S, 'proj/rr');
+    const b = join(a, 'b');
+    mkdirSync(b, { recursive: true });
+    writeFileSync(join(b, 'secret'), 'INNERSECRET');
+    const { args } = build({ deny: [a, b] });
+    // launches (would exit non-zero on the mkdir failure otherwise) and the
+    // inner path is still denied by the ancestor mask
+    const r = run(args, `cat ${JSON.stringify(join(b, 'secret'))} 2>&1; echo "---"; ls ${JSON.stringify(a)} 2>&1`);
+    expect(r.out).not.toContain('INNERSECRET');
+    expect(r.out).toContain('---'); // process actually ran
+    rmSync(a, { recursive: true, force: true });
   });
 });

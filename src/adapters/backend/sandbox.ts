@@ -255,29 +255,52 @@ const USRMERGE_CANDIDATES = ['/bin', '/sbin', '/lib', '/lib64', '/lib32', '/libx
  *  restart the close path only knows `sessionRoot`, and without this manifest
  *  the empty host mountpoints would leak forever. Read + acted on by EVERY
  *  teardown path (normal close, reattach-then-close, spawn-failure rollback,
- *  stale sweep) BEFORE the sessionRoot is removed. */
+ *  stale sweep) BEFORE the sessionRoot is removed.
+ *
+ *  TRUST MODEL: the manifest lives inside `sessionRoot`, which the policy makes
+ *  a MANDATORY deny in-sandbox (only the outbox is a nested RW carve-out), so a
+ *  sandboxed CLI cannot read or rewrite it. But it can be reached OUT of band
+ *  (a custom data dir under the project, a future policy hole), so cleanup does
+ *  NOT trust the self-reported path as a delete authorization: each entry also
+ *  records the (dev, ino) captured at creation, and cleanup re-`lstat`s and
+ *  removes ONLY when the on-disk inode still matches. That defeats both a
+ *  swapped manifest pointing at a victim path AND the "empty mountpoint deleted,
+ *  a new empty object created at the same path" reuse race. */
 const MASK_MANIFEST_NAME = 'mask-mounts.json';
 
-interface MaskMountEntry { path: string; kind: 'dir' | 'file' }
+interface MaskMountEntry {
+  path: string;
+  kind: 'dir' | 'file';
+  /** Host device + inode captured right after WE created the mountpoint. The
+   *  delete-time identity check: only remove if lstat still reports these. */
+  dev: number;
+  ino: number;
+}
 
-/** Atomically persist the created-mountpoint manifest (0600). Best-effort:
- *  a write failure only risks leaking empty mountpoints, never data. */
-function writeMaskManifest(sessionRoot: string, created: MaskMountEntry[]): void {
-  if (!created.length) return;
+/** Atomically persist the created-mountpoint manifest (0600). Returns false on
+ *  failure so the caller can FAIL CLOSED (roll back + abort spawn) rather than
+ *  start a session whose pre-created host mountpoints could later leak. */
+function writeMaskManifest(sessionRoot: string, created: MaskMountEntry[]): boolean {
+  if (!created.length) return true;
   try {
     atomicWriteFileSync(join(sessionRoot, MASK_MANIFEST_NAME), JSON.stringify(created), { mode: 0o600 });
-  } catch { /* best-effort */ }
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 /** Reclaim the empty deny-mask mountpoints recorded in the manifest, then
  *  delete the manifest. Runs on ALL teardown paths. Fail-safe & NON-RECURSIVE:
- *  - only touches absolute, `..`-free paths INSIDE the sessionRoot's dataDir
- *    sandbox tree's original targets (validated shape, no symlink following);
- *  - a dir is removed with `rmdir` only (fails ENOTEMPTY if the host/a
- *    concurrent process wrote into it → content is preserved, never rm -rf);
- *  - a file is `unlink`ed only when it is a regular, zero-byte file;
- *  - `lstat` re-checks the on-disk shape and REJECTS symlinks (a swapped entry
- *    can't trick us into deleting elsewhere).
+ *  - rejects any entry whose path is non-absolute, contains `..`, or is a
+ *    symlink on disk (a swapped entry can't trick us into deleting elsewhere);
+ *  - IDENTITY-BINDS: removes only when the on-disk (dev, ino) still matches what
+ *    WE recorded at creation — so a tampered manifest pointing at a pre-existing
+ *    victim, or a path whose empty object was replaced after we created ours,
+ *    is left untouched;
+ *  - a dir is removed with `rmdir` only (throws ENOTEMPTY if the host/a
+ *    concurrent process wrote into it → content preserved, never rm -rf);
+ *  - a file is `unlink`ed only when it is a regular, zero-byte file.
  *  MUST be called BEFORE removing sessionRoot (which holds the manifest). */
 function reclaimMaskMounts(sessionRoot: string): void {
   const manifestPath = join(sessionRoot, MASK_MANIFEST_NAME);
@@ -288,15 +311,15 @@ function reclaimMaskMounts(sessionRoot: string): void {
   if (!Array.isArray(entries)) return;
   for (const e of entries) {
     if (!e || typeof e !== 'object') continue;
-    const path = (e as MaskMountEntry).path;
-    const kind = (e as MaskMountEntry).kind;
-    // Reject anything that isn't a clean absolute path or a known shape.
+    const { path, kind, dev, ino } = e as MaskMountEntry;
     if (typeof path !== 'string' || !isAbsolute(path)) continue;
     if (path.split('/').includes('..')) continue;
     if (kind !== 'dir' && kind !== 'file') continue;
+    if (typeof dev !== 'number' || typeof ino !== 'number') continue; // pre-identity / forged → refuse
     let st;
     try { st = lstatSync(path); } catch { continue; } // already gone
-    if (st.isSymbolicLink()) continue;                // never follow a swapped symlink
+    if (st.isSymbolicLink()) continue;                     // never follow a swapped symlink
+    if (st.dev !== dev || st.ino !== ino) continue;        // not the object WE created → leave it
     try {
       if (kind === 'dir' && st.isDirectory()) {
         rmdirSync(path); // rmdir — throws ENOTEMPTY if host wrote into it → kept
@@ -309,11 +332,53 @@ function reclaimMaskMounts(sessionRoot: string): void {
 
 /** Spawn-setup rollback: reclaim any empty mask mountpoints we pre-created,
  *  then drop the whole per-session tree. Used when prepareDirectSandbox bails
- *  AFTER masks were materialised (e.g. the MCP gateway socket check fails). */
+ *  AFTER masks were materialised (e.g. the MCP gateway socket check fails, or
+ *  the manifest write failed — fail closed rather than leak). */
 function rollbackSandboxSetup(sessionRoot: string): void {
   reclaimMaskMounts(sessionRoot);
   try { rmSync(sessionRoot, { recursive: true, force: true }); } catch { /* */ }
 }
+
+/** Create a mask mountpoint on the host (all missing ancestors too), recording
+ *  EACH level we actually create — deepest first — with its (dev, ino) so
+ *  teardown can rmdir-if-empty every level, not just the leaf. `kind` applies to
+ *  the leaf; ancestors are always dirs. Returns the created entries (empty if
+ *  the leaf already existed). Throws on failure so the caller can fail closed. */
+function createMaskMount(leaf: string, kind: 'dir' | 'file'): MaskMountEntry[] {
+  if (existsSync(leaf)) return []; // pre-existing host path — never our cleanup target
+  // Walk up to the shallowest missing ancestor, creating each level so we can
+  // record + later reclaim exactly what WE added (mkdir recursive would create
+  // them but hide which levels were ours).
+  const toCreate: string[] = [];
+  let p = leaf;
+  while (!existsSync(p)) {
+    toCreate.push(p);
+    const parent = dirname(p);
+    if (parent === p) break; // reached '/'
+    p = parent;
+  }
+  toCreate.reverse(); // shallowest → deepest so mkdir parents exist first
+  const created: MaskMountEntry[] = [];
+  for (let i = 0; i < toCreate.length; i++) {
+    const path = toCreate[i]!;
+    const isLeaf = i === toCreate.length - 1;
+    if (isLeaf && kind === 'file') writeFileSync(path, '');
+    else mkdirSync(path);
+    const st = lstatSync(path);
+    // record deepest-first so teardown removes children before parents
+    created.unshift({ path, kind: isLeaf ? kind : 'dir', dev: st.dev, ino: st.ino });
+  }
+  return created;
+}
+
+// Test-only surface for the deny-mask lifecycle (trust-boundary regression
+// coverage: manifest tamper defense, dev+ino identity, multi-level cleanup).
+export const __testOnly_maskMounts = {
+  MASK_MANIFEST_NAME,
+  createMaskMount,
+  writeMaskManifest,
+  reclaimMaskMounts,
+};
 
 export interface DirectSandboxSpawn {
   /** Replace the CLI binary with this (always 'bwrap'). */
@@ -399,24 +464,35 @@ export function prepareDirectSandbox(opts: {
     try { writeFileSync(f.path, '', { mode: 0o000 }); } catch { /* */ }
   }
   // bwrap cannot bind onto a MISSING target, and a missing target under a
-  // read-write parent would make bwrap materialise it on the host anyway. So
-  // pre-create every mask mountpoint that doesn't already exist — recording the
-  // ones WE created (with shape) in a persisted manifest so any teardown path
-  // (incl. after a daemon restart, when only sessionRoot is known) can
-  // rmdir/unlink-if-empty exactly those, never a user path. Pre-creating a
-  // DIRECTORY for a not-yet-existing deny also blocks the host from later
-  // creating a same-named FILE there — fail-closed, an accepted compat cost of
-  // never leaking a denied path.
+  // read-write parent would make bwrap materialise it on the host anyway (true
+  // for BOTH the ro-bind and the tmpfs mask branches). So pre-create every mask
+  // mountpoint that doesn't already exist — recording EACH host level we create
+  // (leaf + any missing ancestors, with dev+ino identity) in a persisted
+  // manifest so any teardown path (incl. after a daemon restart, when only
+  // sessionRoot is known) can rmdir/unlink-if-empty exactly those, never a user
+  // path. Pre-creating a DIRECTORY for a not-yet-existing deny also blocks the
+  // host from later creating a same-named FILE there — fail-closed, an accepted
+  // compat cost of never leaking a denied path.
+  //
+  // FAIL CLOSED: if creating a mountpoint OR persisting the manifest fails, roll
+  // back everything and abort the spawn — starting the session anyway would
+  // either break the mask (bwrap bind fails) or leak host mountpoints with no
+  // record to reclaim them.
   const createdMasks: MaskMountEntry[] = [];
-  for (const m of compiled.maskMounts) {
-    if (existsSync(m.path)) continue; // pre-existing host path — never our cleanup target
-    try {
-      if (m.kind === 'file') { mkdirSync(dirname(m.path), { recursive: true }); writeFileSync(m.path, ''); }
-      else mkdirSync(m.path, { recursive: true });
-      createdMasks.push(m);
-    } catch { /* parent read-only on host or race — bwrap bind will surface it */ }
+  try {
+    for (const m of compiled.maskMounts) {
+      createdMasks.push(...createMaskMount(m.path, m.kind));
+    }
+  } catch (err) {
+    rollbackSandboxSetup(sessionRoot);
+    console.error(`[sandbox] failed to pre-create deny mask mountpoint (${(err as Error)?.message ?? err}) — aborting spawn (fail closed)`);
+    return null;
   }
-  writeMaskManifest(sessionRoot, createdMasks);
+  if (!writeMaskManifest(sessionRoot, createdMasks)) {
+    rollbackSandboxSetup(sessionRoot);
+    console.error('[sandbox] failed to persist deny-mask cleanup manifest — aborting spawn (fail closed)');
+    return null;
+  }
 
   const args = [...compiled.args];
   // Shim bin at a fixed path under the fresh /run tmpfs — appended after the

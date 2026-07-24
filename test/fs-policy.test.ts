@@ -376,6 +376,41 @@ describe('compileToBwrap', () => {
     expect(args.slice(i, i + 3)).toEqual(['--symlink', 'usr/bin', '/bin']);
     expect(args).toContain('--unshare-net');
   });
+
+  it('white-in-black: deny WITH a deeper allow uses --tmpfs + deferred --remount-ro (mode-000 ro-bind cannot host a child submount)', () => {
+    const p = buildFsPolicy(ctx({
+      platform: 'linux', homeDir: '/home/u', botHome: '/home/u/.botmux/bots/cli_self',
+      botmuxHome: '/home/u/.botmux', sessionDataDir: '/home/u/.botmux/data', workingDir: '/home/u/proj',
+      userPaths: { deny: ['/home/u/proj/denied'], readWrite: ['/home/u/proj/denied/self'] },
+    }));
+    const { args, maskMounts } = compileToBwrap(p, opts);
+    const mask = args.indexOf('/home/u/proj/denied');
+    expect(args[mask - 1]).toBe('--tmpfs'); // NOT the 000 ro-bind (which can't host the child)
+    // the nested carve-out is bound (deeper, after the tmpfs)
+    const self = args.indexOf('/home/u/proj/denied/self');
+    expect(self).toBeGreaterThan(mask);
+    // re-sealed read-only AFTER the nested bind
+    const remount = args.lastIndexOf('/home/u/proj/denied');
+    expect(args[remount - 1]).toBe('--remount-ro');
+    expect(remount).toBeGreaterThan(self);
+    // still a tracked mask mountpoint (needs pre-create + cleanup — tmpfs onto a
+    // missing target also materialises a host mountpoint)
+    expect(maskMounts).toContainEqual({ path: '/home/u/proj/denied', kind: 'dir' });
+  });
+
+  it('redundant nested deny (deny /a + deny /a/b, no allow under a/b) is SKIPPED (ancestor mask already covers it; mounting on a RO mask would fail)', () => {
+    const p = buildFsPolicy(ctx({
+      platform: 'linux', homeDir: '/home/u', botHome: '/home/u/.botmux/bots/cli_self',
+      botmuxHome: '/home/u/.botmux', sessionDataDir: '/home/u/.botmux/data', workingDir: '/home/u/proj',
+      userPaths: { deny: ['/home/u/proj/a', '/home/u/proj/a/b'] },
+    }));
+    const { args, maskMounts } = compileToBwrap(p, opts);
+    // /a is masked (000 ro-bind), /a/b is NOT emitted (redundant — /a already hides it)
+    expect(args).toContain('/home/u/proj/a');
+    expect(args).not.toContain('/home/u/proj/a/b');
+    expect(maskMounts).toContainEqual({ path: '/home/u/proj/a', kind: 'dir' });
+    expect(maskMounts.some(m => m.path === '/home/u/proj/a/b')).toBe(false);
+  });
 });
 
 describe('migrateLegacySandboxFields', () => {

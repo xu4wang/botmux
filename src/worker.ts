@@ -6697,6 +6697,21 @@ async function spawnCli(
     const mandatoryDenyPaths: string[] = [];
     const mandatoryDenyRegexes: string[] = [];
     const mandatoryReadOnlyPaths: string[] = [];
+    // Linux: the per-session sandbox tree (`sandboxes/<sid>`) holds the deny-mask
+    // cleanup manifest + the mode-000 empty ro-bind SOURCES. If SESSION_DATA_DIR
+    // is configured INSIDE the working dir (a custom data dir under a RW-bound
+    // project), the project's readWrite rule would otherwise cover the whole
+    // tree and let the sandboxed CLI tamper with the manifest (→ trick teardown
+    // into deleting arbitrary host paths) or the empty sources. Deny the tree
+    // as a MANDATORY rule (user paths can't override); the outbox is re-granted
+    // readWrite via ctx.outbox as a deeper carve-out (the compiler masks the
+    // tree with a tmpfs that hosts the nested outbox bind, then remounts it RO —
+    // manifest/empties stay unreadable AND unwritable in-sandbox). bwrap reads
+    // ro-bind SOURCES from the host FS, so the empty masks still work even though
+    // the child can't see them.
+    if (process.platform === 'linux') {
+      mandatoryDenyPaths.push(join(canonical(dataDir), 'sandboxes', cfg.sessionId));
+    }
     readIsolationOriginCapabilityFile = process.platform === 'darwin'
       ? managedOriginCapabilityPath(dataDir, cfg.sessionId)
       : null;

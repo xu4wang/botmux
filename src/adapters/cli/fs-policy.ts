@@ -554,19 +554,43 @@ export function compileToBwrap(policy: FsPolicy, opts: CompileBwrapOpts): BwrapC
   for (const s of opts.symlinks ?? []) a.push('--symlink', s.target, s.path);
 
   const exposed: string[] = []; // non-deny paths emitted so far (for deny reachability)
+  const remountRo: string[] = []; // deny tmpfs masks to re-seal read-only after nested binds
   let emptyIdx = 0;
   for (const r of policy.rules) {
     if (r.access === 'deny') {
       if (!exposed.some(e => coversPath(e, r.path))) continue; // unreachable → already denied by default
-      if (opts.filePaths?.has(r.path)) {
-        // FILE-shaped deny: ro-bind a mode-000 empty placeholder file
+      // Does a DEEPER allow (white-in-black carve-out) live under this deny?
+      // e.g. readWrite /proj → deny /proj/x → readWrite /proj/x/self. If so the
+      // mask must be able to HOST a child submount — a mode-000 read-only bind
+      // can't (bwrap: "Can't mkdir …/self: Read-only file system"). Use a fresh
+      // `--tmpfs` mask (hides the real contents, accepts the nested bind) and
+      // re-seal it read-only with `--remount-ro` AFTER the nested binds are
+      // emitted. tmpfs writes are in-memory and NEVER touch the host; the mask
+      // is listable only for the carve-out's own path (inherent to white-in-black).
+      const hasNestedAllow = policy.rules.some(o =>
+        o.access !== 'deny' && o.path !== r.path && coversPath(r.path, o.path));
+      // A deny fully shadowed by a SHALLOWER deny, with NO allow carve-out under
+      // it, is REDUNDANT: the ancestor mask already hides everything below. Emit
+      // nothing — mounting a deeper mask onto the ancestor's mode-000 read-only
+      // mask would fail (bwrap can't mkdir the child mountpoint on a RO parent),
+      // and it would add nothing (the ancestor already denies the whole subtree).
+      const shadowedByDeny = !hasNestedAllow && policy.rules.some(o =>
+        o.access === 'deny' && o.path !== r.path && coversPath(o.path, r.path)
+        && exposed.some(e => coversPath(e, o.path)));
+      if (shadowedByDeny) continue;
+      if (hasNestedAllow) {
+        a.push('--tmpfs', r.path);
+        remountRo.push(r.path);
+        maskMounts.push({ path: r.path, kind: 'dir' });
+      } else if (opts.filePaths?.has(r.path)) {
+        // FILE-shaped leaf deny: ro-bind a mode-000 empty placeholder file
         // (unreadable + read-only).
         const empty = `${opts.emptiesDir}/mask-${emptyIdx++}`;
         emptyFiles.push({ path: empty, maskedPath: r.path });
         a.push('--ro-bind', empty, r.path);
         maskMounts.push({ path: r.path, kind: 'file' });
       } else {
-        // DIRECTORY-shaped deny (existing dir OR not-yet-existing path):
+        // DIRECTORY-shaped leaf deny (existing dir OR not-yet-existing path):
         // ro-bind the shared mode-000 empty dir → contents hidden, mount
         // read-only, and the mask itself unreadable (a real deny, not a
         // writable/listable tmpfs).
@@ -578,6 +602,11 @@ export function compileToBwrap(policy: FsPolicy, opts: CompileBwrapOpts): BwrapC
     a.push(r.access === 'readWrite' ? '--bind' : '--ro-bind', r.path, r.path);
     exposed.push(r.path);
   }
+  // Re-seal white-in-black deny masks read-only AFTER their nested carve-out
+  // binds were emitted (a --remount-ro before the child bind would block the
+  // mkdir; after it, the child submount keeps its own writability while the
+  // tmpfs parent becomes unwritable).
+  for (const p of remountRo) a.push('--remount-ro', p);
 
   a.push('--unshare-user', '--unshare-pid', '--unshare-ipc', '--unshare-uts', '--unshare-cgroup-try');
   if (!policy.net) a.push('--unshare-net');

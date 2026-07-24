@@ -49,6 +49,8 @@ const wp = vi.hoisted(() => ({ registry: null as Map<string, any> | null }));
 vi.mock('../src/core/worker-pool.js', () => ({
   forkWorker: vi.fn(),
   forkAdoptWorker: vi.fn(),
+  adoptSandboxBlocked: vi.fn((botCfg: any, session?: any) =>
+    botCfg?.sandbox === true || botCfg?.readIsolation === true || session?.sandbox === true || process.env.BOTMUX_SANDBOX === '1'),
   killStalePids: vi.fn(),
   getCurrentCliVersion: vi.fn(() => '1.0.0-test'),
   restoreUsageLimitRuntimeState: vi.fn(),

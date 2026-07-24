@@ -12,7 +12,7 @@ import * as sessionStore from '../services/session-store.js';
 import * as messageQueue from '../services/message-queue.js';
 import { downloadMessageResource, listChatBotMembers, UserTokenMissingError } from '../im/lark/client.js';
 import { logger } from '../utils/logger.js';
-import { forkWorker, sendWorkerInput, forkAdoptWorker, killStalePids, getCurrentCliVersion, restoreUsageLimitRuntimeState, setActiveSessionSafe, isRelayableRealSession, closeSession, getActiveSessionsRegistry, suspendWorker } from './worker-pool.js';
+import { forkWorker, sendWorkerInput, forkAdoptWorker, adoptSandboxBlocked, killStalePids, getCurrentCliVersion, restoreUsageLimitRuntimeState, setActiveSessionSafe, isRelayableRealSession, closeSession, getActiveSessionsRegistry, suspendWorker } from './worker-pool.js';
 import { createCliAdapterSync } from '../adapters/cli/registry.js';
 import { buildBotmuxShellHints } from '../adapters/cli/shared-hints.js';
 import {
@@ -1205,6 +1205,28 @@ export async function restoreActiveSessions(activeSessions: Map<string, DaemonSe
     // user-editable via /rename and must not change restore semantics.
     if (session.adoptedFrom) {
       const adopted = session.adoptedFrom as NonNullable<DaemonSession['adoptedFrom']>;
+      // Fail-closed BEFORE building an adopt DaemonSession: a sandbox-enabled
+      // session (frozen `session.sandbox`, or a bot that now requires the
+      // sandbox) can't attach to an already-running host CLI (confinement is
+      // spawn-time only). Convert it to a plain cold-start IN PLACE — clear the
+      // adopt metadata, normalize the "Adopt: …" title (else the next restart's
+      // legacy title-only branch below would permanently close it), persist —
+      // then fall through to the normal restore path so it registers/announces
+      // as an ordinary session, NOT an adopt row. Doing the conversion here (not
+      // via a worker-pool side-effect after announceSessionRow) keeps daemon
+      // orchestration state consistent.
+      let adoptBotCfg: { sandbox?: boolean; readIsolation?: boolean } = {};
+      try { adoptBotCfg = getBot(session.larkAppId ?? '').config; } catch { /* unknown bot → only the frozen decision matters */ }
+      if (adoptSandboxBlocked(adoptBotCfg, session)) {
+        logger.warn(`[${session.sessionId.substring(0, 8)}] sandbox session persisted as adopt — converting to cold-start (a sandbox can't wrap a live CLI)`);
+        session.adoptedFrom = undefined;
+        if (session.title?.startsWith('Adopt:')) {
+          const project = session.title.slice('Adopt:'.length).trim();
+          session.title = project || 'Session';
+        }
+        try { sessionStore.updateSession(session); } catch { /* best-effort */ }
+        // fall through: session.adoptedFrom is now unset → normal restore below
+      } else {
       const validation = adopted.zellijPaneId
         ? (typeof adopted.originalCliPid === 'number' && validateZellijAdoptTarget(adopted.zellijSession ?? '', adopted.zellijPaneId, adopted.originalCliPid, adopted.cliId) ? 'alive' : 'missing')
         : validateAdoptTargetState(adopted);
@@ -1266,6 +1288,7 @@ export async function restoreActiveSessions(activeSessions: Map<string, DaemonSe
       forkAdoptWorker(ds, { restoredFromMetadata: true });
       logger.info(`[${session.sessionId.substring(0, 8)}] Restored adopt session (target: ${adoptTargetLabel(adopted)}, scope: ${scope})`);
       continue;
+      }
     }
     // Title-only adopt sessions have no target metadata and can only come from
     // legacy records. They cannot be validated or safely restored.
