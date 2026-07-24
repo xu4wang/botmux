@@ -290,8 +290,10 @@ function writeMaskManifest(sessionRoot: string, created: MaskMountEntry[]): bool
   }
 }
 
-/** Reclaim the empty deny-mask mountpoints recorded in the manifest, then
- *  delete the manifest. Runs on ALL teardown paths. Fail-safe & NON-RECURSIVE:
+/** Reclaim a list of created-mountpoint entries (the IN-MEMORY truth). Runs on
+ *  ALL teardown paths — normal close reads the entries back from the manifest,
+ *  spawn-failure rollback passes the in-memory accumulator directly (the
+ *  manifest may never have been written). Fail-safe & NON-RECURSIVE:
  *  - rejects any entry whose path is non-absolute, contains `..`, or is a
  *    symlink on disk (a swapped entry can't trick us into deleting elsewhere);
  *  - IDENTITY-BINDS: removes only when the on-disk (dev, ino) still matches what
@@ -301,13 +303,9 @@ function writeMaskManifest(sessionRoot: string, created: MaskMountEntry[]): bool
  *  - a dir is removed with `rmdir` only (throws ENOTEMPTY if the host/a
  *    concurrent process wrote into it → content preserved, never rm -rf);
  *  - a file is `unlink`ed only when it is a regular, zero-byte file.
- *  MUST be called BEFORE removing sessionRoot (which holds the manifest). */
-function reclaimMaskMounts(sessionRoot: string): void {
-  const manifestPath = join(sessionRoot, MASK_MANIFEST_NAME);
-  let raw: string;
-  try { raw = readFileSync(manifestPath, 'utf8'); } catch { return; } // none created / already gone
-  let entries: unknown;
-  try { entries = JSON.parse(raw); } catch { return; }
+ *  Entries are processed in order; the caller records them deepest-first so a
+ *  child is removed before its now-empty parent. */
+function reclaimMaskEntries(entries: unknown): void {
   if (!Array.isArray(entries)) return;
   for (const e of entries) {
     if (!e || typeof e !== 'object') continue;
@@ -330,22 +328,45 @@ function reclaimMaskMounts(sessionRoot: string): void {
   }
 }
 
-/** Spawn-setup rollback: reclaim any empty mask mountpoints we pre-created,
- *  then drop the whole per-session tree. Used when prepareDirectSandbox bails
- *  AFTER masks were materialised (e.g. the MCP gateway socket check fails, or
- *  the manifest write failed — fail closed rather than leak). */
-function rollbackSandboxSetup(sessionRoot: string): void {
-  reclaimMaskMounts(sessionRoot);
+/** Reclaim the empty deny-mask mountpoints recorded in the persisted manifest,
+ *  then (implicitly) the manifest goes with the sessionRoot. Used by the NORMAL
+ *  teardown paths (close, reattach-close, stale sweep) — where the manifest was
+ *  written successfully. Spawn-failure rollback does NOT use this (it can't
+ *  trust a manifest that may never have been written); it passes the in-memory
+ *  accumulator to reclaimMaskEntries directly. MUST run BEFORE removing
+ *  sessionRoot (which holds the manifest). */
+function reclaimMaskMounts(sessionRoot: string): void {
+  const manifestPath = join(sessionRoot, MASK_MANIFEST_NAME);
+  let raw: string;
+  try { raw = readFileSync(manifestPath, 'utf8'); } catch { return; } // none created / already gone
+  let entries: unknown;
+  try { entries = JSON.parse(raw); } catch { return; }
+  reclaimMaskEntries(entries);
+}
+
+/** Spawn-setup rollback: reclaim the mountpoints we pre-created FROM THE
+ *  IN-MEMORY accumulator (NOT the manifest — on the failure paths the manifest
+ *  may never have been written, so reading it back would reclaim nothing and
+ *  leak every created ancestor), then drop the per-session tree. Used when
+ *  prepareDirectSandbox bails after masks were materialised (a mkdir/write
+ *  threw mid-way, the MCP gateway socket check fails, or the manifest write
+ *  itself fails). */
+function rollbackSandboxSetup(sessionRoot: string, createdMasks: MaskMountEntry[]): void {
+  reclaimMaskEntries(createdMasks);
   try { rmSync(sessionRoot, { recursive: true, force: true }); } catch { /* */ }
 }
 
-/** Create a mask mountpoint on the host (all missing ancestors too), recording
- *  EACH level we actually create — deepest first — with its (dev, ino) so
- *  teardown can rmdir-if-empty every level, not just the leaf. `kind` applies to
- *  the leaf; ancestors are always dirs. Returns the created entries (empty if
- *  the leaf already existed). Throws on failure so the caller can fail closed. */
-function createMaskMount(leaf: string, kind: 'dir' | 'file'): MaskMountEntry[] {
-  if (existsSync(leaf)) return []; // pre-existing host path — never our cleanup target
+/** Create a mask mountpoint on the host (all missing ancestors too), pushing
+ *  EACH level we actually create — deepest first — into the caller-owned
+ *  `sink` accumulator IMMEDIATELY (before attempting the next level), each with
+ *  its (dev, ino). This is what lets rollback reclaim partially-created chains:
+ *  if a deeper level throws (e.g. ENAMETOOLONG on the leaf), every ancestor we
+ *  already made is already in `sink` for the caller's rollback. `kind` applies
+ *  to the leaf; ancestors are always dirs. No-op when the leaf already exists
+ *  (a pre-existing host path is never our cleanup target). Throws on failure so
+ *  the caller can fail closed — with `sink` holding whatever succeeded. */
+function createMaskMount(leaf: string, kind: 'dir' | 'file', sink: MaskMountEntry[]): void {
+  if (existsSync(leaf)) return; // pre-existing host path — never our cleanup target
   // Walk up to the shallowest missing ancestor, creating each level so we can
   // record + later reclaim exactly what WE added (mkdir recursive would create
   // them but hide which levels were ours).
@@ -358,26 +379,28 @@ function createMaskMount(leaf: string, kind: 'dir' | 'file'): MaskMountEntry[] {
     p = parent;
   }
   toCreate.reverse(); // shallowest → deepest so mkdir parents exist first
-  const created: MaskMountEntry[] = [];
   for (let i = 0; i < toCreate.length; i++) {
     const path = toCreate[i]!;
     const isLeaf = i === toCreate.length - 1;
     if (isLeaf && kind === 'file') writeFileSync(path, '');
     else mkdirSync(path);
     const st = lstatSync(path);
-    // record deepest-first so teardown removes children before parents
-    created.unshift({ path, kind: isLeaf ? kind : 'dir', dev: st.dev, ino: st.ino });
+    // record deepest-first (unshift) so teardown removes children before parents
+    // — and record IMMEDIATELY so a throw on the next level still leaves this
+    // one visible to the caller's rollback.
+    sink.unshift({ path, kind: isLeaf ? kind : 'dir', dev: st.dev, ino: st.ino });
   }
-  return created;
 }
 
 // Test-only surface for the deny-mask lifecycle (trust-boundary regression
-// coverage: manifest tamper defense, dev+ino identity, multi-level cleanup).
+// coverage: manifest tamper defense, dev+ino identity, multi-level cleanup,
+// partial-create rollback).
 export const __testOnly_maskMounts = {
   MASK_MANIFEST_NAME,
   createMaskMount,
   writeMaskManifest,
   reclaimMaskMounts,
+  reclaimMaskEntries,
 };
 
 export interface DirectSandboxSpawn {
@@ -481,15 +504,17 @@ export function prepareDirectSandbox(opts: {
   const createdMasks: MaskMountEntry[] = [];
   try {
     for (const m of compiled.maskMounts) {
-      createdMasks.push(...createMaskMount(m.path, m.kind));
+      // createMaskMount pushes each level into createdMasks IMMEDIATELY, so a
+      // mid-chain throw still leaves the partial ancestors visible for rollback.
+      createMaskMount(m.path, m.kind, createdMasks);
     }
   } catch (err) {
-    rollbackSandboxSetup(sessionRoot);
+    rollbackSandboxSetup(sessionRoot, createdMasks);
     console.error(`[sandbox] failed to pre-create deny mask mountpoint (${(err as Error)?.message ?? err}) — aborting spawn (fail closed)`);
     return null;
   }
   if (!writeMaskManifest(sessionRoot, createdMasks)) {
-    rollbackSandboxSetup(sessionRoot);
+    rollbackSandboxSetup(sessionRoot, createdMasks);
     console.error('[sandbox] failed to persist deny-mask cleanup manifest — aborting spawn (fail closed)');
     return null;
   }
@@ -511,15 +536,15 @@ export function prepareDirectSandbox(opts: {
   if (opts.mcpGatewaySocketPath) {
     try {
       const socketPath = resolve(opts.mcpGatewaySocketPath);
-      if (!lstatSync(socketPath).isSocket()) { rollbackSandboxSetup(sessionRoot); return null; }
+      if (!lstatSync(socketPath).isSocket()) { rollbackSandboxSetup(sessionRoot, createdMasks); return null; }
       const hostDir = realpathSync(dirname(socketPath));
       const sandboxDir = '/run/botmux-mcp';
       args.push('--dir', sandboxDir, '--ro-bind', hostDir, sandboxDir);
       sandboxMcpGatewaySocketPath = join(sandboxDir, basename(socketPath));
     } catch {
       // Spawn-setup failure AFTER mask mountpoints were pre-created: reclaim the
-      // empty ones and drop the tree so nothing leaks onto the host.
-      rollbackSandboxSetup(sessionRoot);
+      // empty ones (from the in-memory list) and drop the tree so nothing leaks.
+      rollbackSandboxSetup(sessionRoot, createdMasks);
       return null;
     }
   }

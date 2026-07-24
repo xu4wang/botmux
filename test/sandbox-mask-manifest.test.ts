@@ -24,9 +24,17 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { __testOnly_maskMounts } from '../src/adapters/backend/sandbox.js';
 
-const { MASK_MANIFEST_NAME, createMaskMount, writeMaskManifest, reclaimMaskMounts } = __testOnly_maskMounts;
+const { MASK_MANIFEST_NAME, createMaskMount, writeMaskManifest, reclaimMaskMounts, reclaimMaskEntries } = __testOnly_maskMounts;
 const linux = process.platform === 'linux';
 const d = linux ? describe : describe.skip;
+
+// createMaskMount now pushes into a caller-owned sink (returns void); this
+// helper keeps the older "return the created entries" ergonomics for tests.
+function create(leaf: string, kind: 'dir' | 'file' = 'dir') {
+  const sink: any[] = [];
+  createMaskMount(leaf, kind, sink);
+  return sink;
+}
 
 d('deny-mask manifest lifecycle', () => {
   let root: string;
@@ -37,7 +45,7 @@ d('deny-mask manifest lifecycle', () => {
   it('createMaskMount records EACH created ancestor (multi-level), deepest first', () => {
     const leaf = join(root, 'proj/new/a/b'); // none of new/a/b exist
     mkdirSync(join(root, 'proj'), { recursive: true });
-    const created = createMaskMount(leaf, 'dir');
+    const created = create(leaf, 'dir');
     expect(created.map(e => e.path)).toEqual([
       join(root, 'proj/new/a/b'),
       join(root, 'proj/new/a'),
@@ -46,14 +54,14 @@ d('deny-mask manifest lifecycle', () => {
     for (const e of created) { expect(existsSync(e.path)).toBe(true); expect(typeof e.dev).toBe('number'); expect(typeof e.ino).toBe('number'); }
   });
 
-  it('createMaskMount returns [] for a pre-existing leaf (never our cleanup target)', () => {
+  it('createMaskMount records nothing for a pre-existing leaf (never our cleanup target)', () => {
     const leaf = join(root, 'exists');
     mkdirSync(leaf);
-    expect(createMaskMount(leaf, 'dir')).toEqual([]);
+    expect(create(leaf, 'dir')).toEqual([]);
   });
 
   it('reclaim removes the empty mounts we created (leaf + ancestors), keeps a non-empty one', () => {
-    const created = createMaskMount(join(root, 'proj/x/y'), 'dir');
+    const created = create(join(root, 'proj/x/y'), 'dir');
     // host writes into the leaf during the session
     writeFileSync(join(root, 'proj/x/y/hostdata'), 'z');
     expect(writeMaskManifest(sessionRoot(), created)).toBe(true);
@@ -64,7 +72,7 @@ d('deny-mask manifest lifecycle', () => {
   });
 
   it('reclaim removes a fully-empty multi-level chain', () => {
-    const created = createMaskMount(join(root, 'proj/p/q/r'), 'dir');
+    const created = create(join(root, 'proj/p/q/r'), 'dir');
     expect(writeMaskManifest(sessionRoot(), created)).toBe(true);
     reclaimMaskMounts(sessionRoot());
     expect(existsSync(join(root, 'proj/p/q/r'))).toBe(false);
@@ -98,7 +106,7 @@ d('deny-mask manifest lifecycle', () => {
     // race; the primary defense is that mask paths live under sessionRoot, which
     // is unwritable in-sandbox — see sandbox-mask-mounts.e2e.) Force a distinct
     // inode by creating a sibling first so the freed number isn't reused.
-    const created = createMaskMount(join(root, 'proj/z'), 'dir');
+    const created = create(join(root, 'proj/z'), 'dir');
     expect(writeMaskManifest(sessionRoot(), created)).toBe(true);
     const recorded = created[0]!;
     // simulate a foreign object at the same path with a definitely-different ino
@@ -124,5 +132,40 @@ d('deny-mask manifest lifecycle', () => {
     reclaimMaskMounts(sessionRoot());
     expect(existsSync(link)).toBe(true);
     expect(existsSync(realDir)).toBe(true);
+  });
+
+  // ── fault injection: rollback must reclaim from the IN-MEMORY accumulator,
+  // NOT the manifest (which may never have been written on a failure path). ──
+
+  it('FAIL-CLOSED: leaf create throws mid-chain → created ancestors are in the sink and reclaimed (no residue)', () => {
+    // A too-long leaf name makes the leaf write/mkdir throw AFTER its ancestors
+    // were created. The sink must already hold those ancestors so rollback can
+    // remove them — mirrors prepareDirectSandbox's try/catch → rollback path.
+    mkdirSync(join(root, 'base'), { recursive: true });
+    const parent = join(root, 'base/created-parent');
+    const badLeaf = join(parent, 'x'.repeat(300)); // ENAMETOOLONG on the leaf
+    const sink: any[] = [];
+    let threw = false;
+    try { createMaskMount(badLeaf, 'dir', sink); } catch { threw = true; }
+    expect(threw).toBe(true);
+    // the parent WAS created and IS recorded in the sink (immediate push)
+    expect(existsSync(parent)).toBe(true);
+    expect(sink.some(e => e.path === parent)).toBe(true);
+    // rollback path: reclaim from the in-memory sink (manifest was never written)
+    reclaimMaskEntries(sink);
+    expect(existsSync(parent)).toBe(false); // reclaimed — no permanent residue
+  });
+
+  it('FAIL-CLOSED: manifest write fails → reclaim from the in-memory list clears all created targets', () => {
+    // writeMaskManifest to a nonexistent parent dir returns false; the created
+    // mountpoints must still be reclaimed from the accumulator, not leaked.
+    const created = create(join(root, 'proj/m/n'), 'dir');
+    expect(created.length).toBeGreaterThan(0);
+    const badSessionRoot = join(root, 'does/not/exist');
+    expect(writeMaskManifest(badSessionRoot, created)).toBe(false);
+    // manifest read would find nothing → must use the in-memory list
+    reclaimMaskEntries(created);
+    expect(existsSync(join(root, 'proj/m/n'))).toBe(false);
+    expect(existsSync(join(root, 'proj/m'))).toBe(false);
   });
 });
