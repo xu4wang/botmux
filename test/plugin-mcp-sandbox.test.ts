@@ -226,4 +226,52 @@ describe.skipIf(process.platform !== 'linux' || !existsSync(builtCli))('plugin M
     },
     30_000,
   );
+
+  // Regression: the sandbox PATH must resolve bare `node` even when the host's
+  // lexical $PATH points ONLY at symlink-form dirs that don't exist in the fresh
+  // root (shared drive / ~/.local/bin symlink / fnm / nvm). Before the fix the
+  // trusted `botmux` shim's `exec node` failed `not found` → MCP gateway exited
+  // → Connection closed. The fix prepends dirname(realpath(process.execPath)).
+  it('resolves bare `node` under a hostile symlink-form host PATH (canonical exec dir prepended)', () => {
+    const botmuxHome = join(dataDir, '..');
+    const botHome = join(botmuxHome, 'bots', 'cli_test');
+    const outbox = join(dataDir, 'sandboxes', 'sid-path', 'outbox');
+    mkdirSync(botHome, { recursive: true });
+    mkdirSync(outbox, { recursive: true });
+    const policy = buildFsPolicy({
+      platform: 'linux', homeDir: home, botmuxHome, sessionDataDir: dataDir,
+      workingDir: project, currentAppId: 'cli_test', botHome, redirectedCliData: true,
+      execPaths: [dirname(process.execPath)], botmuxInstallRoot: resolve('.'), outbox,
+    });
+    policy.rules = policy.rules.filter(rule => rule.access === 'deny' || existsSync(rule.path));
+
+    // A PATH that leaves bare `node` unresolvable in the fresh root: a
+    // nonexistent symlink-form dir + the fixed system dirs (which have bwrap but
+    // NOT this test runner's node — its canonical dir is under ~/.local/share).
+    // Keep /usr/bin & /bin so ensureSandboxDeps still finds bwrap on the host.
+    vi.stubEnv('PATH', '/home/nonexistent/.local/bin:/usr/bin:/bin');
+    const sandbox = prepareDirectSandbox({
+      sessionId: 'sid-path', dataDir, policy, chdir: project, home,
+      cliBin: process.execPath, cliArgs: [],
+    });
+    if (!sandbox) return; // sandbox runtime unavailable
+    try {
+      const canonicalNodeDir = dirname(require('node:fs').realpathSync(process.execPath));
+      // PATH prepends the canonical node dir (shim dir stays first)
+      const dirs = sandbox.env.PATH.split(':');
+      expect(dirs[0]).toBe('/run/sbxbin');
+      expect(dirs).toContain(canonicalNodeDir);
+      expect(dirs.indexOf(canonicalNodeDir)).toBeLessThan(dirs.indexOf('/home/nonexistent/.local/bin'));
+      // and bare `node` actually runs inside the real sandbox
+      const commandIndex = sandbox.args.lastIndexOf('--');
+      const probe = spawnSync(sandbox.bin, [
+        ...sandbox.args.slice(0, commandIndex + 1),
+        '/bin/sh', '-c', 'command -v node >/dev/null && node -e "process.exit(0)"',
+      ], { cwd: project, env: { ...process.env, ...sandbox.env }, encoding: 'utf8', timeout: 10_000 });
+      expect(probe.error).toBeUndefined();
+      expect(probe.status, probe.stderr).toBe(0);
+    } finally {
+      sandbox.cleanup();
+    }
+  });
 });

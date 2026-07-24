@@ -551,10 +551,29 @@ export function prepareDirectSandbox(opts: {
 
   // Authoritative child env via bwrap --setenv (works on pty AND tmux — the
   // tmux backend only forwards a fixed whitelist).
+  //
+  // PATH: the fresh tmpfs root binds executable dirs at their CANONICAL host
+  // paths (the policy's readOnly exec rules are realpath'd by the worker). The
+  // host's own $PATH is LEXICAL and can point at symlink-form dirs (e.g.
+  // ~/.local/bin → a shared-drive/fnm/nvm path) that don't exist in the fresh
+  // root — so the trusted `botmux` shim's bare `node` would fail `not found`
+  // and the MCP gateway would exit (Connection closed). Prepend the canonical
+  // dirs of node + the CLI bin (deduped) so bare-name resolution always hits a
+  // bound path, THEN keep the host PATH as a lexical fallback.
+  const canonicalExecDirs: string[] = [];
+  const pushExecDir = (p: string | undefined) => {
+    if (!p) return;
+    try {
+      const dir = dirname(realpathSync(p));
+      if (isAbsolute(dir) && !canonicalExecDirs.includes(dir)) canonicalExecDirs.push(dir);
+    } catch { /* unresolvable — skip */ }
+  };
+  pushExecDir(process.execPath); // node
+  pushExecDir(opts.cliBin);      // the CLI binary
   const env: Record<string, string> = {
     HOME: opts.home,
     BOTMUX_SEND_RELAY: outbox,
-    PATH: `/run/sbxbin:${process.env.PATH ?? ''}`,
+    PATH: ['/run/sbxbin', ...canonicalExecDirs, process.env.PATH ?? ''].filter(Boolean).join(':'),
   };
   if (process.env.BOTMUX_DAEMON_IPC_PORT) {
     env.BOTMUX_DAEMON_IPC_PORT = process.env.BOTMUX_DAEMON_IPC_PORT;
