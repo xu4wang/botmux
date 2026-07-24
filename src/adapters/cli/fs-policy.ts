@@ -485,26 +485,23 @@ export interface CompileBwrapOpts {
   /** Top-level symlinks to replicate inside the tmpfs root (usrmerge /bin →
    *  usr/bin etc.). Resolved by the worker (impure readlink). */
   symlinks?: readonly { path: string; target: string }[];
-  /** A single EMPTY directory (worker-created, kept empty) ro-bound over
-   *  DIRECTORY-shaped deny rules. `--ro-bind emptyDir <deny>` masks the real
-   *  contents AND makes the mountpoint read-only — unlike `--tmpfs <deny>`,
-   *  which hid contents but left a WRITABLE tmpfs (a real deny must be neither
-   *  readable nor writable). */
+  /** A single MODE-000 EMPTY directory (worker-created, kept empty) ro-bound
+   *  over DIRECTORY-shaped deny rules. `--ro-bind emptyDir <deny>` masks the
+   *  real contents, makes the mountpoint read-only (unlike `--tmpfs <deny>`,
+   *  which left a WRITABLE tmpfs), AND — because the source is mode 000 — makes
+   *  the mask itself unreadable (`ls`/`cat` on it fail, not just "returns
+   *  empty"). A real deny is neither readable, listable, nor writable. */
   emptyDir: string;
-  /** Directory that will hold empty placeholder files for FILE-shaped deny
-   *  rules (dirs are masked with the empty ro-bind above; files need an empty
-   *  ro-bind source). The worker creates the returned `emptyFiles` first. */
+  /** Directory that will hold MODE-000 empty placeholder files for FILE-shaped
+   *  deny rules (dirs are masked with the empty ro-bind above; files need an
+   *  empty ro-bind source). The worker creates the returned `emptyFiles`
+   *  (mode 000) first. */
   emptiesDir: string;
   /** Rule paths that are FILES (not dirs) on the host — deny compiles to an
    *  empty-file bind, readOnly/readWrite file binds work as-is. Resolved by
-   *  the worker (impure stat). */
+   *  the worker (impure stat). A deny path NOT in this set is masked as a
+   *  DIRECTORY (covers both existing dirs and not-yet-existing paths). */
   filePaths?: ReadonlySet<string>;
-  /** deny rule paths that EXIST on the host (file or dir). A deny path that
-   *  does NOT exist is SKIPPED: binding onto a void mountpoint under a
-   *  read-write parent makes bwrap materialise that directory on the HOST
-   *  (leaking a real mountpoint into the user's tree), and there is nothing to
-   *  hide anyway. Resolved by the worker (impure stat). */
-  existingPaths?: ReadonlySet<string>;
   /** chdir target (the project working dir). */
   chdir: string;
 }
@@ -512,29 +509,45 @@ export interface CompileBwrapOpts {
 export interface BwrapCompilation {
   /** bwrap argv prefix (caller appends --setenv pairs and `-- cli args`). */
   args: string[];
-  /** Empty placeholder files the worker must create before spawn. */
+  /** Mode-000 empty placeholder files the worker must create before spawn
+   *  (the ro-bind SOURCE for file-shaped deny masks). */
   emptyFiles: { path: string; maskedPath: string }[];
+  /** Every deny mountpoint that was masked, with its shape. The worker must
+   *  ensure each exists on the host BEFORE spawn (bwrap cannot bind onto a
+   *  missing target, and a missing target under a read-write parent would make
+   *  bwrap materialise it on the host anyway) — creating a mountpoint the host
+   *  can write to even when the policy makes its PARENT read-only in-sandbox,
+   *  which is exactly what closes the "host/other process creates the secret
+   *  mid-session" TOCTOU. Mountpoints the worker itself had to create (didn't
+   *  pre-exist) are removed at teardown IFF still empty (never a recursive rm —
+   *  content written by the host/a concurrent process is preserved). */
+  maskMounts: { path: string; kind: 'dir' | 'file' }[];
 }
 
 /**
  * Compile the policy to a bwrap argv prefix. Deny-by-default is bwrap's
  * natural shape: a fresh tmpfs root, then ONLY the rule paths are bound in
  * (later mounts win → emitting shallow→deep gives deepest-rule-wins, matching
- * accessForPath()). deny rules materialize as READ-ONLY empty masks (empty-dir
- * ro-bind for dirs, empty-file ro-bind for files) and are only emitted when
- * they (a) sit under an exposed tree — outside it they're unreachable already,
- * and bwrap would fail mounting onto a void path — AND (b) actually EXIST on
- * the host: a nonexistent deny under a read-write parent would otherwise make
- * bwrap create the mountpoint on the HOST, and there is nothing to hide.
+ * accessForPath()). deny rules materialize as READ-ONLY, UNREADABLE empty
+ * masks (mode-000 empty-dir ro-bind for dirs, mode-000 empty-file ro-bind for
+ * files) and are emitted whenever they sit under an exposed tree — outside it
+ * they're unreachable already (deny-by-default), and bwrap would fail mounting
+ * onto a void path.
  *
- * NOTE the masks are `--ro-bind` (NOT `--tmpfs`): a `--tmpfs <deny>` mount is
- * WRITABLE inside the sandbox, so it hides the real contents but still lets the
- * CLI write into the denied path — not a real deny. A read-only bind of an
- * empty source is both unreadable (no real contents) and unwritable.
+ * Two properties this must preserve (both cost real blockers in review):
+ *  1. The mask is `--ro-bind` of an EMPTY source, NOT `--tmpfs`: a `--tmpfs
+ *     <deny>` mount is WRITABLE inside the sandbox, so it hid the real contents
+ *     but still let the CLI write into the denied path — not a real deny.
+ *  2. A deny path is masked EVEN WHEN IT DOES NOT EXIST YET. Skipping absent
+ *     denies left the path inside the read-write parent bind, so the sandbox
+ *     could `mkdir`+write it straight onto the host, and anything the host
+ *     created there mid-session became readable (a stat→exec TOCTOU). The
+ *     worker pre-creates the mountpoint on the host so the mask always binds.
  */
 export function compileToBwrap(policy: FsPolicy, opts: CompileBwrapOpts): BwrapCompilation {
   const a: string[] = [];
   const emptyFiles: { path: string; maskedPath: string }[] = [];
+  const maskMounts: { path: string; kind: 'dir' | 'file' }[] = [];
   a.push('--tmpfs', '/');
   a.push('--proc', '/proc', '--dev', '/dev');
   a.push('--tmpfs', '/tmp', '--tmpfs', '/run', '--tmpfs', '/var/tmp', '--tmpfs', '/dev/shm');
@@ -545,21 +558,20 @@ export function compileToBwrap(policy: FsPolicy, opts: CompileBwrapOpts): BwrapC
   for (const r of policy.rules) {
     if (r.access === 'deny') {
       if (!exposed.some(e => coversPath(e, r.path))) continue; // unreachable → already denied by default
-      // A deny path that does not exist on the host must NOT be bound: bwrap
-      // would create the mountpoint in the read-write parent on the host, and
-      // there is no real content to mask. Deny-by-default already covers it if
-      // it's ever created later inside the (read-only) exposed tree.
-      if (opts.existingPaths && !opts.existingPaths.has(r.path)) continue;
       if (opts.filePaths?.has(r.path)) {
-        // FILE-shaped deny: ro-bind an empty placeholder file (unreadable
-        // contents + read-only).
+        // FILE-shaped deny: ro-bind a mode-000 empty placeholder file
+        // (unreadable + read-only).
         const empty = `${opts.emptiesDir}/mask-${emptyIdx++}`;
         emptyFiles.push({ path: empty, maskedPath: r.path });
         a.push('--ro-bind', empty, r.path);
+        maskMounts.push({ path: r.path, kind: 'file' });
       } else {
-        // DIRECTORY-shaped deny: ro-bind the shared empty dir → contents hidden
-        // AND the mount is read-only (a real deny, not a writable tmpfs).
+        // DIRECTORY-shaped deny (existing dir OR not-yet-existing path):
+        // ro-bind the shared mode-000 empty dir → contents hidden, mount
+        // read-only, and the mask itself unreadable (a real deny, not a
+        // writable/listable tmpfs).
         a.push('--ro-bind', opts.emptyDir, r.path);
+        maskMounts.push({ path: r.path, kind: 'dir' });
       }
       continue;
     }
@@ -570,7 +582,7 @@ export function compileToBwrap(policy: FsPolicy, opts: CompileBwrapOpts): BwrapC
   a.push('--unshare-user', '--unshare-pid', '--unshare-ipc', '--unshare-uts', '--unshare-cgroup-try');
   if (!policy.net) a.push('--unshare-net');
   a.push('--die-with-parent', '--new-session', '--chdir', opts.chdir);
-  return { args: a, emptyFiles };
+  return { args: a, emptyFiles, maskMounts };
 }
 
 // ───────────────────────────── legacy config migration ───────────────────────

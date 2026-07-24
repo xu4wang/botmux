@@ -332,6 +332,7 @@ export const messages: Record<string, string> = {
   'cmd.adopt.no_sessions': 'No adoptable CLI session found.',
   'cmd.adopt.pane_not_found': 'tmux pane not found: {pane}',
   'cmd.adopt.target_exited': '⚠️ Target CLI session has exited.',
+  'cmd.adopt.sandbox_blocked': '🛡️ This bot has the file sandbox enabled and cannot /adopt an already-running CLI (a sandbox can only be applied at spawn time, never retro-fitted around a live process). Just send a message to cold-start a new, sandboxed CLI session instead.',
   'cmd.adopt.success': '📡 Adopted {cliName} · {project} ({pane})',
   'cmd.adopt.resume_success': '↩️ Resumed {cliName} session · {project} — “{title}”',
   'cmd.adopt.resume_not_found': '⚠️ That past session no longer exists or is already in use ({id})',

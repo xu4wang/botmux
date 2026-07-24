@@ -24,7 +24,7 @@ import { chatAppLink, normalizeBrand } from '../im/lark/lark-hosts.js';
 import { claimPairing } from '../services/pairing-store.js';
 import { logger } from '../utils/logger.js';
 import { scheduleTimeZone } from '../utils/timezone.js';
-import { killWorker, suspendWorker, forkWorker, forkAdoptWorker, getCurrentCliVersion, postFreshStreamingCard, postPrivateSnapshotCard, resolvePrivateCardAudience, deliverEphemeralOrReply, deliverWritableTerminalCardTo } from './worker-pool.js';
+import { killWorker, suspendWorker, forkWorker, forkAdoptWorker, adoptSandboxBlocked, getCurrentCliVersion, postFreshStreamingCard, postPrivateSnapshotCard, resolvePrivateCardAudience, deliverEphemeralOrReply, deliverWritableTerminalCardTo } from './worker-pool.js';
 import {
   expandHome,
   getSessionWorkingDir,
@@ -3420,6 +3420,19 @@ export async function startAdoptSession(
   const loc: Locale = localeForBot(ds.larkAppId ?? larkAppId);
 
   const zellij = isZellijTarget(target);
+
+  // Fail-closed at the ENTRY point, BEFORE any target validation or state
+  // mutation: a sandbox-enabled bot can't wrap an already-running CLI
+  // (confinement is spawn-time only). Reject here so `adoptedFrom` is never
+  // persisted and "adopted" is never replied — otherwise the session would
+  // become a worker=null pseudo-adopt whose next message still routes as a
+  // bridge/adopt session. Covers both real host-process adopt entries
+  // (`/adopt <pane>` and the adopt_select card, which both route here).
+  if (adoptSandboxBlocked(getBot(ds.larkAppId ?? larkAppId).config)) {
+    await sessionReply(sessionAnchorId(ds), t('cmd.adopt.sandbox_blocked', undefined, loc));
+    return;
+  }
+
   const valid = zellij
     ? validateZellijAdoptTarget(target.zellijSession, target.zellijPaneId, target.cliPid, target.cliId)
     : validateAdoptTarget(target);

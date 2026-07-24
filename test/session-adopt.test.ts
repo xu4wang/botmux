@@ -10,7 +10,7 @@
  *
  * Run:  pnpm vitest run test/session-adopt.test.ts
  */
-import { describe, it, expect, beforeEach, vi } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 
 // ─── Mocks ────────────────────────────────────────────────────────────────
 
@@ -434,6 +434,54 @@ describe('Adopt card actions', () => {
 
       // Should silently return without error
       expect(killWorker).not.toHaveBeenCalled();
+    });
+  });
+
+  // ── blocker #3: startAdoptSession fail-closes at the ENTRY for sandbox bots ──
+  // Both real host-process adopt entries (/adopt <pane> and the adopt_select
+  // card) route through startAdoptSession, so guarding it covers both. The
+  // guard fires FIRST — before target validation or any state mutation — so
+  // `adoptedFrom` is never persisted and "adopted" is never replied.
+  describe('startAdoptSession sandbox guard (entry point)', () => {
+    const target = {
+      source: 'tmux' as const,
+      tmuxTarget: '0:1.0',
+      cliPid: 4242,
+      sessionId: 'host-cli',
+      cliId: 'claude-code' as const,
+      cwd: '/repo',
+      paneCols: 80,
+      paneRows: 24,
+    };
+
+    it('sandbox:true bot → replies the sandbox-blocked notice, never persists adoptedFrom', async () => {
+      vi.mocked(getBot).mockReturnValue({
+        config: { larkAppId: APP_ID, larkAppSecret: 'secret', cliId: 'claude-code', sandbox: true },
+        resolvedAllowedUsers: [], botOpenId: 'ou_bot',
+      } as any);
+      const { startAdoptSession } = await import('../src/core/command-handler.js');
+      const ds = makeDaemonSession();
+      const deps = makeDeps(new Map());
+
+      await startAdoptSession(target, ds, deps as any, APP_ID);
+
+      // guard fired before validation/mutation
+      expect(ds.adoptedFrom).toBeUndefined();
+      expect(ds.session.adoptedFrom).toBeUndefined();
+      expect(sessionStore.updateSession).not.toHaveBeenCalled();
+      const replies = (deps.sessionReply as any).mock.calls.map((c: any[]) => c[1]).join('\n');
+      expect(replies).toContain('文件沙盒'); // the sandbox_blocked notice
+      expect(replies).not.toContain('已接入'); // never the success message
+    });
+
+    it('readIsolation / global BOTMUX_SANDBOX also block via the shared predicate', async () => {
+      const { adoptSandboxBlocked } = await import('../src/core/worker-pool.js');
+      expect(adoptSandboxBlocked({ readIsolation: true })).toBe(true);
+      expect(adoptSandboxBlocked({ sandbox: true })).toBe(true);
+      expect(adoptSandboxBlocked({})).toBe(false);
+      vi.stubEnv('BOTMUX_SANDBOX', '1');
+      expect(adoptSandboxBlocked({})).toBe(true);
+      vi.unstubAllEnvs();
     });
   });
 });

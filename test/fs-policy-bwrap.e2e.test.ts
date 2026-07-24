@@ -1,30 +1,32 @@
 /**
  * Linux bwrap e2e: compile a real FsPolicy → bwrap argv, launch real processes
- * under bubblewrap, and assert the three access tiers actually hold at the
- * KERNEL level (not just in the pure accessForPath model). Skipped off Linux
- * and when bwrap / unprivileged user namespaces are unavailable.
+ * under bubblewrap, and assert the three access tiers hold at the KERNEL level
+ * (not just in the pure accessForPath model). Skipped off Linux and when bwrap
+ * / unprivileged user namespaces are unavailable.
  *
- * This is the guard for blocker #1 (2026-07-24 review): the previous compiler
- * masked DIRECTORY-shaped deny rules with `--tmpfs <path>`, which hides the
- * real contents but leaves a WRITABLE tmpfs inside the sandbox — so a "deny"
- * path was still writable. And a deny path that did NOT exist on the host got a
- * mount that bwrap materialised in the read-write PARENT, leaking a real
- * mountpoint onto the host tree. The fix: ro-bind an empty dir over existing
- * dir denies (unreadable + unwritable), and SKIP nonexistent denies entirely.
+ * Guards the blocker-1 findings from the 2026-07-24 review:
+ *  (a) DIRECTORY deny masked with `--tmpfs` was WRITABLE inside the sandbox —
+ *      hid contents but let the CLI write into the "denied" path. Fixed with a
+ *      read-only bind of a mode-000 empty source.
+ *  (b) A nonexistent deny was SKIPPED, leaving the path inside the read-write
+ *      parent bind: the sandbox could mkdir+write it onto the host, and the
+ *      host creating a secret there mid-session became readable (stat→exec
+ *      TOCTOU). Fixed by ALWAYS masking a reachable deny (worker pre-creates
+ *      the mountpoint so the empty mask always binds).
+ *  (c) 0755/0644 masks were themselves readable (`ls`/`cat` succeeded on the
+ *      empty mask). Fixed with mode 000 → the access command itself fails.
  *
- * These assertions run the compiler exactly as the worker does: resolve
- * symlinks, split file- vs dir-shaped denies, record which deny paths exist,
- * pre-create the empty placeholder files, then invoke bwrap.
+ * This runs the compiler exactly as the worker does: resolve symlinks, split
+ * file- vs dir-shaped denies, mode-000 the empty sources, pre-create missing
+ * mask mountpoints, then invoke bwrap.
  */
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import { spawnSync } from 'node:child_process';
-import { mkdtempSync, rmSync, writeFileSync, mkdirSync, realpathSync, existsSync, statSync, lstatSync, readlinkSync } from 'node:fs';
+import { mkdtempSync, rmSync, rmdirSync, writeFileSync, mkdirSync, chmodSync, realpathSync, existsSync, statSync, lstatSync, readlinkSync } from 'node:fs';
 import { tmpdir, homedir } from 'node:os';
 import { join, dirname } from 'node:path';
 import { buildFsPolicy, compileToBwrap } from '../src/adapters/cli/fs-policy.js';
 
-// bwrap + working unprivileged user namespaces are both required. Some CI
-// kernels disable userns; probe with the exact unshare flags the compiler emits.
 const bwrapUsable = process.platform === 'linux'
   && spawnSync('sh', ['-c', 'command -v bwrap'], { stdio: 'ignore' }).status === 0
   && spawnSync('bwrap', [
@@ -43,18 +45,14 @@ d('bwrap three-tier enforcement (real bubblewrap)', () => {
   let S: string;
   const canonical = (p: string) => { try { return realpathSync(p); } catch { return p; } };
 
-  // Build the bwrap argv prefix the SAME way the worker does, for a policy with
-  // an extra deny/readOnly set under the project.
-  function buildArgs(extra: { existDenyDir?: boolean; ghostDenyDir?: boolean; denyFile?: boolean }) {
+  // Build the bwrap argv the SAME way the worker does (deny masks: mode-000
+  // empty sources, missing mountpoints pre-created). Returns the created-mask
+  // list too so cleanup tests can assert rmdir-if-empty.
+  function build(extraDeny: string[]) {
     const emptiesDir = join(S, 'sbx/empties');
     const emptyDir = join(S, 'sbx/empty');
     mkdirSync(emptiesDir, { recursive: true });
     mkdirSync(emptyDir, { recursive: true });
-
-    const deny: string[] = [];
-    if (extra.existDenyDir) deny.push(join(S, 'proj/secrets'));
-    if (extra.ghostDenyDir) deny.push(join(S, 'proj/ghost')); // never created on host
-    if (extra.denyFile) deny.push(join(S, 'proj/.env'));
 
     const policy = buildFsPolicy({
       platform: 'linux', homeDir: canonical(homedir()),
@@ -63,10 +61,9 @@ d('bwrap three-tier enforcement (real bubblewrap)', () => {
       workingDir: join(S, 'proj'), currentAppId: 'cli_e2e', botHome: join(S, 'botmux-home/bots/cli_e2e'),
       redirectedCliData: true,
       execPaths: [dirname(canonical(process.execPath))],
-      userPaths: { readOnly: [join(S, 'ref')], deny },
+      userPaths: { readOnly: [join(S, 'ref')], deny: extraDeny },
       net: true, writeRegexes: [],
     });
-    // Existence-filter the ALLOW rules exactly like the worker (deny kept).
     policy.rules = policy.rules.filter(r => r.access === 'deny' || existsSync(r.path));
 
     const symlinks: { path: string; target: string }[] = [];
@@ -74,21 +71,25 @@ d('bwrap three-tier enforcement (real bubblewrap)', () => {
       try { if (lstatSync(p).isSymbolicLink()) symlinks.push({ path: p, target: readlinkSync(p) }); } catch { /* */ }
     }
     const filePaths = new Set<string>();
-    const existingPaths = new Set<string>();
     for (const r of policy.rules) {
       if (r.access !== 'deny') continue;
-      try { const st = statSync(r.path); existingPaths.add(r.path); if (st.isFile()) filePaths.add(r.path); } catch { /* */ }
+      try { if (statSync(r.path).isFile()) filePaths.add(r.path); } catch { /* absent → dir mask */ }
     }
-    const compiled = compileToBwrap(policy, { symlinks, emptyDir, emptiesDir, filePaths, existingPaths, chdir: join(S, 'proj') });
-    for (const f of compiled.emptyFiles) { try { writeFileSync(f.path, ''); } catch { /* */ } }
-    // Replicate any non-usrmerge top-level dirs the child needs but the policy
-    // didn't cover (none needed here: /usr + execPaths carry node).
-    return compiled.args;
+    const compiled = compileToBwrap(policy, { symlinks, emptyDir, emptiesDir, filePaths, chdir: join(S, 'proj') });
+    chmodSync(emptyDir, 0o000);
+    for (const f of compiled.emptyFiles) writeFileSync(f.path, '', { mode: 0o000 });
+    const created: { path: string; kind: 'dir' | 'file' }[] = [];
+    for (const m of compiled.maskMounts) {
+      if (existsSync(m.path)) continue;
+      if (m.kind === 'file') { mkdirSync(dirname(m.path), { recursive: true }); writeFileSync(m.path, ''); }
+      else mkdirSync(m.path, { recursive: true });
+      created.push(m);
+    }
+    return { args: compiled.args, created };
   }
 
-  // Run a shell command string inside the sandbox; returns {status, out}.
-  function run(extra: Parameters<typeof buildArgs>[0], cmd: string) {
-    const r = spawnSync('bwrap', [...buildArgs(extra), '/bin/sh', '-c', cmd], { encoding: 'utf8' });
+  function run(args: string[], cmd: string) {
+    const r = spawnSync('bwrap', [...args, '/bin/sh', '-c', cmd], { encoding: 'utf8' });
     return { status: r.status, out: `${r.stdout ?? ''}${r.stderr ?? ''}` };
   }
 
@@ -105,44 +106,86 @@ d('bwrap three-tier enforcement (real bubblewrap)', () => {
   afterAll(() => { if (S) rmSync(S, { recursive: true, force: true }); });
 
   it('readWrite: reads AND writes the project', () => {
-    expect(run({}, `cat ${JSON.stringify(join(S, 'proj/readme.md'))}`).status).toBe(0);
-    expect(run({}, `echo hi > ${JSON.stringify(join(S, 'proj/work/new.txt'))}`).status).toBe(0);
+    const { args } = build([]);
+    expect(run(args, `cat ${JSON.stringify(join(S, 'proj/readme.md'))}`).status).toBe(0);
+    expect(run(args, `echo hi > ${JSON.stringify(join(S, 'proj/work/new.txt'))}`).status).toBe(0);
   });
 
   it('readOnly: reads but cannot write', () => {
-    expect(run({}, `cat ${JSON.stringify(join(S, 'ref/doc.md'))}`).status).toBe(0);
-    expect(run({}, `echo x > ${JSON.stringify(join(S, 'ref/hack'))}`).status).not.toBe(0);
+    const { args } = build([]);
+    expect(run(args, `cat ${JSON.stringify(join(S, 'ref/doc.md'))}`).status).toBe(0);
+    expect(run(args, `echo x > ${JSON.stringify(join(S, 'ref/hack'))}`).status).not.toBe(0);
   });
 
-  it('deny DIR under a readWrite tree: real content is NOT readable', () => {
-    // masked by an empty ro-bind → the real key.txt is invisible
-    const r = run({ existDenyDir: true }, `cat ${JSON.stringify(join(S, 'proj/secrets/key.txt'))}`);
-    expect(r.status).not.toBe(0);
-    expect(r.out).not.toContain('TOPSECRET');
+  it('deny DIR (existing): real content unreadable AND the mask itself is unreadable (mode 000)', () => {
+    const dir = join(S, 'proj/secrets');
+    const { args } = build([dir]);
+    const read = run(args, `cat ${JSON.stringify(join(dir, 'key.txt'))}`);
+    expect(read.status).not.toBe(0);
+    expect(read.out).not.toContain('TOPSECRET');
+    // the mask itself must not even be listable (000, not an empty-but-readable dir)
+    const ls = run(args, `ls ${JSON.stringify(dir)}`);
+    expect(ls.status).not.toBe(0);
   });
 
-  it('deny DIR under a readWrite tree: is NOT writable (regression — was a writable tmpfs)', () => {
-    // The core blocker-1 bug: `--tmpfs <deny>` let the child write into the
-    // denied dir. A read-only empty bind must reject the write.
-    const evil = join(S, 'proj/secrets/evil.txt');
-    const r = run({ existDenyDir: true }, `echo PWNED > ${JSON.stringify(evil)}`);
-    expect(r.status).not.toBe(0);
-    // and nothing leaked back onto the host
-    expect(existsSync(evil)).toBe(false);
+  it('deny DIR (existing): NOT writable — regression guard for the writable-tmpfs bug', () => {
+    const dir = join(S, 'proj/secrets');
+    const evil = join(dir, 'evil.txt');
+    const { args } = build([dir]);
+    expect(run(args, `echo PWNED > ${JSON.stringify(evil)}`).status).not.toBe(0);
+    expect(existsSync(evil)).toBe(false); // nothing leaked to the host
   });
 
-  it('deny FILE under a readWrite tree: content hidden, not writable', () => {
-    const r = run({ denyFile: true }, `cat ${JSON.stringify(join(S, 'proj/.env'))}; echo x > ${JSON.stringify(join(S, 'proj/.env'))} && echo WROTE`);
+  it('deny FILE (existing): content hidden, cat fails (000), write rejected', () => {
+    const f = join(S, 'proj/.env');
+    const { args } = build([f]);
+    const r = run(args, `cat ${JSON.stringify(f)}; echo x > ${JSON.stringify(f)} && echo WROTE`);
     expect(r.out).not.toContain('API_KEY');
     expect(r.out).not.toContain('WROTE');
   });
 
-  it('NONEXISTENT deny under a readWrite parent: bwrap creates NO host mountpoint (regression)', () => {
-    const ghost = join(S, 'proj/ghost');
-    expect(existsSync(ghost)).toBe(false);
-    // The deny rule for a nonexistent path must be SKIPPED — otherwise bwrap
-    // materialises `proj/ghost` in the read-write parent on the HOST.
-    run({ ghostDenyDir: true }, 'true');
-    expect(existsSync(ghost)).toBe(false);
+  it('NONEXISTENT deny under a RW parent: sandbox mkdir/write is REJECTED and nothing lands on the host', () => {
+    const ghost = join(S, 'proj/ghost'); // never created as a real secret
+    expect(existsSync(join(ghost, 'x'))).toBe(false);
+    const { args } = build([ghost]);
+    const r = run(args, `mkdir -p ${JSON.stringify(join(ghost, 'sub'))} 2>&1; echo LEAK > ${JSON.stringify(join(ghost, 'secret'))} 2>&1 && echo WROTE`);
+    expect(r.out).not.toContain('WROTE');
+    expect(existsSync(join(ghost, 'secret'))).toBe(false);
+    expect(existsSync(join(ghost, 'sub'))).toBe(false);
+  });
+
+  it('RO parent + deny created by the HOST mid-session: sandbox still cannot read it', () => {
+    // ref/ is readOnly; ref/private does NOT exist at build time. The mask must
+    // still be installed so a host-created secret is unreadable in-sandbox.
+    const priv = join(S, 'ref/private');
+    rmSync(priv, { recursive: true, force: true });
+    const { args } = build([priv]);
+    // simulate the host/another process creating the secret AFTER the mask was
+    // installed (the compiler is stat-free; the worker pre-created the mount).
+    // Under the mask, the in-sandbox view is the mode-000 empty source, so even
+    // if the host writes into the REAL dir, the sandbox sees EPERM.
+    writeFileSync(join(priv, 'k'), 'LATESECRET');
+    const r = run(args, `cat ${JSON.stringify(join(priv, 'k'))}`);
+    expect(r.status).not.toBe(0);
+    expect(r.out).not.toContain('LATESECRET');
+    rmSync(priv, { recursive: true, force: true });
+  });
+
+  it('cleanup: rmdir-if-empty removes a pre-created empty mount, KEEPS one the host wrote into', () => {
+    const ghostEmpty = join(S, 'proj/ghost-empty');
+    const ghostFilled = join(S, 'proj/ghost-filled');
+    rmSync(ghostEmpty, { recursive: true, force: true });
+    rmSync(ghostFilled, { recursive: true, force: true });
+    const { created } = build([ghostEmpty, ghostFilled]);
+    expect(created.map(m => m.path).sort()).toEqual([ghostFilled, ghostEmpty].sort());
+    // host writes into one of them during the session
+    writeFileSync(join(ghostFilled, 'hostdata'), 'x');
+    // reclaim: rmdir only empty ones (mirrors reclaimMaskMounts semantics)
+    for (const m of created) {
+      try { rmdirSync(m.path); } catch { /* ENOTEMPTY → kept */ }
+    }
+    expect(existsSync(ghostEmpty)).toBe(false); // empty → reclaimed
+    expect(existsSync(ghostFilled)).toBe(true); // non-empty → preserved, never rm -rf
+    rmSync(ghostFilled, { recursive: true, force: true });
   });
 });

@@ -3827,6 +3827,21 @@ export const __testOnly_finalOutputDedupeKey = finalOutputDedupeKey;
 
 // ─── Fork adopt worker ──────────────────────────────────────────────────────
 
+/**
+ * Is the file sandbox active for this bot such that /adopt must be refused?
+ * A sandbox can only be established at spawn time (bwrap wrap / Seatbelt
+ * profile); adopt attaches to an ALREADY-running host process, so it could only
+ * ever run UNsandboxed. Covers all three activation sources: legacy per-bot
+ * `readIsolation`, the new per-bot `sandbox`, and the global `BOTMUX_SANDBOX=1`
+ * (sandboxEnabled()). Callers should reject the adopt at the ENTRY point (before
+ * persisting `adoptedFrom` / replying "adopted") — see command-handler's
+ * `/adopt`, the adopt_select card, and daemon restore. Resume/cold-start is
+ * unaffected: those spawn a fresh CLI, which the sandbox wraps normally.
+ */
+export function adoptSandboxBlocked(botCfg: { sandbox?: boolean; readIsolation?: boolean }): boolean {
+  return botCfg.sandbox === true || botCfg.readIsolation === true || sandboxEnabled();
+}
+
 export function forkAdoptWorker(ds: DaemonSession, opts?: { restoredFromMetadata?: boolean }): void {
   const cb = requireCallbacks();
   const workerPath = join(__dirname, '..', 'worker.js');
@@ -3841,16 +3856,22 @@ export function forkAdoptWorker(ds: DaemonSession, opts?: { restoredFromMetadata
   // to an existing host pane/process, and confinement (bwrap wrap on Linux /
   // Seatbelt profile on macOS) can only be established at spawn time — there is
   // no way to retro-fit a sandbox around a live process. Refuse to adopt when
-  // the sandbox is active for this bot rather than run it UNsandboxed; it will
-  // cold-start (sandboxed) via forkWorker/normal resume on the next message.
-  // Covers all three activation sources: legacy per-bot `readIsolation`, the new
-  // per-bot `sandbox`, and the global `BOTMUX_SANDBOX=1` (sandboxEnabled()).
-  // (Codex review #2, fail-closed; extended for the unified fs-policy sandbox.)
-  const sandboxActiveForBot = botCfg.sandbox === true
-    || botCfg.readIsolation === true
-    || sandboxEnabled();
-  if (sandboxActiveForBot) {
-    logger.warn(`[${t}] sandbox-enabled bot: refusing to adopt existing CLI (would run unsandboxed); will cold-start sandboxed on next message`);
+  // the sandbox is active for this bot rather than run it UNsandboxed. Real
+  // adopt entry points (`/adopt`, the adopt_select card, transfer) reject the
+  // adopt BEFORE persisting `adoptedFrom`; this is the last-line fail-closed
+  // guard for the daemon-restore path, which clears the stale metadata below.
+  if (adoptSandboxBlocked(botCfg)) {
+    logger.warn(`[${t}] sandbox-enabled bot: refusing to adopt existing CLI (would run unsandboxed)`);
+    // Restore reached here with persisted adopt metadata (a bot that flipped to
+    // sandbox after the adopt was recorded). Strip the stale adopt state so the
+    // session doesn't linger as a worker=null pseudo-adopt whose NEXT message
+    // would still be routed as a bridge/adopt session. It cold-starts sandboxed
+    // via the normal resume path instead.
+    ds.adoptedFrom = undefined;
+    if (ds.session.adoptedFrom) {
+      ds.session.adoptedFrom = undefined;
+      try { sessionStore.updateSession(ds.session); } catch { /* best-effort */ }
+    }
     return;
   }
 

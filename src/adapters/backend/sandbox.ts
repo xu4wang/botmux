@@ -18,7 +18,7 @@
  * daemon-side watcher re-executes the send OUTSIDE the sandbox with real
  * credentials. No Feishu credential ever enters the sandbox.
  */
-import { mkdirSync, existsSync, writeFileSync, chmodSync, readdirSync, readFileSync, rmSync, statSync, lstatSync, readlinkSync, realpathSync, openSync, fstatSync, readSync, writeSync, closeSync, constants as fsConstants } from 'node:fs';
+import { mkdirSync, existsSync, writeFileSync, chmodSync, readdirSync, readFileSync, rmSync, rmdirSync, unlinkSync, statSync, lstatSync, readlinkSync, realpathSync, openSync, fstatSync, readSync, writeSync, closeSync, constants as fsConstants } from 'node:fs';
 import { atomicWriteFileSync } from '../../utils/atomic-write.js';
 import { basename, dirname, isAbsolute, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -248,6 +248,73 @@ export function localSandboxApplies(backendType: string): boolean {
  *  replicated inside the tmpfs root so `#!/bin/sh` etc. resolve. */
 const USRMERGE_CANDIDATES = ['/bin', '/sbin', '/lib', '/lib64', '/lib32', '/libx32'] as const;
 
+/** Basename of the per-session manifest of deny-mask mountpoints the worker
+ *  had to CREATE on the host (they didn't pre-exist) so bwrap could bind an
+ *  empty mask over them. Persisted (not just held in an in-memory cleanup
+ *  closure) because a Linux tmux sandbox can survive a daemon restart — after
+ *  restart the close path only knows `sessionRoot`, and without this manifest
+ *  the empty host mountpoints would leak forever. Read + acted on by EVERY
+ *  teardown path (normal close, reattach-then-close, spawn-failure rollback,
+ *  stale sweep) BEFORE the sessionRoot is removed. */
+const MASK_MANIFEST_NAME = 'mask-mounts.json';
+
+interface MaskMountEntry { path: string; kind: 'dir' | 'file' }
+
+/** Atomically persist the created-mountpoint manifest (0600). Best-effort:
+ *  a write failure only risks leaking empty mountpoints, never data. */
+function writeMaskManifest(sessionRoot: string, created: MaskMountEntry[]): void {
+  if (!created.length) return;
+  try {
+    atomicWriteFileSync(join(sessionRoot, MASK_MANIFEST_NAME), JSON.stringify(created), { mode: 0o600 });
+  } catch { /* best-effort */ }
+}
+
+/** Reclaim the empty deny-mask mountpoints recorded in the manifest, then
+ *  delete the manifest. Runs on ALL teardown paths. Fail-safe & NON-RECURSIVE:
+ *  - only touches absolute, `..`-free paths INSIDE the sessionRoot's dataDir
+ *    sandbox tree's original targets (validated shape, no symlink following);
+ *  - a dir is removed with `rmdir` only (fails ENOTEMPTY if the host/a
+ *    concurrent process wrote into it → content is preserved, never rm -rf);
+ *  - a file is `unlink`ed only when it is a regular, zero-byte file;
+ *  - `lstat` re-checks the on-disk shape and REJECTS symlinks (a swapped entry
+ *    can't trick us into deleting elsewhere).
+ *  MUST be called BEFORE removing sessionRoot (which holds the manifest). */
+function reclaimMaskMounts(sessionRoot: string): void {
+  const manifestPath = join(sessionRoot, MASK_MANIFEST_NAME);
+  let raw: string;
+  try { raw = readFileSync(manifestPath, 'utf8'); } catch { return; } // none created / already gone
+  let entries: unknown;
+  try { entries = JSON.parse(raw); } catch { return; }
+  if (!Array.isArray(entries)) return;
+  for (const e of entries) {
+    if (!e || typeof e !== 'object') continue;
+    const path = (e as MaskMountEntry).path;
+    const kind = (e as MaskMountEntry).kind;
+    // Reject anything that isn't a clean absolute path or a known shape.
+    if (typeof path !== 'string' || !isAbsolute(path)) continue;
+    if (path.split('/').includes('..')) continue;
+    if (kind !== 'dir' && kind !== 'file') continue;
+    let st;
+    try { st = lstatSync(path); } catch { continue; } // already gone
+    if (st.isSymbolicLink()) continue;                // never follow a swapped symlink
+    try {
+      if (kind === 'dir' && st.isDirectory()) {
+        rmdirSync(path); // rmdir — throws ENOTEMPTY if host wrote into it → kept
+      } else if (kind === 'file' && st.isFile() && st.size === 0) {
+        unlinkSync(path); // unlink a still-empty placeholder only
+      }
+    } catch { /* non-empty / concurrent write / perms → leave it, never recurse */ }
+  }
+}
+
+/** Spawn-setup rollback: reclaim any empty mask mountpoints we pre-created,
+ *  then drop the whole per-session tree. Used when prepareDirectSandbox bails
+ *  AFTER masks were materialised (e.g. the MCP gateway socket check fails). */
+function rollbackSandboxSetup(sessionRoot: string): void {
+  reclaimMaskMounts(sessionRoot);
+  try { rmSync(sessionRoot, { recursive: true, force: true }); } catch { /* */ }
+}
+
 export interface DirectSandboxSpawn {
   /** Replace the CLI binary with this (always 'bwrap'). */
   bin: string;
@@ -306,11 +373,11 @@ export function prepareDirectSandbox(opts: {
   writeFileSync(shim, `#!/bin/sh\nexec node ${JSON.stringify(distCliJs())} "$@"\n`);
   chmodSync(shim, 0o755);
 
-  // usrmerge symlinks to replicate; deny rules that are FILES on the host
-  // (dir denies mask with an empty ro-bind, file denies need an empty ro-bind
-  // source). A deny path absent on the host is recorded as NOT existing so the
-  // compiler skips it (binding a void path under a RW parent would create the
-  // mountpoint on the host).
+  // usrmerge symlinks to replicate; deny rules that are FILES on the host need
+  // a file-shaped mask, everything else (existing dir OR a not-yet-existing
+  // path) is masked as a directory. We do NOT skip absent denies: leaving a
+  // denied path unmasked inside a read-write parent let the sandbox mkdir+write
+  // it onto the host and read anything created there mid-session (a TOCTOU).
   const symlinks: { path: string; target: string }[] = [];
   for (const p of USRMERGE_CANDIDATES) {
     try {
@@ -318,20 +385,38 @@ export function prepareDirectSandbox(opts: {
     } catch { /* absent on this distro */ }
   }
   const filePaths = new Set<string>();
-  const existingPaths = new Set<string>();
   for (const r of opts.policy.rules) {
     if (r.access !== 'deny') continue;
-    try {
-      const st = statSync(r.path);
-      existingPaths.add(r.path);
-      if (st.isFile()) filePaths.add(r.path);
-    } catch { /* absent on host → compiler skips (no mask needed) */ }
+    try { if (statSync(r.path).isFile()) filePaths.add(r.path); } catch { /* absent → dir-shaped mask */ }
   }
 
-  const compiled = compileToBwrap(opts.policy, { symlinks, emptyDir, emptiesDir: empties, filePaths, existingPaths, chdir: opts.chdir });
+  const compiled = compileToBwrap(opts.policy, { symlinks, emptyDir, emptiesDir: empties, filePaths, chdir: opts.chdir });
+  // The shared empty dir + every empty placeholder file are the ro-bind SOURCES
+  // for deny masks. mode 000 → the mask itself is unreadable/unlistable (a real
+  // deny reads as EPERM, not "empty").
+  try { chmodSync(emptyDir, 0o000); } catch { /* */ }
   for (const f of compiled.emptyFiles) {
-    try { writeFileSync(f.path, ''); } catch { /* */ }
+    try { writeFileSync(f.path, '', { mode: 0o000 }); } catch { /* */ }
   }
+  // bwrap cannot bind onto a MISSING target, and a missing target under a
+  // read-write parent would make bwrap materialise it on the host anyway. So
+  // pre-create every mask mountpoint that doesn't already exist — recording the
+  // ones WE created (with shape) in a persisted manifest so any teardown path
+  // (incl. after a daemon restart, when only sessionRoot is known) can
+  // rmdir/unlink-if-empty exactly those, never a user path. Pre-creating a
+  // DIRECTORY for a not-yet-existing deny also blocks the host from later
+  // creating a same-named FILE there — fail-closed, an accepted compat cost of
+  // never leaking a denied path.
+  const createdMasks: MaskMountEntry[] = [];
+  for (const m of compiled.maskMounts) {
+    if (existsSync(m.path)) continue; // pre-existing host path — never our cleanup target
+    try {
+      if (m.kind === 'file') { mkdirSync(dirname(m.path), { recursive: true }); writeFileSync(m.path, ''); }
+      else mkdirSync(m.path, { recursive: true });
+      createdMasks.push(m);
+    } catch { /* parent read-only on host or race — bwrap bind will surface it */ }
+  }
+  writeMaskManifest(sessionRoot, createdMasks);
 
   const args = [...compiled.args];
   // Shim bin at a fixed path under the fresh /run tmpfs — appended after the
@@ -350,12 +435,15 @@ export function prepareDirectSandbox(opts: {
   if (opts.mcpGatewaySocketPath) {
     try {
       const socketPath = resolve(opts.mcpGatewaySocketPath);
-      if (!lstatSync(socketPath).isSocket()) return null;
+      if (!lstatSync(socketPath).isSocket()) { rollbackSandboxSetup(sessionRoot); return null; }
       const hostDir = realpathSync(dirname(socketPath));
       const sandboxDir = '/run/botmux-mcp';
       args.push('--dir', sandboxDir, '--ro-bind', hostDir, sandboxDir);
       sandboxMcpGatewaySocketPath = join(sandboxDir, basename(socketPath));
     } catch {
+      // Spawn-setup failure AFTER mask mountpoints were pre-created: reclaim the
+      // empty ones and drop the tree so nothing leaks onto the host.
+      rollbackSandboxSetup(sessionRoot);
       return null;
     }
   }
@@ -389,6 +477,9 @@ export function prepareDirectSandbox(opts: {
     env,
     outbox,
     cleanup: () => {
+      // Reclaim empty deny-mask mountpoints we created on the host BEFORE
+      // dropping the manifest with the rest of the tree.
+      reclaimMaskMounts(sessionRoot);
       try { rmSync(sessionRoot, { recursive: true, force: true }); } catch { /* */ }
     },
   };
@@ -411,6 +502,9 @@ export function attachSandboxOutbox(opts: { sessionId: string; dataDir: string }
   return {
     outbox,
     cleanup: () => {
+      // Reclaim empty deny-mask mountpoints we created on the host BEFORE
+      // dropping the manifest with the rest of the tree.
+      reclaimMaskMounts(sessionRoot);
       try { rmSync(sessionRoot, { recursive: true, force: true }); } catch { /* */ }
     },
   };
@@ -462,6 +556,10 @@ export function sweepOrphanSandboxes(dataDir: string, activeSessionIds: Set<stri
     let ageOk = false;
     try { ageOk = now - statSync(sessionRoot).mtimeMs > GRACE_MS; } catch { ageOk = false; }
     if (!ageOk) continue;
+    // Reclaim empty deny-mask mountpoints recorded in this tree's manifest
+    // BEFORE removing the tree (which holds the manifest). Only runs once we've
+    // confirmed no live bwrap references the sid (liveSandboxSids above).
+    reclaimMaskMounts(sessionRoot);
     try { rmSync(sessionRoot, { recursive: true, force: true }); } catch { /* */ }
   }
 }

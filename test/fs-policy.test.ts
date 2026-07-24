@@ -322,7 +322,7 @@ describe('compileToBwrap', () => {
       botmuxHome: '/home/u/.botmux', sessionDataDir: '/home/u/.botmux/data', workingDir: '/home/u/proj',
       userPaths: { deny: ['/home/u/proj/secrets', '/home/u/never-exposed/x'] },
     }));
-    const { args } = compileToBwrap(p, opts);
+    const { args, maskMounts } = compileToBwrap(p, opts);
     const mask = args.indexOf('/home/u/proj/secrets');
     // real deny = read-only empty bind, NOT `--tmpfs` (which is writable inside)
     expect(args[mask - 1]).toBe('/sbx/empty');
@@ -332,46 +332,41 @@ describe('compileToBwrap', () => {
     expect(args).not.toContain('/home/u/never-exposed/x');
     // no writable tmpfs mask leaked in for the deny path
     expect(args.indexOf('--tmpfs', bind)).not.toBe(mask - 1);
+    // the reachable deny is reported as a dir-shaped mask mountpoint
+    expect(maskMounts).toContainEqual({ path: '/home/u/proj/secrets', kind: 'dir' });
+    expect(maskMounts.some(m => m.path === '/home/u/never-exposed/x')).toBe(false);
   });
 
-  it('SKIPS a nonexistent deny under an exposed parent (would create a host mountpoint otherwise)', () => {
+  it('MASKS a reachable deny even when it does not exist yet (no skip — closes the mkdir/TOCTOU hole)', () => {
     const p = buildFsPolicy(ctx({
       platform: 'linux', homeDir: '/home/u', botHome: '/home/u/.botmux/bots/cli_self',
       botmuxHome: '/home/u/.botmux', sessionDataDir: '/home/u/.botmux/data', workingDir: '/home/u/proj',
       userPaths: { deny: ['/home/u/proj/secrets'] },
     }));
-    // worker passes existingPaths reflecting a host stat; the deny target does
-    // NOT exist → compiler must skip it (binding a void path under the RW
-    // project would materialise the mountpoint on the host). deny-by-default
-    // still covers it if the agent creates it later inside the tree.
-    const { args } = compileToBwrap(p, { ...opts, existingPaths: new Set() });
-    expect(args).not.toContain('/home/u/proj/secrets');
-  });
-
-  it('masks an EXISTING deny dir once existingPaths includes it', () => {
-    const p = buildFsPolicy(ctx({
-      platform: 'linux', homeDir: '/home/u', botHome: '/home/u/.botmux/bots/cli_self',
-      botmuxHome: '/home/u/.botmux', sessionDataDir: '/home/u/.botmux/data', workingDir: '/home/u/proj',
-      userPaths: { deny: ['/home/u/proj/secrets'] },
-    }));
-    const { args } = compileToBwrap(p, { ...opts, existingPaths: new Set(['/home/u/proj/secrets']) });
+    // The compiler is host-stat-free: a reachable deny is ALWAYS masked (dir
+    // shape unless the worker flagged it a file). The worker pre-creates the
+    // mountpoint so bwrap can bind the empty mask — leaving it unmasked would
+    // let the sandbox mkdir+write it onto the host.
+    const { args, maskMounts } = compileToBwrap(p, opts);
     const mask = args.indexOf('/home/u/proj/secrets');
     expect(args[mask - 2]).toBe('--ro-bind');
     expect(args[mask - 1]).toBe('/sbx/empty');
+    expect(maskMounts).toContainEqual({ path: '/home/u/proj/secrets', kind: 'dir' });
   });
 
-  it('file-shaped deny uses an empty ro-bind and reports the needed file', () => {
+  it('file-shaped deny uses an empty ro-bind, reports the needed file AND a file-kind mask mount', () => {
     const p = buildFsPolicy(ctx({
       platform: 'linux', homeDir: '/home/u', botHome: '/home/u/.botmux/bots/cli_self',
       botmuxHome: '/home/u/.botmux', sessionDataDir: '/home/u/.botmux/data', workingDir: '/home/u/proj',
       userPaths: { deny: ['/home/u/proj/.env'] },
     }));
-    const { args, emptyFiles } = compileToBwrap(p, { ...opts, filePaths: new Set(['/home/u/proj/.env']), existingPaths: new Set(['/home/u/proj/.env']) });
+    const { args, emptyFiles, maskMounts } = compileToBwrap(p, { ...opts, filePaths: new Set(['/home/u/proj/.env']) });
     expect(emptyFiles).toHaveLength(1);
     expect(emptyFiles[0].maskedPath).toBe('/home/u/proj/.env');
     const i = args.indexOf('/home/u/proj/.env');
     expect(args[i - 1]).toBe(emptyFiles[0].path);
     expect(args[i - 2]).toBe('--ro-bind');
+    expect(maskMounts).toContainEqual({ path: '/home/u/proj/.env', kind: 'file' });
   });
 
   it('replicates usrmerge symlinks and honors net=false', () => {
@@ -419,7 +414,7 @@ describe('compiler parity with accessForPath', () => {
     expect(accessForPath(p.rules, '/srv/ref/a').access).toBe('readOnly');
     expect(accessForPath(p.rules, '/srv/ref/private/b').access).toBe('deny');
     // bwrap: ro-bind then deeper deny mask
-    const { args } = compileToBwrap(p, { emptyDir: '/e/empty', emptiesDir: '/e', chdir: '/home/u/proj', existingPaths: new Set(['/srv/ref/private']) });
+    const { args } = compileToBwrap(p, { emptyDir: '/e/empty', emptiesDir: '/e', chdir: '/home/u/proj' });
     expect(args.indexOf('/srv/ref/private')).toBeGreaterThan(args.indexOf('/srv/ref'));
     // seatbelt: allow then deeper deny
     const prof = compileToSeatbelt(p);

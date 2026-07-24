@@ -551,18 +551,27 @@ describe('blocker #3: forkAdoptWorker refuses sandbox-enabled bots', () => {
     },
   });
 
-  it('legacy readIsolation:true → refuses to adopt (no fork, no session.start)', () => {
+  it('legacy readIsolation:true → refuses to adopt + clears stale adopt metadata (no fork/session.start)', () => {
     vi.mocked(getBot).mockImplementation(() => defaultBot({ readIsolation: true }));
-    forkAdoptWorker(adopt());
+    const ds = adopt();
+    ds.session.adoptedFrom = { ...ds.adoptedFrom } as any;
+    forkAdoptWorker(ds);
     expect(forkMock).not.toHaveBeenCalled();
     expect(emitHookEventMock).not.toHaveBeenCalledWith('session.start', expect.anything());
+    // fail-closed: no worker=null pseudo-adopt lingers; next msg cold-starts sandboxed
+    expect(ds.adoptedFrom).toBeUndefined();
+    expect(ds.session.adoptedFrom).toBeUndefined();
   });
 
-  it('new sandbox:true → refuses to adopt (would run unsandboxed)', () => {
+  it('new sandbox:true → refuses to adopt (would run unsandboxed) + clears metadata', () => {
     vi.mocked(getBot).mockImplementation(() => defaultBot({ sandbox: true }));
-    forkAdoptWorker(adopt());
+    const ds = adopt();
+    ds.session.adoptedFrom = { ...ds.adoptedFrom } as any;
+    forkAdoptWorker(ds);
     expect(forkMock).not.toHaveBeenCalled();
     expect(emitHookEventMock).not.toHaveBeenCalledWith('session.start', expect.anything());
+    expect(ds.adoptedFrom).toBeUndefined();
+    expect(ds.session.adoptedFrom).toBeUndefined();
   });
 
   it('global BOTMUX_SANDBOX=1 → refuses to adopt even when the bot has no per-bot flag', () => {
