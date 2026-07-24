@@ -295,7 +295,10 @@ export function prepareDirectSandbox(opts: {
   const outbox = join(sessionRoot, 'outbox');
   const shimBin = join(sessionRoot, 'shimbin');
   const empties = join(sessionRoot, 'empties');
-  for (const d of [outbox, shimBin, empties]) mkdirSync(d, { recursive: true });
+  // A single, always-empty directory ro-bound over DIRECTORY-shaped deny rules
+  // (real content hidden + read-only mount). Kept empty for the session's life.
+  const emptyDir = join(sessionRoot, 'empty');
+  for (const d of [outbox, shimBin, empties, emptyDir]) mkdirSync(d, { recursive: true });
 
   // `botmux` shim → THIS build's cli.js so in-sandbox `botmux send` hits relay
   // mode (and never needs bots.json, which the policy doesn't expose).
@@ -304,7 +307,10 @@ export function prepareDirectSandbox(opts: {
   chmodSync(shim, 0o755);
 
   // usrmerge symlinks to replicate; deny rules that are FILES on the host
-  // (dir denies mask with tmpfs, file denies need an empty ro-bind source).
+  // (dir denies mask with an empty ro-bind, file denies need an empty ro-bind
+  // source). A deny path absent on the host is recorded as NOT existing so the
+  // compiler skips it (binding a void path under a RW parent would create the
+  // mountpoint on the host).
   const symlinks: { path: string; target: string }[] = [];
   for (const p of USRMERGE_CANDIDATES) {
     try {
@@ -312,12 +318,17 @@ export function prepareDirectSandbox(opts: {
     } catch { /* absent on this distro */ }
   }
   const filePaths = new Set<string>();
+  const existingPaths = new Set<string>();
   for (const r of opts.policy.rules) {
     if (r.access !== 'deny') continue;
-    try { if (statSync(r.path).isFile()) filePaths.add(r.path); } catch { /* */ }
+    try {
+      const st = statSync(r.path);
+      existingPaths.add(r.path);
+      if (st.isFile()) filePaths.add(r.path);
+    } catch { /* absent on host → compiler skips (no mask needed) */ }
   }
 
-  const compiled = compileToBwrap(opts.policy, { symlinks, emptiesDir: empties, filePaths, chdir: opts.chdir });
+  const compiled = compileToBwrap(opts.policy, { symlinks, emptyDir, emptiesDir: empties, filePaths, existingPaths, chdir: opts.chdir });
   for (const f of compiled.emptyFiles) {
     try { writeFileSync(f.path, ''); } catch { /* */ }
   }

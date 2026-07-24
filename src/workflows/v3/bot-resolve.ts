@@ -46,6 +46,20 @@ export function botWorkingDir(bot: BotConfig, override?: string): string {
     ?? '~';
 }
 
+/** Freeze the three-tier sandboxPaths into a snapshot-safe copy, or undefined
+ *  when the bot has no non-empty tier (so the field is omitted from the frozen
+ *  snapshot and the worker's legacy fallback stays intact). */
+function sandboxPathsSnapshot(
+  sp: { readWrite?: string[]; readOnly?: string[]; deny?: string[] } | undefined,
+): { readWrite?: string[]; readOnly?: string[]; deny?: string[] } | undefined {
+  if (!sp) return undefined;
+  const out: { readWrite?: string[]; readOnly?: string[]; deny?: string[] } = {};
+  if (sp.readWrite?.length) out.readWrite = [...sp.readWrite];
+  if (sp.readOnly?.length) out.readOnly = [...sp.readOnly];
+  if (sp.deny?.length) out.deny = [...sp.deny];
+  return Object.keys(out).length ? out : undefined;
+}
+
 /** BotConfig → BotSnapshot (the runtime-frozen, secret-free per-node identity). */
 export function botToSnapshot(bot: BotConfig, workingDirOverride?: string): BotSnapshot {
   if (bot.disableCliBypass === true) {
@@ -60,6 +74,7 @@ export function botToSnapshot(bot: BotConfig, workingDirOverride?: string): BotS
     ...(bot.cliPathOverride ? { cliPathOverride: bot.cliPathOverride } : {}),
     ...(bot.model ? { model: bot.model } : {}),
     ...(bot.sandbox === true ? { sandbox: true } : {}),
+    ...(sandboxPathsSnapshot(bot.sandboxPaths) ? { sandboxPaths: sandboxPathsSnapshot(bot.sandboxPaths)! } : {}),
     ...(bot.sandboxHidePaths?.length ? { sandboxHidePaths: [...bot.sandboxHidePaths] } : {}),
     ...(bot.sandboxReadonlyPaths?.length ? { sandboxReadonlyPaths: [...bot.sandboxReadonlyPaths] } : {}),
     ...(bot.sandboxNetwork === false ? { sandboxNetwork: false } : {}),
@@ -123,6 +138,7 @@ export function parseFrozenBotSnapshots(raw: unknown, dag?: V3Dag): Map<string, 
     'cliPathOverride',
     'model',
     'sandbox',
+    'sandboxPaths',
     'sandboxHidePaths',
     'sandboxReadonlyPaths',
     'sandboxNetwork',
@@ -167,12 +183,33 @@ export function parseFrozenBotSnapshots(raw: unknown, dag?: V3Dag): Map<string, 
         throw new Error(`bots.snapshot.json[${JSON.stringify(key)}].${field} must be a string array`);
       }
     }
+    if (obj.sandboxPaths !== undefined) {
+      const sp = obj.sandboxPaths;
+      if (!sp || typeof sp !== 'object' || Array.isArray(sp)) {
+        throw new Error(`bots.snapshot.json[${JSON.stringify(key)}].sandboxPaths must be an object`);
+      }
+      const spObj = sp as Record<string, unknown>;
+      const spExtra = Object.keys(spObj).filter((f) => !['readWrite', 'readOnly', 'deny'].includes(f));
+      if (spExtra.length > 0) {
+        throw new Error(`bots.snapshot.json[${JSON.stringify(key)}].sandboxPaths has unsupported key(s): ${spExtra.join(', ')}`);
+      }
+      for (const tier of ['readWrite', 'readOnly', 'deny'] as const) {
+        if (
+          spObj[tier] !== undefined &&
+          (!Array.isArray(spObj[tier]) || !(spObj[tier] as unknown[]).every((item) => typeof item === 'string'))
+        ) {
+          throw new Error(`bots.snapshot.json[${JSON.stringify(key)}].sandboxPaths.${tier} must be a string array`);
+        }
+      }
+    }
+    const parsedSandboxPaths = sandboxPathsSnapshot(obj.sandboxPaths as BotSnapshot['sandboxPaths']);
     snapshots.set(key, {
       larkAppId: obj.larkAppId,
       cliId: obj.cliId as BotSnapshot['cliId'],
       ...(obj.cliPathOverride !== undefined ? { cliPathOverride: obj.cliPathOverride as string } : {}),
       ...(obj.model !== undefined ? { model: obj.model as string } : {}),
       ...(obj.sandbox !== undefined ? { sandbox: obj.sandbox as boolean } : {}),
+      ...(parsedSandboxPaths ? { sandboxPaths: parsedSandboxPaths } : {}),
       ...(obj.sandboxHidePaths !== undefined ? { sandboxHidePaths: [...obj.sandboxHidePaths as string[]] } : {}),
       ...(obj.sandboxReadonlyPaths !== undefined ? { sandboxReadonlyPaths: [...obj.sandboxReadonlyPaths as string[]] } : {}),
       ...(obj.sandboxNetwork !== undefined ? { sandboxNetwork: obj.sandboxNetwork as boolean } : {}),

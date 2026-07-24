@@ -65,6 +65,11 @@ export interface FsPolicyContext {
   sessionDataDir: string;
   workingDir: string;
   currentAppId: string;
+  /** This session's id — scopes the turn-sends dedup marker to a single file
+   *  (`turn-sends/<sessionId>.jsonl`) so a sandboxed CLI cannot rewrite ANOTHER
+   *  session's markers. Optional: when absent, no turn-sends grant is emitted
+   *  (a non-session policy has no marker to write). */
+  sessionId?: string;
   /** This bot's BOT_HOME (`<botmuxHome>/bots/<appId>`) — always readWrite. */
   botHome: string;
   /** True when the CLI's data root is redirected into BOT_HOME
@@ -335,10 +340,14 @@ export function buildFsPolicy(ctx: FsPolicyContext): FsPolicy {
     `${sd}/bot-openids-${app}.json`,  // OWN routing cross-ref (sibling ones stay denied)
     // own sessions-<self>.json + attachments/<self> already pushed above (readOnly)
   ], 'readOnly', 'internal');
-  // turn-sends: the CLI APPENDS a send-marker here (dedup); needs write, not read.
-  // Exposed readWrite (write-only isn't expressible); it holds only message-id
-  // markers (no content/creds) so read-exposure of the OWN-appended markers is benign.
-  push([`${sd}/turn-sends`], 'readWrite', 'internal');
+  // turn-sends: the CLI APPENDS its OWN dedup marker to
+  // `turn-sends/<sessionId>.jsonl` (write, not read). Grant the SINGLE file, not
+  // the whole directory: a directory-wide readWrite let session A rewrite
+  // session B's `<B>.jsonl` marker (corrupting B's send-dedup → dropped/duplicate
+  // replies). The exact-file grant confines each session to its own marker. The
+  // worker PRE-CREATES this file before spawn so it survives the existence
+  // filter and bwrap can bind it (bwrap cannot bind a nonexistent source).
+  if (ctx.sessionId) push([`${sd}/turn-sends/${ctx.sessionId}.jsonl`], 'readWrite', 'internal');
   // schedules.json: `botmux schedule` is a READ-MODIFY-WRITE store shared by all
   // bots (one file). It must be readWrite — a read-deny makes a sandboxed
   // `botmux schedule` load an empty map and overwrite, wiping EVERY bot's tasks.
@@ -476,14 +485,26 @@ export interface CompileBwrapOpts {
   /** Top-level symlinks to replicate inside the tmpfs root (usrmerge /bin →
    *  usr/bin etc.). Resolved by the worker (impure readlink). */
   symlinks?: readonly { path: string; target: string }[];
+  /** A single EMPTY directory (worker-created, kept empty) ro-bound over
+   *  DIRECTORY-shaped deny rules. `--ro-bind emptyDir <deny>` masks the real
+   *  contents AND makes the mountpoint read-only — unlike `--tmpfs <deny>`,
+   *  which hid contents but left a WRITABLE tmpfs (a real deny must be neither
+   *  readable nor writable). */
+  emptyDir: string;
   /** Directory that will hold empty placeholder files for FILE-shaped deny
-   *  rules (dirs are masked with tmpfs; files need an empty ro-bind source).
-   *  The worker creates the returned `emptyFiles` before spawning. */
+   *  rules (dirs are masked with the empty ro-bind above; files need an empty
+   *  ro-bind source). The worker creates the returned `emptyFiles` first. */
   emptiesDir: string;
   /** Rule paths that are FILES (not dirs) on the host — deny compiles to an
    *  empty-file bind, readOnly/readWrite file binds work as-is. Resolved by
    *  the worker (impure stat). */
   filePaths?: ReadonlySet<string>;
+  /** deny rule paths that EXIST on the host (file or dir). A deny path that
+   *  does NOT exist is SKIPPED: binding onto a void mountpoint under a
+   *  read-write parent makes bwrap materialise that directory on the HOST
+   *  (leaking a real mountpoint into the user's tree), and there is nothing to
+   *  hide anyway. Resolved by the worker (impure stat). */
+  existingPaths?: ReadonlySet<string>;
   /** chdir target (the project working dir). */
   chdir: string;
 }
@@ -499,9 +520,17 @@ export interface BwrapCompilation {
  * Compile the policy to a bwrap argv prefix. Deny-by-default is bwrap's
  * natural shape: a fresh tmpfs root, then ONLY the rule paths are bound in
  * (later mounts win → emitting shallow→deep gives deepest-rule-wins, matching
- * accessForPath()). deny rules materialize as tmpfs/empty-file masks and are
- * only emitted when they sit under an exposed tree (outside it they're
- * unreachable already, and bwrap would fail mounting onto a void path).
+ * accessForPath()). deny rules materialize as READ-ONLY empty masks (empty-dir
+ * ro-bind for dirs, empty-file ro-bind for files) and are only emitted when
+ * they (a) sit under an exposed tree — outside it they're unreachable already,
+ * and bwrap would fail mounting onto a void path — AND (b) actually EXIST on
+ * the host: a nonexistent deny under a read-write parent would otherwise make
+ * bwrap create the mountpoint on the HOST, and there is nothing to hide.
+ *
+ * NOTE the masks are `--ro-bind` (NOT `--tmpfs`): a `--tmpfs <deny>` mount is
+ * WRITABLE inside the sandbox, so it hides the real contents but still lets the
+ * CLI write into the denied path — not a real deny. A read-only bind of an
+ * empty source is both unreadable (no real contents) and unwritable.
  */
 export function compileToBwrap(policy: FsPolicy, opts: CompileBwrapOpts): BwrapCompilation {
   const a: string[] = [];
@@ -516,12 +545,21 @@ export function compileToBwrap(policy: FsPolicy, opts: CompileBwrapOpts): BwrapC
   for (const r of policy.rules) {
     if (r.access === 'deny') {
       if (!exposed.some(e => coversPath(e, r.path))) continue; // unreachable → already denied by default
+      // A deny path that does not exist on the host must NOT be bound: bwrap
+      // would create the mountpoint in the read-write parent on the host, and
+      // there is no real content to mask. Deny-by-default already covers it if
+      // it's ever created later inside the (read-only) exposed tree.
+      if (opts.existingPaths && !opts.existingPaths.has(r.path)) continue;
       if (opts.filePaths?.has(r.path)) {
+        // FILE-shaped deny: ro-bind an empty placeholder file (unreadable
+        // contents + read-only).
         const empty = `${opts.emptiesDir}/mask-${emptyIdx++}`;
         emptyFiles.push({ path: empty, maskedPath: r.path });
         a.push('--ro-bind', empty, r.path);
       } else {
-        a.push('--tmpfs', r.path);
+        // DIRECTORY-shaped deny: ro-bind the shared empty dir → contents hidden
+        // AND the mount is read-only (a real deny, not a writable tmpfs).
+        a.push('--ro-bind', opts.emptyDir, r.path);
       }
       continue;
     }

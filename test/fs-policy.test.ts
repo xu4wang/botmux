@@ -18,6 +18,7 @@ const ctx = (o: Partial<FsPolicyContext> = {}): FsPolicyContext => ({
   homeDir: '/Users/u',
   botmuxHome: '/Users/u/.botmux',
   sessionDataDir: '/Users/u/.botmux/data',
+  sessionId: 's',
   workingDir: '/Users/u/proj',
   currentAppId: 'cli_self',
   botHome: '/Users/u/.botmux/bots/cli_self',
@@ -137,7 +138,11 @@ describe('buildFsPolicy', () => {
     expect(accessForPath(p.rules, '/Users/u/.botmux/data/bots-info.json').access).toBe('readOnly');
     expect(accessForPath(p.rules, '/Users/u/.botmux/data/bot-openids-cli_self.json').access).toBe('readOnly'); // own
     expect(accessForPath(p.rules, '/Users/u/.botmux/data/sessions-cli_self.json').access).toBe('readOnly');     // own
-    expect(accessForPath(p.rules, '/Users/u/.botmux/data/turn-sends/s.jsonl').access).toBe('readWrite');        // CLI appends markers
+    expect(accessForPath(p.rules, '/Users/u/.botmux/data/turn-sends/s.jsonl').access).toBe('readWrite');        // OWN session marker only
+    // blocker #4: turn-sends is granted per-session-FILE, not the whole dir —
+    // another session's marker is NOT writable (can't corrupt its send-dedup).
+    expect(accessForPath(p.rules, '/Users/u/.botmux/data/turn-sends/other.jsonl').access).toBe('none');
+    expect(accessForPath(p.rules, '/Users/u/.botmux/data/turn-sends').access).toBe('none');
     // own BOT_HOME rw + own attachments ro (allow-listed elsewhere)
     expect(accessForPath(p.rules, '/Users/u/.botmux/bots/cli_self/claude/x').access).toBe('readWrite');
     expect(accessForPath(p.rules, '/Users/u/.botmux/data/attachments/cli_self/m/f.pdf').access).toBe('readWrite'); // botmux quoted downloads here
@@ -297,7 +302,7 @@ describe('compileToSeatbelt', () => {
 });
 
 describe('compileToBwrap', () => {
-  const opts = { emptiesDir: '/sbx/empties', chdir: '/home/u/proj' };
+  const opts = { emptyDir: '/sbx/empty', emptiesDir: '/sbx/empties', chdir: '/home/u/proj' };
 
   it('tmpfs root + primitives + ordered binds', () => {
     const p = buildFsPolicy(ctx({ platform: 'linux', homeDir: '/home/u', botHome: '/home/u/.botmux/bots/cli_self', botmuxHome: '/home/u/.botmux', sessionDataDir: '/home/u/.botmux/data', workingDir: '/home/u/proj' }));
@@ -311,7 +316,7 @@ describe('compileToBwrap', () => {
     expect(args).toContain('--chdir');
   });
 
-  it('deny under an exposed tree masks with tmpfs; unreachable deny is skipped', () => {
+  it('deny under an exposed tree masks with a READ-ONLY empty-dir bind (not writable tmpfs); unreachable deny is skipped', () => {
     const p = buildFsPolicy(ctx({
       platform: 'linux', homeDir: '/home/u', botHome: '/home/u/.botmux/bots/cli_self',
       botmuxHome: '/home/u/.botmux', sessionDataDir: '/home/u/.botmux/data', workingDir: '/home/u/proj',
@@ -319,24 +324,40 @@ describe('compileToBwrap', () => {
     }));
     const { args } = compileToBwrap(p, opts);
     const mask = args.indexOf('/home/u/proj/secrets');
-    expect(args[mask - 1]).toBe('--tmpfs');
+    // real deny = read-only empty bind, NOT `--tmpfs` (which is writable inside)
+    expect(args[mask - 1]).toBe('/sbx/empty');
+    expect(args[mask - 2]).toBe('--ro-bind');
     const bind = args.indexOf('/home/u/proj');
     expect(mask).toBeGreaterThan(bind); // deeper mask after the bind it punches
     expect(args).not.toContain('/home/u/never-exposed/x');
+    // no writable tmpfs mask leaked in for the deny path
+    expect(args.indexOf('--tmpfs', bind)).not.toBe(mask - 1);
   });
 
-  it('masks a NONEXISTENT deny under an exposed parent (codex finding: agent must not create+access it)', () => {
+  it('SKIPS a nonexistent deny under an exposed parent (would create a host mountpoint otherwise)', () => {
     const p = buildFsPolicy(ctx({
       platform: 'linux', homeDir: '/home/u', botHome: '/home/u/.botmux/bots/cli_self',
       botmuxHome: '/home/u/.botmux', sessionDataDir: '/home/u/.botmux/data', workingDir: '/home/u/proj',
       userPaths: { deny: ['/home/u/proj/secrets'] },
     }));
-    // worker keeps deny rules even when the target does not exist yet; filePaths
-    // is empty because statSync fails on a nonexistent path → tmpfs branch.
-    const { args } = compileToBwrap(p, { ...opts, filePaths: new Set() });
+    // worker passes existingPaths reflecting a host stat; the deny target does
+    // NOT exist → compiler must skip it (binding a void path under the RW
+    // project would materialise the mountpoint on the host). deny-by-default
+    // still covers it if the agent creates it later inside the tree.
+    const { args } = compileToBwrap(p, { ...opts, existingPaths: new Set() });
+    expect(args).not.toContain('/home/u/proj/secrets');
+  });
+
+  it('masks an EXISTING deny dir once existingPaths includes it', () => {
+    const p = buildFsPolicy(ctx({
+      platform: 'linux', homeDir: '/home/u', botHome: '/home/u/.botmux/bots/cli_self',
+      botmuxHome: '/home/u/.botmux', sessionDataDir: '/home/u/.botmux/data', workingDir: '/home/u/proj',
+      userPaths: { deny: ['/home/u/proj/secrets'] },
+    }));
+    const { args } = compileToBwrap(p, { ...opts, existingPaths: new Set(['/home/u/proj/secrets']) });
     const mask = args.indexOf('/home/u/proj/secrets');
-    expect(args[mask - 1]).toBe('--tmpfs');           // masked, not skipped
-    expect(mask).toBeGreaterThan(args.indexOf('/home/u/proj')); // after the rw bind it punches
+    expect(args[mask - 2]).toBe('--ro-bind');
+    expect(args[mask - 1]).toBe('/sbx/empty');
   });
 
   it('file-shaped deny uses an empty ro-bind and reports the needed file', () => {
@@ -345,7 +366,7 @@ describe('compileToBwrap', () => {
       botmuxHome: '/home/u/.botmux', sessionDataDir: '/home/u/.botmux/data', workingDir: '/home/u/proj',
       userPaths: { deny: ['/home/u/proj/.env'] },
     }));
-    const { args, emptyFiles } = compileToBwrap(p, { ...opts, filePaths: new Set(['/home/u/proj/.env']) });
+    const { args, emptyFiles } = compileToBwrap(p, { ...opts, filePaths: new Set(['/home/u/proj/.env']), existingPaths: new Set(['/home/u/proj/.env']) });
     expect(emptyFiles).toHaveLength(1);
     expect(emptyFiles[0].maskedPath).toBe('/home/u/proj/.env');
     const i = args.indexOf('/home/u/proj/.env');
@@ -397,8 +418,8 @@ describe('compiler parity with accessForPath', () => {
     // semantic truth
     expect(accessForPath(p.rules, '/srv/ref/a').access).toBe('readOnly');
     expect(accessForPath(p.rules, '/srv/ref/private/b').access).toBe('deny');
-    // bwrap: ro-bind then deeper tmpfs mask
-    const { args } = compileToBwrap(p, { emptiesDir: '/e', chdir: '/home/u/proj' });
+    // bwrap: ro-bind then deeper deny mask
+    const { args } = compileToBwrap(p, { emptyDir: '/e/empty', emptiesDir: '/e', chdir: '/home/u/proj', existingPaths: new Set(['/srv/ref/private']) });
     expect(args.indexOf('/srv/ref/private')).toBeGreaterThan(args.indexOf('/srv/ref'));
     // seatbelt: allow then deeper deny
     const prof = compileToSeatbelt(p);

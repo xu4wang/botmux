@@ -228,6 +228,10 @@ export interface BotSnapshot {
   /** Frozen per-bot sandbox policy. Workflow workers must not silently lose
    *  these fields when spawning outside the main forkWorker path. */
   sandbox?: boolean;
+  /** New three-tier fs-policy lists (deny-by-default). Carried alongside the
+   *  legacy fields so a workflow worker builds the SAME policy as a normal
+   *  session; without it the readWrite tier + user-expressed deny are lost. */
+  sandboxPaths?: { readWrite?: string[]; readOnly?: string[]; deny?: string[] };
   sandboxHidePaths?: string[];
   sandboxReadonlyPaths?: string[];
   sandboxNetwork?: boolean;

@@ -109,6 +109,15 @@ export const BotSnapshotSchema = z.object({
   workingDir: z.string().optional(),
   cliPathOverride: z.string().optional(),
   sandbox: z.boolean().optional(),
+  // New three-tier fs-policy lists (deny-by-default). Frozen alongside the
+  // legacy fields so a historical run's sandbox policy matches what a normal
+  // session would build — omitting it would silently drop the readWrite tier +
+  // any user-declared deny when a workflow worker rehydrates the snapshot.
+  sandboxPaths: z.object({
+    readWrite: z.array(z.string()).optional(),
+    readOnly: z.array(z.string()).optional(),
+    deny: z.array(z.string()).optional(),
+  }).optional(),
   sandboxHidePaths: z.array(z.string()).optional(),
   sandboxReadonlyPaths: z.array(z.string()).optional(),
   sandboxNetwork: z.boolean().optional(),

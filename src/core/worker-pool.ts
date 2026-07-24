@@ -3837,12 +3837,20 @@ export function forkAdoptWorker(ds: DaemonSession, opts?: { restoredFromMetadata
   const bot = getBot(ds.larkAppId);
   const botCfg = bot.config;
 
-  // Read isolation cannot be applied to an already-running CLI (adopt attaches
-  // to an existing pane; we can't inject --settings into it). Refuse to adopt an
-  // isolated bot rather than run it unisolated — it will cold-start (isolated)
-  // via forkWorker on the next message instead. (Codex review #2, fail-closed.)
-  if (botCfg.readIsolation === true) {
-    logger.warn(`[${t}] read-isolation bot: refusing to adopt existing CLI (would run unisolated); will cold-start isolated on next message`);
+  // A file sandbox cannot be applied to an already-running CLI: adopt ATTACHES
+  // to an existing host pane/process, and confinement (bwrap wrap on Linux /
+  // Seatbelt profile on macOS) can only be established at spawn time — there is
+  // no way to retro-fit a sandbox around a live process. Refuse to adopt when
+  // the sandbox is active for this bot rather than run it UNsandboxed; it will
+  // cold-start (sandboxed) via forkWorker/normal resume on the next message.
+  // Covers all three activation sources: legacy per-bot `readIsolation`, the new
+  // per-bot `sandbox`, and the global `BOTMUX_SANDBOX=1` (sandboxEnabled()).
+  // (Codex review #2, fail-closed; extended for the unified fs-policy sandbox.)
+  const sandboxActiveForBot = botCfg.sandbox === true
+    || botCfg.readIsolation === true
+    || sandboxEnabled();
+  if (sandboxActiveForBot) {
+    logger.warn(`[${t}] sandbox-enabled bot: refusing to adopt existing CLI (would run unsandboxed); will cold-start sandboxed on next message`);
     return;
   }
 

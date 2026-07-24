@@ -540,6 +540,50 @@ describe('session.start lifecycle integration', () => {
   });
 });
 
+describe('blocker #3: forkAdoptWorker refuses sandbox-enabled bots', () => {
+  const adopt = () => makeDs({
+    adoptedFrom: {
+      tmuxTarget: 'bmx-deadbeef:0.0',
+      originalCliPid: 23456,
+      sessionId: 'codex-session',
+      cliId: 'codex',
+      cwd: '/repo',
+    },
+  });
+
+  it('legacy readIsolation:true → refuses to adopt (no fork, no session.start)', () => {
+    vi.mocked(getBot).mockImplementation(() => defaultBot({ readIsolation: true }));
+    forkAdoptWorker(adopt());
+    expect(forkMock).not.toHaveBeenCalled();
+    expect(emitHookEventMock).not.toHaveBeenCalledWith('session.start', expect.anything());
+  });
+
+  it('new sandbox:true → refuses to adopt (would run unsandboxed)', () => {
+    vi.mocked(getBot).mockImplementation(() => defaultBot({ sandbox: true }));
+    forkAdoptWorker(adopt());
+    expect(forkMock).not.toHaveBeenCalled();
+    expect(emitHookEventMock).not.toHaveBeenCalledWith('session.start', expect.anything());
+  });
+
+  it('global BOTMUX_SANDBOX=1 → refuses to adopt even when the bot has no per-bot flag', () => {
+    vi.stubEnv('BOTMUX_SANDBOX', '1');
+    vi.mocked(getBot).mockImplementation(() => defaultBot());
+    forkAdoptWorker(adopt());
+    expect(forkMock).not.toHaveBeenCalled();
+    expect(emitHookEventMock).not.toHaveBeenCalledWith('session.start', expect.anything());
+    vi.unstubAllEnvs();
+  });
+
+  it('no sandbox anywhere → adopt proceeds (fork + session.start)', () => {
+    vi.mocked(getBot).mockImplementation(() => defaultBot());
+    forkAdoptWorker(adopt());
+    expect(forkMock).toHaveBeenCalled();
+    expect(emitHookEventMock).toHaveBeenCalledWith('session.start', expect.objectContaining({
+      reason: 'adopt',
+    }));
+  });
+});
+
 describe('managed turn authority worker generations', () => {
   it('revokes the old capability immediately when a normal double-fork replacement fails', () => {
     const oldWorker = makeFakeWorker();

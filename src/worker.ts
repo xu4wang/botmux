@@ -6671,14 +6671,23 @@ async function spawnCli(
     // `node <checkout>/dist/cli.js`.
     const botmuxInstallRoot = canonical(dirname(dirname(fileURLToPath(import.meta.url))));
 
-    // Pre-create the OWN writable dirs the sandboxed CLI creates on demand, so
-    // they EXIST at spawn and survive the existence-filter below (bwrap can't
-    // bind a nonexistent source; a dropped rule → the CLI's mkdir/write EPERMs).
-    //  - data/turn-sends: `botmux send` appends its <sid>.jsonl dedup marker
+    // Pre-create the OWN writable dirs/files the sandboxed CLI creates on
+    // demand, so they EXIST at spawn and survive the existence-filter below
+    // (bwrap can't bind a nonexistent source; a dropped rule → the CLI's
+    // mkdir/write EPERMs).
+    //  - data/turn-sends/<sessionId>.jsonl: `botmux send` appends its dedup
+    //    marker. The policy grants ONLY this exact file (not the whole dir) so a
+    //    sandboxed CLI can't rewrite another session's marker — pre-create the
+    //    file itself (touch) so the single-file bind has a source.
     //  - data/attachments/<self>: `botmux quoted`/downloadResources writes here
     // (BOT_HOME + outbox are created elsewhere.) Best-effort — a failure just
     // reverts to the pre-existing drop behaviour.
-    try { mkdirSync(join(dataDir, 'turn-sends'), { recursive: true }); } catch { /* */ }
+    try {
+      const tsDir = join(dataDir, 'turn-sends');
+      mkdirSync(tsDir, { recursive: true });
+      const tsFile = join(tsDir, `${cfg.sessionId}.jsonl`);
+      if (!existsSync(tsFile)) writeFileSync(tsFile, '');
+    } catch { /* */ }
     try { mkdirSync(join(dataDir, 'attachments', cfg.larkAppId), { recursive: true }); } catch { /* */ }
     // schedules.json is a shared RMW store (`botmux schedule`); pre-create as an
     // empty map if absent (same content schedule-store itself writes) so a fresh
@@ -6741,6 +6750,7 @@ async function spawnCli(
       sessionDataDir: canonical(dataDir),
       workingDir: canonical(cfg.workingDir),
       currentAppId: cfg.larkAppId,
+      sessionId: cfg.sessionId,
       botHome: canonical(ownBotHome!),
       redirectedCliData: willRedirectCliData,
       cliDataPaths: willRedirectCliData ? undefined : keepExisting([
