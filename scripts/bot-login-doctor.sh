@@ -124,7 +124,16 @@ if [ "$HAS_SECURITY" = 1 ] && security find-generic-password -s "$KC_SVC" >/dev/
       if [ "$NEWER" = kc ]; then
         printf '%s' "$KCRAW" > "$CRED.tmp.$$" && chmod 600 "$CRED.tmp.$$" && mv -f "$CRED.tmp.$$" "$CRED" && printf '  ↳ keychain 最新 token 已写入共享文件\n'
       fi
-      for d in "$HOME"/.botmux/bots/*/claude/.credentials.json; do [ -e "$d" ] && cp "$CRED" "$d.tmp.$$" && chmod 600 "$d.tmp.$$" && mv -f "$d.tmp.$$" "$d" && printf '  ↳ 播种 %s\n' "$(echo "$d"|sed -E 's#.*/cli_([^/]+)/.*#cli_\1#')"; done
+      # 播种表必须与 bot-cred-refresh-inplace.sh 保持一致:凡是持自己 CLAUDE_CONFIG_DIR
+      # 的消费者(botmux 隔离 bot + cc-connect + lark-channel-bridge)都要播,漏一个 =
+      # 恢复后它仍握旧凭证,到期自刷会再次轮换掉中心 RT。
+      for d in "$HOME"/.botmux/bots/*/claude/.credentials.json \
+               "$HOME"/.cc-connect/claude/.credentials.json \
+               "$HOME"/.lark-channel/claude/.credentials.json; do
+        [ -e "$d" ] || continue
+        lbl="${d#$HOME/}"; lbl="${lbl%/claude/.credentials.json}"; lbl="${lbl#.botmux/bots/}"
+        cp "$CRED" "$d.tmp.$$" && chmod 600 "$d.tmp.$$" && mv -f "$d.tmp.$$" "$d" && printf '  ↳ 播种 %s\n' "$lbl"
+      done
       if security delete-generic-password -s "$KC_SVC" >/dev/null 2>&1; then printf '  ✅ keychain 已删(收敛回单一文件源)\n'; else printf '  ⚠️ keychain 删除失败(授权框未点允许?);文件已合并,可手动删后再 suspend\n'; fi
       "$BOTMUX_BIN" suspend all >/dev/null 2>&1 && printf '  ↳ suspend all 完成\n'
       CC=$(launchctl list 2>/dev/null | grep -i cc-connect | awk '{print $3}' | head -1)
