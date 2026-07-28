@@ -20,8 +20,9 @@
 # 退出码: 0=刷新成功  1=刷新失败(已回滚,live 未损)  2=前置缺失  3=keychain 有条目(拒跑)
 #         4=起点凭证被清空/损坏(熔断:已告警并停止自动刷新,等人工 /login 或 doctor --fix)
 #
-# 告警: 失败第 1 次立刻发飞书,之后每 4 次(=2 小时)再发一次;恢复时发一次;熔断发一次。
-#       走 lark-cli bot 身份,不依赖 claude 凭证。用 ALERT=0 关闭,ALERT_APP/ALERT_TO 改收发方。
+# 通知: 每轮跑完都发一条飞书心跳(无论结果):无需刷新/刷新成功/刷新失败/熔断中/锁跳过,
+#       内容含 token 到期时间与预计下次真刷新时间。HEARTBEAT=0 只关心跳(失败/熔断告警仍在);
+#       走 lark-cli bot 身份,不依赖 claude 凭证。用 ALERT=0 全关,ALERT_APP/ALERT_TO 改收发方。
 
 set -uo pipefail
 
@@ -65,6 +66,16 @@ alert(){
     log "  ⚠️ 告警发送失败(查 ~/.lark-cli-bots/$ALERT_APP)"; return 1
   fi
 }
+# ── 心跳:每轮跑完都发一条结果通知(2026-07-28 起从"故障才有声"升级为"每轮有声")──
+# 与 alert 同通道,但语义不同:heartbeat 是常规状态播报,可用 HEARTBEAT=0 单独关掉;
+# 真故障(失败/熔断/锁卡死)一律走 alert,不受 HEARTBEAT 开关影响。
+HEARTBEAT="${HEARTBEAT:-1}"
+heartbeat(){ [ "${HEARTBEAT:-1}" = 1 ] || return 0; alert "$1"; }
+# expiresAt → 本地时间 "MM-DD HH:MM"
+expfmt(){ node -e 'try{const o=JSON.parse(require("fs").readFileSync(process.argv[1])).claudeAiOauth;const d=new Date(Number(o.expiresAt));const p=n=>String(n).padStart(2,"0");console.log(p(d.getMonth()+1)+"-"+p(d.getDate())+" "+p(d.getHours())+":"+p(d.getMinutes()))}catch(e){console.log("?")}' "$1"; }
+# 预计下次真刷新 = (expiresAt - MARGIN) 之后的第一个整半点 cron 槽(*/30 对齐);
+# 已进入刷新窗口则给"下一个半点"。仅为预估,实际以每轮门槛判断为准。
+nextref(){ node -e 'try{const o=JSON.parse(require("fs").readFileSync(process.argv[1])).claudeAiOauth;const m=Number(process.argv[2]||90);let t=Number(o.expiresAt)-m*60000;const now=Date.now();if(t<now)t=now;const slot=1800000;t=Math.ceil(t/slot)*slot;if(t<=now)t+=slot;const d=new Date(t);const p=n=>String(n).padStart(2,"0");console.log(p(d.getMonth()+1)+"-"+p(d.getDate())+" "+p(d.getHours())+":"+p(d.getMinutes()))}catch(e){console.log("?")}' "$1" "$2"; }
 # 进程是否存在。kill -0 返回非零不只有 ESRCH(不存在),也可能是 EPERM(存在但无权发信号),
 # 两者都当"已死"就会去删别人的活锁 → 再用 ps -p 复核;拿不准一律当"存在",宁可不清锁。
 alive(){ kill -0 "$1" 2>/dev/null || ps -p "$1" >/dev/null 2>&1; }
@@ -114,6 +125,8 @@ fi
 if ! mkdir "$LOCKDIR" 2>/dev/null; then
   owner="$(cat "$LOCKPID" 2>/dev/null || echo '?')"
   log "⏭️ 另一实例正在刷新(锁 $LOCKDIR, pid=$owner),本轮跳过"
+  # 不在这里读 CRED 的到期时间:持锁实例可能正处于"伪过期后/半写入"中间态,读出来是误导
+  heartbeat "⏭️【${HOSTTAG}】凭证心跳:本轮跳过(另一实例正在刷新,锁 pid=${owner});凭证状态以持锁实例本轮的心跳为准"
   # 持有者活着但卡死 → 后续每轮都会静默跳过,又变成"无声故障"。超过 30 分钟报一次。
   # ⚠️ 标记必须【发送成功之后】再落:先落标记后发送的话,一次网络失败就等于永久闭嘴。
   if [ -n "$(find "$LOCKDIR" -maxdepth 0 -mmin +30 2>/dev/null)" ] && [ ! -e "$LOCKDIR/alerted" ]; then
@@ -142,12 +155,19 @@ log "起点: $(fp "$CRED")"
 # 从空备份回滚成空",连转 9 轮 4 小时,毫无产出也毫无声音。空文件是人工介入信号,不是重试信号。
 if ! haskeys "$CRED"; then
   n=$(failcount)
-  if [ "${n:-0}" -lt 900 ]; then                      # 900 = 已告警过熔断,不重复刷屏
-    alert "🔴【${HOSTTAG}】凭证文件已被清空/损坏,已停止自动刷新
+  if [ "${n:-0}" -lt 900 ]; then                      # 900+ = 熔断态,值随跳过轮数递增
+    # 发送成功才落 900 标记:否则(网络抖动等)下一轮重试完整告警,不会静默进入熔断态。
+    # 这条必须走 alert 而非 heartbeat —— HEARTBEAT=0 时熔断也必须有声。
+    if alert "🔴【${HOSTTAG}】凭证文件已被清空/损坏,已停止自动刷新
 文件: $CRED
 需人工处理: SSH 里 claude /login,或 bot-login-doctor --fix
-(在此之前每 30 分钟的自动刷新都会跳过,不再空转)"
-    setcount 900
+(在人工处理前,每 30 分钟会心跳提醒一次,不再空转刷新)"; then
+      setcount 900
+    fi
+  else
+    # 计数封顶 99998:failcount 对 6 位以上数字按 0 处理,放任递增 5 年多后会绕回"首报"重刷屏
+    [ "$n" -lt 99998 ] && setcount $((n + 1))
+    heartbeat "🔴【${HOSTTAG}】凭证心跳:仍处熔断(已跳过 $((n - 899)) 轮),等待人工 /login 或 doctor --fix"
   fi
   log "❌ 起点无 token(EMPTY/损坏)→ 拒绝继续,避免空转死循环。等待人工 /login 或 doctor --fix"
   exit 4
@@ -160,6 +180,9 @@ MARGIN_MIN="${MARGIN_MIN:-90}"
 LEFT="$(node -e 'try{const o=JSON.parse(require("fs").readFileSync(process.argv[1])).claudeAiOauth;console.log(Math.round((Number(o.expiresAt)-Date.now())/60000))}catch(e){console.log(-99999)}' "$CRED")"
 if [ "$FORCE" != 1 ] && [ "${LEFT:-0}" -gt "$MARGIN_MIN" ] 2>/dev/null; then
   log "剩余 ${LEFT}m > 阈值 ${MARGIN_MIN}m → 无需刷新(no-op)。手动强刷加 --force 或 FORCE=1"
+  heartbeat "🟢【${HOSTTAG}】凭证心跳:本轮无需刷新(剩 ${LEFT}m > 阈值 ${MARGIN_MIN}m)
+token 到期: $(expfmt "$CRED")
+预计下次刷新: $(nextref "$CRED" "$MARGIN_MIN")"
   exit 0
 fi
 log "剩余 ${LEFT}m ≤ 阈值 ${MARGIN_MIN}m(或 --force)→ 执行刷新"
@@ -217,16 +240,20 @@ NEWFP="$(accfp "$CRED")"
 if valid "$CRED" && [ -n "$NEWFP" ] && [ "$NEWFP" != "$OLDFP" ]; then
   log "✅ 刷新成功: $(fp "$CRED")   (claude rc=$RC out=$HEAD)"
 
-  # 恢复通知:之前连续失败过才发(否则每 6.5 小时报一次喜就成骚扰)
+  # 恢复说明并入成功心跳(每轮都有心跳,单独报喜会变成两条)
   PREVFAIL=$(failcount)
-  if [ "${PREVFAIL:-0}" -gt 0 ]; then
-    if [ "${PREVFAIL}" -ge 900 ]; then
-      alert "✅【${HOSTTAG}】凭证已恢复正常,自动刷新重新接管(此前处于「已清空·熔断」状态)"
-    else
-      alert "✅【${HOSTTAG}】凭证刷新已恢复(此前连续失败 ${PREVFAIL} 次)"
-    fi
+  RECOV=""
+  if [ "${PREVFAIL:-0}" -ge 900 ]; then
+    RECOV="
+(此前处于「已清空·熔断」状态,现已恢复,自动刷新重新接管)"
+  elif [ "${PREVFAIL:-0}" -gt 0 ]; then
+    RECOV="
+(此前连续失败 ${PREVFAIL} 次,现已恢复)"
   fi
   setcount 0
+  heartbeat "✅【${HOSTTAG}】凭证心跳:本轮已刷新成功
+新 token 到期: $(expfmt "$CRED")
+预计下次刷新: $(nextref "$CRED" "$MARGIN_MIN")${RECOV}"
 
   # keychain 复核(不该出现)
   if command -v security >/dev/null 2>&1 && security find-generic-password -s "$KC_SVC" >/dev/null 2>&1; then
@@ -286,14 +313,14 @@ else
     fi
   fi
 
-  # 告警:第 1 次立刻报(2026-07-27 那次静默了 4.5 小时才被人发现),之后每 4 次(=2 小时)再报一次
+  # 告警:每轮都报(每轮心跳都要有结果;2026-07-27 那次静默了 4.5 小时才被人发现)。
+  # 走 alert 而非 heartbeat:失败属于真故障,不能被 HEARTBEAT=0 关掉。
   n=$(failcount); [ "${n:-0}" -ge 900 ] && n=0        # 从熔断态回到普通失败态,重新计数
   n=$((n + 1)); setcount "$n"
-  if [ "$n" = 1 ] || [ $((n % 4)) = 0 ]; then
-    alert "🔴【${HOSTTAG}】凭证刷新失败 第${n}次
+  alert "🔴【${HOSTTAG}】凭证刷新失败 第${n}次
 out=$HEAD
 当前: $(fp "$CRED")(${ACTION})
-连续失败会每 2 小时再报一次;若文件被清空会转为熔断并停刷。"
-  fi
+token 到期: $(expfmt "$CRED")
+下轮重试: 30 分钟后;若文件被清空会转为熔断并停刷。"
   exit 1
 fi
