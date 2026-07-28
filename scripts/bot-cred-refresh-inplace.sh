@@ -12,6 +12,9 @@
 #   · keychain 里【必须没有】Claude Code-credentials 条目,否则别的 native 进程会走 keychain 分裂。
 #   · 刷新会轮换 refresh token → 运行中、手握旧 RT 的进程(bot/cc-connect/GUI/本会话)之后自刷会失败
 #     并清空自己 → 所以刷新成功后应 SUSPEND=1 逼 bot 冷启动重读(本脚本管不到 GUI/独立会话,见末尾)。
+#   · 伪过期窗口里【新起】的 CLI 会自己去刷 → 同样轮换掉 RT,把本脚本这次刷新搞废。所以真要刷之前
+#     先 `botmux freeze`(只拦新起,不动在跑的),EXIT trap 里 `freeze --release`。两个闸门分工:
+#     freeze 管"新的别起",SUSPEND 管"老的收干净"。
 #
 # 用法:
 #   scripts/bot-cred-refresh-inplace.sh              # 刷新 + 播种隔离bot(不 suspend)
@@ -145,8 +148,10 @@ printf '%s\n' "$$" > "$LOCKPID" 2>/dev/null || {
 锁目录: $LOCKDIR"
   exit 2
 }
-# 释放时校验 owner:绝不删别人的锁
-trap 'if [ "$(cat "$LOCKPID" 2>/dev/null)" = "$$" ]; then rm -f "$LOCKPID" "$LOCKDIR/alerted" 2>/dev/null; rmdir "$LOCKDIR" 2>/dev/null; fi' EXIT
+# 释放时校验 owner:绝不删别人的锁。
+# spawn 冻结也在这里解:成功、失败回滚、中途 exit 全都覆盖(FROZE 此刻还没定义,
+# 所以必须写 ${FROZE:-0} —— set -u 下裸 $FROZE 会让 trap 自己炸掉,连锁都不会释放)。
+trap 'if [ "${FROZE:-0}" = 1 ] && [ -x "$BOTMUX_BIN" ]; then "$BOTMUX_BIN" freeze --release >/dev/null 2>&1 && log "已解冻新 CLI 会话"; fi; if [ "$(cat "$LOCKPID" 2>/dev/null)" = "$$" ]; then rm -f "$LOCKPID" "$LOCKDIR/alerted" 2>/dev/null; rmdir "$LOCKDIR" 2>/dev/null; fi' EXIT
 
 log "起点: $(fp "$CRED")"
 
@@ -186,6 +191,25 @@ token 到期: $(expfmt "$CRED")
   exit 0
 fi
 log "剩余 ${LEFT}m ≤ 阈值 ${MARGIN_MIN}m(或 --force)→ 执行刷新"
+
+# ── 冻结「新起 CLI」(botmux freeze) ────────────────────────────────────────
+# 为什么:下面的伪过期会让 live 凭证在几秒内呈"已过期"态。这期间冷启动的 CLI 会
+# 看到过期 token 并【自己去刷】→ 轮换掉 refresh token → 本脚本这次刷新用的旧 RT
+# 当场作废 → 失败回滚 → 全队投毒。读隔离 bot 更糟:它每次冷启动都把"最新凭证"
+# 复制进自己那份副本,伪过期的文件会被原样拷走。
+# 冻结【只拦新起】,已在跑的 CLI 由成功分支里的 suspend 收拾 —— 两件事分开。
+# --pid $$ :本脚本一死立刻解冻(kill -9 也能自愈);daemon 侧另有按文件 mtime 算的
+#           10 分钟硬上限,即使 trap 没跑到也不会把机器冻死。
+# 只在"真要刷"之后才冻:no-op 轮(每 30 分钟大多是 no-op)完全不碰闸门。
+FROZE=0
+if [ -x "$BOTMUX_BIN" ] && "$BOTMUX_BIN" freeze --reason cred-refresh --for 240s --pid $$ >/dev/null 2>&1; then
+  FROZE=1
+  log "已冻结新 CLI 会话(cred-refresh,240s 上限;被拦下的 spawn 解冻后自动重放)"
+else
+  # 刻意 fail-open:老版本 botmux 没有 freeze 子命令,或 daemon 状态异常时,
+  # 【继续刷新】。拿不到闸门是"小概率竞态",拒绝刷新是"必定过期掉线" —— 后者更糟。
+  log "⚠️ 未能冻结(botmux 无 freeze 子命令或调用失败)—— 本轮无 spawn 闸门,继续刷新"
+fi
 
 # ── 备份 ──
 cp -p "$CRED" "$BK" || {
