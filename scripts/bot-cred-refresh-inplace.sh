@@ -1,4 +1,10 @@
 #!/usr/bin/env bash
+# ⛔️ 已停用（DEPRECATED，2026-07-29 23:46 起）——生产刷新改走 scripts/bot-cred-refresh-oauth.sh
+#    （直连 OAuth 端点：不碰 live 文件、无伪过期/备份/回滚、失败原因可分辨）。
+#    本文件只作回滚备胎保留。**不要手动跑它**：它会把 live 凭证伪过期后交给 claude 去写,
+#    失败时 claude 可能清空文件,而且伪过期那 7~12 秒里任何消费者读到都会去自刷 → 轮换 RT → 全员掉线。
+#    回滚办法见 docs/token-refresh-setup.md 的「回滚」一节。
+#
 # bot-cred-refresh-inplace.sh — 手动【原地】刷新 ~/.claude/.credentials.json
 #
 # 与 bot-cred-refresh.sh(temp 刷新)的区别:直接在默认文件上刷新,成功时文件始终
