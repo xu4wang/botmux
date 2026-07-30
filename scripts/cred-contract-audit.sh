@@ -25,7 +25,18 @@ set -uo pipefail
 
 CLAUDE_BIN="${CLAUDE_BIN:-}"
 if [ -z "$CLAUDE_BIN" ]; then
-  RAW="$(command -v claude || echo "$HOME/.local/bin/claude")"
+  # 必须盯 daemon 真正 spawn 的那个 claude。daemon 用登录 shell 的 PATH，
+  # 而 cron 的 PATH 往往不含 ~/.local/bin —— 旧写法 `command -v claude ||
+  # echo ~/.local/bin/claude` 的兜底只在「PATH 上完全没有 claude」时才触发，
+  # 所以在「cron PATH 里有另一个 claude（如 homebrew 的 npm 版）」的机器上
+  # 它会静默审计错的那个二进制：升了 .local 的 claude 审计看不见，报的是假的绿。
+  # （2026-07-30 在 tian 那台实撞：.local=2.1.220 / homebrew=2.1.178，审计盯的是后者。）
+  # 定案：native 安装位优先，其次才回落 PATH 解析。
+  if [ -x "$HOME/.local/bin/claude" ]; then
+    RAW="$HOME/.local/bin/claude"
+  else
+    RAW="$(command -v claude || echo "$HOME/.local/bin/claude")"
+  fi
   CLAUDE_BIN="$(python3 -c 'import os,sys;print(os.path.realpath(sys.argv[1]))' "$RAW" 2>/dev/null || echo "$RAW")"
 fi
 STATE="${CONTRACT_STATE:-$HOME/.botmux/logs/.cred-contract-state.json}"
@@ -81,7 +92,7 @@ MTIME="$(stat -f %m "$CLAUDE_BIN" 2>/dev/null)"
 
 # ── 增量短路：size+mtime 没变 → 秒退（不算 sha、不 grep）──
 if [ "$FULL" != 1 ] && [ "$SIZE" = "$(sget size)" ] && [ "$MTIME" = "$(sget mtime)" ]; then
-  log "无变化(size=$SIZE mtime=$MTIME) → 秒退"
+  log "无变化(bin=$CLAUDE_BIN size=$SIZE mtime=$MTIME) → 秒退"
   exit 0
 fi
 
@@ -94,6 +105,7 @@ PREVVER="$(sget version)"; PREVSHA="$(sget sha)"
 #    和 echo 的 "0" 拼成 "0\n0"，后面所有整数比较当场报错。只取第一行并兜空值。
 CID_HITS="$(grep -ac -- "$CLIENT_ID" "$CLAUDE_BIN" 2>/dev/null | head -1)"; CID_HITS="${CID_HITS:-0}"
 PATH_HITS="$(grep -ac -- "$TOKEN_PATH" "$CLAUDE_BIN" 2>/dev/null | head -1)"; PATH_HITS="${PATH_HITS:-0}"
+log "被审计二进制: $CLAUDE_BIN"
 log "版本: ${PREVVER:-(无基线)} → $VER ; sha ${PREVSHA:0:12}… → ${SHA:0:12}… ; client_id 命中=$CID_HITS 路径命中=$PATH_HITS"
 
 if [ "${CID_HITS:-0}" -ge 1 ] && [ "${PATH_HITS:-0}" -ge 1 ]; then
