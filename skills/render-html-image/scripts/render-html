@@ -1,0 +1,350 @@
+#!/usr/bin/env node
+/**
+ * render-html — 把本地 HTML / URL 渲染成高清 PNG，可在 botmux 的 Seatbelt 沙箱内运行。
+ *
+ * 为什么不用完整 Chrome / puppeteer / playwright：
+ *   - 完整 Chrome 的 `--headless=new` 在 macOS 后台会话（launchctl managername=Background）
+ *     里要 WindowServer，会静默挂死；chrome-headless-shell 走 Skia 软件光栅，不需要图形会话。
+ *   - puppeteer/playwright 是额外依赖，沙箱里未必装得上。本脚本只用 Node 内置能力
+ *     （child_process + 全局 WebSocket，Node ≥ 22），直接讲 CDP。
+ *
+ * 用法：
+ *   render-html <file.html|http(s)://...> -o out.png [选项]
+ *
+ * 选项：
+ *   -o, --out <path>       输出 PNG 路径（必填）
+ *   -w, --width <px>       视口 CSS 宽度，默认 1440。内容更宽时自动扩到内容宽度（不裁切）
+ *   -h, --height <px>      固定视口 CSS 高度；不给则按内容整页高度（推荐）
+ *   -s, --scale <n>        设备像素比，默认 2（2x Retina）
+ *       --clip <selector>  只截某个元素（CSS 选择器）
+ *       --wait <ms>        字体/布局稳定后的额外等待，默认 200
+ *       --timeout <ms>     单次渲染总超时，默认 30000
+ *       --no-fit-width     关闭"内容更宽时自动扩宽"
+ *       --chrome <path>    指定 chrome-headless-shell 二进制
+ *       --quiet            不打印 JSON 摘要
+ *
+ * 退出码：0 成功；1 参数/环境错误；2 渲染失败（含超时）。
+ * 成功时 stdout 打印一行 JSON：{ok, out, cssWidth, cssHeight, pxWidth, pxHeight, scale, bytes}
+ */
+
+'use strict';
+const { spawn } = require('node:child_process');
+const fs = require('node:fs');
+const path = require('node:path');
+const os = require('node:os');
+const http = require('node:http');
+
+// ── 参数解析 ────────────────────────────────────────────────────────────────
+function parseArgs(argv) {
+  const o = { width: 1440, scale: 2, wait: 200, timeout: 30000, fitWidth: true, quiet: false };
+  const rest = [];
+  for (let i = 0; i < argv.length; i++) {
+    const a = argv[i];
+    const val = () => {
+      const v = argv[++i];
+      if (v === undefined) fail(`${a} 缺少值`);
+      return v;
+    };
+    if (a === '-o' || a === '--out') o.out = val();
+    else if (a === '-w' || a === '--width') o.width = num(val(), a);
+    else if (a === '-h' || a === '--height') o.height = num(val(), a);
+    else if (a === '-s' || a === '--scale') o.scale = Number(val());
+    else if (a === '--clip') o.clip = val();
+    else if (a === '--wait') o.wait = num(val(), a);
+    else if (a === '--timeout') o.timeout = num(val(), a);
+    else if (a === '--no-fit-width') o.fitWidth = false;
+    else if (a === '--chrome') o.chrome = val();
+    else if (a === '--quiet') o.quiet = true;
+    else if (a === '--help' || a === '-?') { usage(); process.exit(0); }
+    else if (a.startsWith('-')) fail(`未知选项 ${a}`);
+    else rest.push(a);
+  }
+  if (rest.length !== 1) fail('需要且只需要一个输入（HTML 文件路径或 http(s) URL）');
+  o.input = rest[0];
+  if (!o.out) fail('缺少 -o <out.png>');
+  return o;
+}
+const num = (v, flag) => {
+  const n = Number(v);
+  if (!Number.isFinite(n) || n <= 0) fail(`${flag} 需要正数，收到 ${v}`);
+  return Math.round(n);
+};
+function fail(msg) { console.error(`render-html: ${msg}`); process.exit(1); }
+function usage() {
+  console.error('用法: render-html <file.html|url> -o out.png [-w 1440] [-s 2] [-h N] [--clip sel] [--wait ms]');
+}
+
+// ── 定位 chrome-headless-shell ──────────────────────────────────────────────
+function findChrome(explicit) {
+  const tried = [];
+  const ok = (p) => { tried.push(p); try { fs.accessSync(p, fs.constants.X_OK); return true; } catch { return false; } };
+  if (explicit) {
+    if (ok(explicit)) return explicit;
+    fail(`--chrome 指定的路径不可执行: ${explicit}`);
+  }
+  if (process.env.RENDER_HTML_CHROME && ok(process.env.RENDER_HTML_CHROME)) return process.env.RENDER_HTML_CHROME;
+  // puppeteer 缓存：~/.cache/puppeteer/chrome-headless-shell/<平台-版本>/chrome-headless-shell-*/chrome-headless-shell
+  const root = path.join(os.homedir(), '.cache', 'puppeteer', 'chrome-headless-shell');
+  let versions = [];
+  try { versions = fs.readdirSync(root).sort().reverse(); } catch { /* 没装 */ }
+  for (const v of versions) {
+    let inner = [];
+    try { inner = fs.readdirSync(path.join(root, v)); } catch { continue; }
+    for (const d of inner) {
+      const p = path.join(root, v, d, 'chrome-headless-shell');
+      if (ok(p)) return p;
+    }
+  }
+  // PATH 上的同名二进制
+  for (const dir of (process.env.PATH || '').split(':')) {
+    if (!dir) continue;
+    const p = path.join(dir, 'chrome-headless-shell');
+    if (ok(p)) return p;
+  }
+  console.error('render-html: 找不到 chrome-headless-shell。装一份：');
+  console.error('  npx --yes @puppeteer/browsers install chrome-headless-shell@stable');
+  console.error('（会装到 ~/.cache/puppeteer，沙箱内可读可写）已尝试：\n  ' + tried.join('\n  '));
+  process.exit(1);
+}
+
+// ── 极简 CDP 客户端（只用 Node 内置 WebSocket）────────────────────────────
+class Cdp {
+  constructor(ws) {
+    this.ws = ws;
+    this.id = 0;
+    this.pending = new Map();
+    this.listeners = [];
+    ws.addEventListener('message', (ev) => {
+      let msg;
+      try { msg = JSON.parse(typeof ev.data === 'string' ? ev.data : String(ev.data)); } catch { return; }
+      if (msg.id !== undefined && this.pending.has(msg.id)) {
+        const { resolve, reject } = this.pending.get(msg.id);
+        this.pending.delete(msg.id);
+        msg.error ? reject(new Error(`${msg.error.message} (${JSON.stringify(msg.error.data ?? '')})`)) : resolve(msg.result);
+      } else if (msg.method) {
+        for (const l of this.listeners) l(msg);
+      }
+    });
+  }
+  send(method, params = {}, sessionId) {
+    const id = ++this.id;
+    const payload = { id, method, params };
+    if (sessionId) payload.sessionId = sessionId;
+    this.ws.send(JSON.stringify(payload));
+    return new Promise((resolve, reject) => this.pending.set(id, { resolve, reject }));
+  }
+  once(method, sessionId) {
+    return new Promise((resolve) => {
+      const l = (msg) => {
+        if (msg.method !== method) return;
+        if (sessionId && msg.sessionId !== sessionId) return;
+        this.listeners = this.listeners.filter((x) => x !== l);
+        resolve(msg.params);
+      };
+      this.listeners.push(l);
+    });
+  }
+}
+
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+function withTimeout(p, ms, what) {
+  let t;
+  return Promise.race([
+    p.finally(() => clearTimeout(t)),
+    new Promise((_, rej) => { t = setTimeout(() => rej(new Error(`超时 ${ms}ms：${what}`)), ms); }),
+  ]);
+}
+const httpJson = (url) => new Promise((resolve, reject) => {
+  http.get(url, (res) => {
+    let b = '';
+    res.on('data', (c) => (b += c));
+    res.on('end', () => { try { resolve(JSON.parse(b)); } catch (e) { reject(e); } });
+  }).on('error', reject);
+});
+
+// ── 主流程 ─────────────────────────────────────────────────────────────────
+async function main() {
+  const opt = parseArgs(process.argv.slice(2));
+  const chrome = findChrome(opt.chrome);
+  const url = /^(https?|file|data):/.test(opt.input)
+    ? opt.input
+    : 'file://' + path.resolve(opt.input);
+  if (url.startsWith('file://')) {
+    const f = url.slice('file://'.length);
+    if (!fs.existsSync(f)) fail(`输入文件不存在: ${f}`);
+  }
+  fs.mkdirSync(path.dirname(path.resolve(opt.out)), { recursive: true });
+  const profile = fs.mkdtempSync(path.join(os.tmpdir(), 'render-html-'));
+
+  const child = spawn(chrome, [
+    '--headless',
+    '--disable-gpu',
+    '--no-sandbox',              // Chrome 自己的沙箱在 Seatbelt 内起不来
+    '--hide-scrollbars',
+    '--disable-dev-shm-usage',
+    '--remote-debugging-port=0', // 0 = 让内核挑端口，避免并发撞端口
+    `--user-data-dir=${profile}`,
+  ], { stdio: ['ignore', 'pipe', 'pipe'] });
+
+  const cleanup = () => {
+    try { child.kill('SIGKILL'); } catch { /* 已退出 */ }
+    try { fs.rmSync(profile, { recursive: true, force: true }); } catch { /* 忽略 */ }
+  };
+  const die = (msg) => {
+    cleanup();
+    console.error(`render-html: ${msg}`);
+    process.exit(2);
+  };
+
+  let stderr = '', wsUrl;
+  try {
+    wsUrl = await withTimeout(new Promise((resolve, reject) => {
+      child.stderr.on('data', (c) => {
+        stderr += c;
+        const m = stderr.match(/ws:\/\/[^\s]+/);
+        if (m) resolve(m[0]);
+      });
+      child.on('exit', (code, sig) => reject(new Error(
+        `chrome-headless-shell 启动即退出 (code=${code} signal=${sig})。stderr:\n${stderr.trim().slice(-1500)}`)));
+    }), opt.timeout, 'chrome 启动');
+  } catch (e) {
+    // SIGSEGV 在 Seatbelt 沙箱里有一个已知且唯一常见的成因：profile 是 (deny default) 却没有
+    // 放行 iokit —— Chrome 打开 IOKit user-client 时被拒然后段错误。把这条直接写进报错，
+    // 否则下一个人又要从头查一遍（我们查了半天才定位到）。
+    if (/SIGSEGV/.test(e.message)) {
+      die(`${e.message}\n\n很可能是 Seatbelt 沙箱缺 iokit 放行：\n`
+        + `  1) 看 profile 首行是不是 (deny default)：head -1 <你的 .sb>\n`
+        + `  2) 是的话，profile 里需要一条 (allow iokit-open)（实测这一条就够，不需要 get/set-properties）\n`
+        + `  3) (allow default) 的 profile 不会有这个问题\n`
+        + `这属于 botmux 侧的沙箱策略，改它要走维护同事，不是本工具能绕过的。`);
+    }
+    die(e.message);
+  }
+
+  try {
+    const ws = new WebSocket(wsUrl);
+    await withTimeout(new Promise((res, rej) => {
+      ws.addEventListener('open', res, { once: true });
+      ws.addEventListener('error', () => rej(new Error('CDP WebSocket 连接失败')), { once: true });
+    }), opt.timeout, 'CDP 连接');
+    const cdp = new Cdp(ws);
+
+    const { targetId } = await cdp.send('Target.createTarget', { url: 'about:blank' });
+    const { sessionId } = await cdp.send('Target.attachToTarget', { targetId, flatten: true });
+    const S = sessionId;
+
+    const setMetrics = (width, height) => cdp.send('Emulation.setDeviceMetricsOverride', {
+      width, height, deviceScaleFactor: opt.scale, mobile: false,
+    }, S);
+
+    await cdp.send('Page.enable', {}, S);
+    await cdp.send('Runtime.enable', {}, S);
+    await setMetrics(opt.width, opt.height ?? 900);
+
+    const loaded = cdp.once('Page.loadEventFired', S);
+    const nav = await cdp.send('Page.navigate', { url }, S);
+    // 导航失败（文件不存在、被 Seatbelt deny 掉读权限、网络错误）时 Chrome 照样 fire load
+    // 事件、照样能截出一张空白图。不看 errorText 就会得到"退出码 0 + 空白 PNG"这种最难查的
+    // 假成功 —— 沙箱里读不到输入文件正是最常见的一种。
+    if (nav.errorText) throw new Error(`导航失败 ${nav.errorText} — ${url}（沙箱内常见原因：该路径被 deny，换到自己可读的目录）`);
+    await withTimeout(loaded, opt.timeout, `加载 ${url}`);
+
+    // 字体是中文渲染的关键：不等 fonts.ready 会截到 fallback 字形。
+    await cdp.send('Runtime.evaluate', {
+      expression: 'document.fonts ? document.fonts.ready.then(() => true) : true',
+      awaitPromise: true,
+    }, S).catch(() => { /* 老引擎没有 document.fonts，忽略 */ });
+    await sleep(opt.wait);
+
+    // 量真实内容尺寸。两个坑：
+    //   1. scrollWidth/scrollHeight 永远 ≥ 视口，内容比视口小时量出来的是视口 —— 直接用会
+    //      得到一张大半是空白的图（宽表格尤其明显）。所以内容不溢出时改量 body 盒子的实际边界。
+    //   2. 宽度定下来之后布局会重排，高度必须在最终宽度下再量一次，否则宽表格的高度是错的。
+    const measure = async () => {
+      const { result } = await cdp.send('Runtime.evaluate', {
+        expression: `(() => {
+          const d = document.documentElement, b = document.body;
+          if (!b) return JSON.stringify({ w: innerWidth, h: innerHeight });
+          const cs = getComputedStyle(b);
+          const pad = (k) => parseFloat(cs[k]) || 0;
+          const box = b.getBoundingClientRect();
+          // body 常带 min-height:100vh / height:100%（AntD 风格页面几乎都有），此时 body 盒子
+          // 等于视口而不是内容 —— 量它会把视口高度当成内容高度，出图底部白一截。所以有子元素时
+          // 以「子元素并集 + body 的 padding/margin」为准，只在没有子元素时才退回 body 盒子。
+          let right = 0, bottom = 0;
+          for (const el of b.children) {
+            const r = el.getBoundingClientRect();
+            if (r.width === 0 && r.height === 0) continue;   // 跳过 display:none / 空节点
+            if (r.right > right) right = r.right;
+            if (r.bottom > bottom) bottom = r.bottom;
+          }
+          if (b.children.length) {
+            right += pad('paddingRight') + pad('marginRight') + pad('borderRightWidth');
+            bottom += pad('paddingBottom') + pad('marginBottom') + pad('borderBottomWidth');
+          } else {
+            right = box.right + pad('marginRight');
+            bottom = box.bottom + pad('marginBottom');
+          }
+          const sw = Math.max(d.scrollWidth, b.scrollWidth);
+          const sh = Math.max(d.scrollHeight, b.scrollHeight);
+          return JSON.stringify({
+            // 内容真的溢出视口时用 scroll 尺寸（它此时就是内容尺寸）；否则用上面量出的内容边界。
+            w: sw > innerWidth ? sw : Math.ceil(right),
+            h: sh > innerHeight ? sh : Math.ceil(bottom),
+          });
+        })()`,
+        returnByValue: true,
+      }, S);
+      return JSON.parse(result.value);
+    };
+
+    const first = await measure();
+    const cssWidth = opt.fitWidth ? Math.max(opt.width, first.w) : opt.width;
+    if (cssWidth !== opt.width) {           // 扩宽后重排，高度要在新宽度下重新量
+      await setMetrics(cssWidth, opt.height ?? 900);
+      await sleep(60);
+    }
+    const cssHeight = opt.height ?? Math.max(1, (await measure()).h);
+    await setMetrics(cssWidth, cssHeight);
+    await sleep(60); // 让 reflow 落定
+
+    const shotParams = { format: 'png', captureBeyondViewport: true };
+    if (opt.clip) {
+      const box = await cdp.send('Runtime.evaluate', {
+        expression: `(() => {
+          const el = document.querySelector(${JSON.stringify(opt.clip)});
+          if (!el) return 'null';
+          const r = el.getBoundingClientRect();
+          return JSON.stringify({ x: r.x + scrollX, y: r.y + scrollY, width: r.width, height: r.height });
+        })()`,
+        returnByValue: true,
+      }, S);
+      if (box.result.value === 'null') throw new Error(`--clip 选择器没匹配到元素: ${opt.clip}`);
+      shotParams.clip = { ...JSON.parse(box.result.value), scale: 1 };
+    }
+
+    const shot = await withTimeout(cdp.send('Page.captureScreenshot', shotParams, S), opt.timeout, '截图');
+    const buf = Buffer.from(shot.data, 'base64');
+    fs.writeFileSync(path.resolve(opt.out), buf);
+
+    const clip = shotParams.clip;
+    const outCss = clip ? { w: Math.round(clip.width), h: Math.round(clip.height) } : { w: cssWidth, h: cssHeight };
+    if (!opt.quiet) {
+      console.log(JSON.stringify({
+        ok: true,
+        out: path.resolve(opt.out),
+        cssWidth: outCss.w, cssHeight: outCss.h,
+        pxWidth: Math.round(outCss.w * opt.scale), pxHeight: Math.round(outCss.h * opt.scale),
+        scale: opt.scale, bytes: buf.length, chrome,
+      }));
+    }
+    cleanup();
+    process.exit(0);
+  } catch (e) {
+    cleanup();
+    console.error(`render-html: 渲染失败 — ${e.message}`);
+    process.exit(2);
+  }
+}
+
+main();
