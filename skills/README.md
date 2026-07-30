@@ -30,7 +30,30 @@ skills/
 4. **不放任何凭证/密钥/内网地址**，不硬编码某台机器的用户名或绝对路径（`~` / 运行时探测代替）。
 5. **SKILL.md 里写反面清单**。把"别用什么、为什么"写清楚比只写正确用法有用——agent 最容易踩的是那些"看起来能用其实静默挂死"的路。
 
-## 装 / 升 / 卸
+## 铺开方式一（默认）：`cp -R` 进共享 plugin 目录
+
+**一台机器一条命令，全机 claude-code bot（含沙箱业务 bot）下一个新会话自动可见** —— 不用装 registry、不用给每个 bot attach、不用重启任何进程：
+
+```bash
+cp -R ./skills/<skill-name> ~/.botmux/claude-plugin/skills/
+```
+
+为什么成立：
+
+- botmux 给每个 claude 会话都传 `--plugin-dir ~/.botmux/claude-plugin`（`src/adapters/cli/claude-code.ts`），沙箱路径同样走这条（`src/adapters/backend/sandbox.ts`）。
+- 该目录**未被读隔离 deny**：沙箱内可读、`scripts/` 里的可执行位（git 存 `100755`，`cp -R` 保留）可直接执行。
+- botmux 刷新该目录时只写 `BUILTIN_SKILLS`、只删 `RETIRED_SKILL_NAMES`（`src/skills/installer.ts`），两份名单里的名字全是 `botmux-` 前缀 —— 非 `botmux-` 前缀的用户 skill 不会被动。**所以别把自管 skill 命名成 `botmux-*`**。
+
+代价（接受不了就走方式二）：
+
+- **没有 per-bot 灰度**，一放就是全机所有 claude-code bot 都看到。
+- **codex 等非 claude CLI 不吃这条**（`--plugin-dir` 是 claude 专属）。
+- `~/.botmux/claude-plugin` 是运行时目录、**不在 git 里**：每台机器都要 `cp` 一次，重装/清理该目录副本会一起消失，也没有 `botmux skills list` 那样的查询入口。
+- 「不动非 `botmux-` 目录」是当前代码的承诺、不是硬契约 —— 升级 botmux 后顺手 `ls` 复查一眼。
+
+## 铺开方式二：registry + `/skills attach`
+
+只在这两种场景用：**① 非 claude CLI（codex 等） ② 确实要只给某几个 bot 开（灰度）。**
 
 在部署机上（任选一种源）：
 
@@ -51,9 +74,17 @@ botmux skills remove render-html-image
 botmux skills doctor
 ```
 
-## 让某个 bot 优先看到它
+## 让某个 bot 优先看到它（仅方式二需要）
 
-装进 registry 只是"机器上有"，还要在 `bots.json` 里给该 bot 声明优先披露（也可以用 `/botconfig set skills`）：
+装进 registry 只是"机器上有"，还要给该 bot 声明优先披露。首选 IM 命令（写盘即生效、不用重启）：
+
+```text
+/skills                              # 看该 bot 当前的 priority skills
+/skills attach <skill-name>
+/skills detach <skill-name>
+```
+
+⚠️ `attach` / `detach` **只认该 bot 的 `allowedUsers`**（`src/core/skills/im-command.ts`）—— 运维 bot 代不了别人 bot 的 attach。owner 不在场时改 `bots.json`：
 
 ```json
 {
@@ -61,11 +92,13 @@ botmux skills doctor
 }
 ```
 
-语义是**优先披露**而非独占隔离：CLI 自己原生的 skill 发现照旧。改完该 bot **开新会话**才生效（现存会话不热加载）——这也天然是灰度开关。
+改完**必须重启那个 bot 才读到**（配置无热加载）：`pm2 restart botmux-<index>`，**绝不加 `--update-env`**；别用 `botmux restart`（会掀全队）。
+
+语义是**优先披露**而非独占隔离：CLI 自己原生的 skill 发现照旧。生效都要该 bot **开新会话**（现存会话不热加载）——这也天然是灰度开关。
 
 ## 加一个新 skill 的流程
 
-1. 在本目录建 `<skill-name>/`，按上面的结构写 `SKILL.md`（+ `scripts/` / `references/`）。
-2. 本机验：`botmux skills install ./skills/<name> --link` → 在沙箱 profile 下实跑一次 → 确认失败路径也会响。
+1. 在本目录建 `<skill-name>/`，按上面的结构写 `SKILL.md`（+ `scripts/` / `references/`）。名字**别用 `botmux-` 前缀**（那是 botmux 自有命名空间，会被它的安装器接管）。
+2. 本机验：`botmux skills install ./skills/<name> --link` → 在某个 read-isolation bot 的真实 `.sb` 下实跑一次 → 确认失败路径也会响（输出指到白名单外应 EPERM + 非 0 退出，不产生文件）。
 3. 提 PR 到 `ops/local`，review 按上面五条硬性要求。
-4. 合并后各机器 `botmux skills install github:… --ref ops/local`（或随 deploy/all 重建），再按需给 bot 加 `skills.include`。
+4. 合并 + 各机 deploy/all 重建后，按**方式一**铺：`cp -R ./skills/<name> ~/.botmux/claude-plugin/skills/`，然后跑一次非沙箱基线 + 沙箱代验。只有 codex bot 或需要灰度时才走方式二。
