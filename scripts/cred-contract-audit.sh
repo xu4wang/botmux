@@ -20,6 +20,12 @@
 #   QUIET=1 …                                   # 只写日志不发飞书（首次建基线用）
 #   CLAUDE_BIN=/path/to/fake …                  # 指定被审计的二进制（演练用）
 # 退出码: 0=常量都在（或本轮无变化）  1=常量对不上(已红警)  2=二进制不可读(已告警)
+#         5=本轮有告警要发但 ALERT_APP/ALERT_TO 未配置（告警内容已写 stderr，见下）
+#
+# ⚠️ ALERT_APP / ALERT_TO 没有默认值，必须每台机器自己配（crontab 里钉）。
+#    历史上这里硬编码过 dev-beta 的身份，导致任何没配的机器把凭证告警静默发到别人那儿
+#    ——发送是成功的，只是发错了人，于是"没收到告警"被误读成"没问题"。
+#    现在未配置时：告警内容写 stderr（让 cron 的 MAILTO / 外部监控收得到）+ 退出码 5。
 
 set -uo pipefail
 
@@ -44,8 +50,9 @@ CLIENT_ID="${CLAUDE_OAUTH_CLIENT_ID:-9d1c250a-e61b-44d9-88ed-5944d1962f5e}"
 TOKEN_PATH="${CLAUDE_OAUTH_TOKEN_PATH:-/v1/oauth/token}"
 NODE_BIN="${NODE_BIN:-$(command -v node || echo /Users/ksher/.local/node-v24/bin/node)}"
 HOSTTAG="${HOSTTAG:-$(hostname -s 2>/dev/null || echo host)}"
-ALERT_APP="${ALERT_APP:-cli_aacd7ceeb5789cc6}"
-ALERT_TO="${ALERT_TO:-ou_e0be3737b53350f5c529e6cfb5227157}"
+ALERT_APP="${ALERT_APP:-}"          # ← 无默认值，必须本机配；见文件头说明
+ALERT_TO="${ALERT_TO:-}"            # ← 同上
+ALERT_MISCFG=0
 FULL="${FULL:-0}"
 QUIET="${QUIET:-0}"
 
@@ -55,6 +62,15 @@ mkdir -p "$(dirname "$STATE")" 2>/dev/null || true
 # 告警走 lark-cli bot 身份，不依赖 claude 凭证（凭证挂了告警也要能出去）
 say(){
   [ "$QUIET" = 1 ] && { log "  ↳ QUIET=1，跳过飞书"; return 0; }
+  # fail-loud：宁可吵，也不要把凭证告警静默发给别人（或静默不发）
+  if [ -z "$ALERT_APP" ] || [ -z "$ALERT_TO" ]; then
+    ALERT_MISCFG=1
+    log "  ❌ ALERT_APP/ALERT_TO 未配置 — 告警未发出（请在 crontab 钉本机 appId 与 owner open_id）"
+    printf '%s\n%s\n' \
+      "[cred-contract-audit:告警未送达] 【${HOSTTAG}】ALERT_APP/ALERT_TO 未配置，以下内容无法发出：" \
+      "$1" >&2
+    return 1
+  fi
   if LARKSUITE_CLI_CONFIG_DIR="$HOME/.lark-cli-bots/$ALERT_APP" \
        perl -e 'alarm 30; exec @ARGV' lark-cli im +messages-send \
          --as bot --user-id "$ALERT_TO" --text "$1" >/dev/null 2>&1; then
@@ -63,6 +79,9 @@ say(){
     log "  ⚠️ 通知发送失败(查 ~/.lark-cli-bots/$ALERT_APP)"; return 1
   fi
 }
+
+# 未配置告警通道时让 cron 层面看得见：只在脚本本来要成功退出时改写为 5，不掩盖真实故障码
+trap 'rc=$?; if [ "${ALERT_MISCFG:-0}" = 1 ] && [ "$rc" = 0 ]; then exit 5; fi' EXIT
 
 # 状态读写：单个 JSON，字段 size/mtime/sha/version/alerted_sha
 sget(){ "$NODE_BIN" -e 'try{const s=JSON.parse(require("fs").readFileSync(process.argv[1]));console.log(s[process.argv[2]]??"")}catch(e){console.log("")}' "$STATE" "$1" 2>/dev/null; }

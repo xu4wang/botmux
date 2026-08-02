@@ -24,6 +24,12 @@
 #   FORCE=1 SUSPEND=1 scripts/bot-cred-refresh-oauth.sh   # 手动强刷（推荐带 SUSPEND=1）
 #   SEED=0 / HEARTBEAT=0 / ALERT=0 同 inplace 版
 # 退出码: 0=成功或本轮无需刷新  1=刷新失败(live 未被改动)  2=前置缺失  3=keychain 有条目  4=熔断
+#         5=本轮有告警/心跳要发但 ALERT_APP/ALERT_TO 未配置（内容已写 stderr）
+#
+# ⚠️ ALERT_APP / ALERT_TO 没有默认值，必须每台机器自己配（crontab 里钉）。
+#    历史上这里硬编码过 dev-premchai 的身份，导致任何没配的机器把凭证告警静默发到别人那儿
+#    ——发送是成功的，只是发错了人，于是"没收到告警"被误读成"没问题"。
+#    现在未配置时：告警内容写 stderr（让 cron 的 MAILTO / 外部监控收得到）+ 退出码 5。
 
 set -uo pipefail
 
@@ -50,14 +56,24 @@ nextref(){ "$NODE_BIN" -e 'try{const o=JSON.parse(require("fs").readFileSync(pro
 alive(){ kill -0 "$1" 2>/dev/null || ps -p "$1" >/dev/null 2>&1; }
 
 # ── 告警通道：走 lark-cli bot 身份，完全不依赖 claude 凭证（否则凭证一挂告警跟着哑）──
-ALERT_APP="${ALERT_APP:-cli_aaa13c2a5422dcc9}"
-ALERT_TO="${ALERT_TO:-ou_052754a5b3b938d10627d818729737bf}"
+ALERT_APP="${ALERT_APP:-}"          # ← 无默认值，必须本机配；见文件头说明
+ALERT_TO="${ALERT_TO:-}"            # ← 同上
+ALERT_MISCFG=0
 ALERT_STATE="${ALERT_STATE:-$HOME/.botmux/logs/.cred-fail-count}"
 HOSTTAG="${HOSTTAG:-$(hostname -s 2>/dev/null || echo host)}"
 HEARTBEAT="${HEARTBEAT:-1}"
 mkdir -p "$(dirname "$ALERT_STATE")" 2>/dev/null || true
 alert(){
   [ "${ALERT:-1}" = 1 ] || return 0
+  # fail-loud：宁可吵，也不要把凭证告警静默发给别人（或静默不发）
+  if [ -z "$ALERT_APP" ] || [ -z "$ALERT_TO" ]; then
+    ALERT_MISCFG=1
+    log "  ❌ ALERT_APP/ALERT_TO 未配置 — 告警未发出（请在 crontab 钉本机 appId 与 owner open_id）"
+    printf '%s\n%s\n' \
+      "[cred-refresh:告警未送达] 【${HOSTTAG}】ALERT_APP/ALERT_TO 未配置，以下内容无法发出：" \
+      "$1" >&2
+    return 1
+  fi
   if LARKSUITE_CLI_CONFIG_DIR="$HOME/.lark-cli-bots/$ALERT_APP" \
        perl -e 'alarm 30; exec @ARGV' lark-cli im +messages-send \
          --as bot --user-id "$ALERT_TO" --text "$1" >/dev/null 2>&1; then
@@ -93,7 +109,7 @@ if ! mkdir "$LOCKDIR" 2>/dev/null; then
   exit 0
 fi
 printf '%s\n' "$$" > "$LOCKPID" 2>/dev/null || { log "❌ 锁 pid 写入失败，不敢无锁运行"; rmdir "$LOCKDIR" 2>/dev/null; exit 2; }
-trap 'if [ "$(cat "$LOCKPID" 2>/dev/null)" = "$$" ]; then rm -f "$LOCKPID" "$LOCKDIR/alerted" 2>/dev/null; rmdir "$LOCKDIR" 2>/dev/null; fi; rm -f "$REQ" "$BODY" 2>/dev/null' EXIT
+trap 'rc=$?; if [ "$(cat "$LOCKPID" 2>/dev/null)" = "$$" ]; then rm -f "$LOCKPID" "$LOCKDIR/alerted" 2>/dev/null; rmdir "$LOCKDIR" 2>/dev/null; fi; rm -f "$REQ" "$BODY" 2>/dev/null; if [ "${ALERT_MISCFG:-0}" = 1 ] && [ "$rc" = 0 ]; then exit 5; fi' EXIT
 
 REQ=""; BODY=""
 log "起点: $(fp "$CRED")"
