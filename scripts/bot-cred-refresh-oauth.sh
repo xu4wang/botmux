@@ -64,12 +64,13 @@ nextref(){ "$NODE_BIN" -e 'try{const o=JSON.parse(require("fs").readFileSync(pro
 
 # ── refresh token 的寿命：注意它【不随刷新顺延】，是一个固定截止时刻（见文件头）──
 # 字段缺失（老版 claude / 端点不给）时一律输出空串 → 上层所有 RT 相关输出整块静默，不瞎猜。
-rtleftdays(){ "$NODE_BIN" -e 'try{const o=JSON.parse(require("fs").readFileSync(process.argv[1])).claudeAiOauth;const t=Number(o.refreshTokenExpiresAt);if(!t)process.exit(0);console.log(Math.trunc((t-Date.now())/86400000))}catch(e){}' "$1"; }
+rtleftdays(){ "$NODE_BIN" -e 'try{const o=JSON.parse(require("fs").readFileSync(process.argv[1])).claudeAiOauth;const t=Number(o.refreshTokenExpiresAt);if(!t)process.exit(0);console.log(((t-Date.now())/86400000|0)+0)}catch(e){}' "$1"; }
 rtexpfmt(){ "$NODE_BIN" -e 'try{const o=JSON.parse(require("fs").readFileSync(process.argv[1])).claudeAiOauth;const t=Number(o.refreshTokenExpiresAt);if(!t)process.exit(0);const d=new Date(t);const p=n=>String(n).padStart(2,"0");console.log(p(d.getMonth()+1)+"-"+p(d.getDate())+" "+p(d.getHours())+":"+p(d.getMinutes()))}catch(e){}' "$1"; }
 # 挂在每条心跳末尾的一行（含前导换行）；字段缺失就什么都不输出
 rtsuffix(){
   local d; d="$(rtleftdays "$1")"; [ -n "$d" ] || return 0
   if [ "$d" -lt 0 ] 2>/dev/null; then printf '\nRT 到期: %s (已过期 %s 天，必须人工 /login)' "$(rtexpfmt "$1")" "$((0 - d))"
+  elif [ "$d" = 0 ]; then printf '\nRT 到期: %s (就在今天，可能已失效，尽快人工 /login)' "$(rtexpfmt "$1")"
   else printf '\nRT 到期: %s (剩 %s 天，到期只能人工 /login)' "$(rtexpfmt "$1")" "$d"; fi
 }
 alive(){ kill -0 "$1" 2>/dev/null || ps -p "$1" >/dev/null 2>&1; }
@@ -114,7 +115,7 @@ rtwarn(){
   [ "$(cat "$RT_WARN_STATE" 2>/dev/null)" = "$today|$exp" ] && return 0
   local head="refresh token 还剩 ${d} 天到期（${exp}）"
   [ "$d" -lt 0 ] 2>/dev/null && head="refresh token 已于 ${exp} 过期 $((0 - d)) 天"
-  [ "$d" = 0 ] && head="refresh token 今天（${exp}）就到期"
+  [ "$d" = 0 ] && head="refresh token 就在今天（${exp}）到期——若已过点，此刻就是失效状态"
   log "⚠️ ${head} → 发红警催人工 /login"
   alert "🔴【${HOSTTAG}】${head}
 自动刷新只续 access token 那 8 小时；RT 的截止时刻【不随刷新顺延】，到期即 invalid_grant，本机全部 bot 一起掉线。
