@@ -18,11 +18,17 @@
 #     → 刷成功后必须立刻播种所有消费者副本，并 suspend 逼运行中会话冷启动。慢一秒就有人掉。
 #   · keychain 里必须没有 Claude Code-credentials 条目，否则 native 进程走 keychain 分裂。
 #   · 单一刷新权威：只有本脚本刷，bot 从不自刷。
+#   · **refresh token 的 30 天寿命不随刷新顺延**（2026-08-14 查证）：每次刷新换的是 AT(8h) 和 RT 串本身，
+#     `refresh_token_expires_in` 是在朝一个固定时刻倒数——判据是 07-13→07-29 几十次刷新、RT 轮换几十次，
+#     `refreshTokenExpiresAt` 一直钉在 08-12 18:05（且它与 expiresAt 毫秒尾数相同，证明字段确实每轮重算过）。
+#     → 自动刷新只能续命 8 小时那一层，续不了这堵墙；RT 到期就是 invalid_grant，必须人工浏览器 /login。
+#     故本脚本额外做两件事：每条心跳带上 RT 剩余天数；剩余 ≤ RT_WARN_DAYS 时每天一次红警催登录。
 #
 # 用法：
 #   scripts/bot-cred-refresh-oauth.sh                # 到期前 MARGIN_MIN 内才刷
 #   FORCE=1 SUSPEND=1 scripts/bot-cred-refresh-oauth.sh   # 手动强刷（推荐带 SUSPEND=1）
 #   SEED=0 / HEARTBEAT=0 / ALERT=0 同 inplace 版
+#   RT_WARN_DAYS=7  RT 剩余 ≤ 此天数则每天一次红警（去重状态 $HOME/.botmux/logs/.cred-rt-warn-state）
 # 退出码: 0=成功或本轮无需刷新  1=刷新失败(live 未被改动)  2=前置缺失  3=keychain 有条目  4=熔断
 #         5=本轮有告警/心跳要发但 ALERT_APP/ALERT_TO 未配置（内容已写 stderr）
 #
@@ -43,6 +49,8 @@ SEED="${SEED:-1}"
 SUSPEND="${SUSPEND:-0}"
 MARGIN_MIN="${MARGIN_MIN:-120}"      # 剩余 ≤ 此值才刷（120 = 到期前有 4 次 cron 机会）
 RED_MIN="${RED_MIN:-30}"             # 剩余 < 此值还没刷成 → 无条件红警（兜端点变更/未知故障）
+RT_WARN_DAYS="${RT_WARN_DAYS:-7}"    # refresh token 剩余 ≤ 此天数 → 每天一次红警催人工 /login（见文件头）
+RT_WARN_STATE="${RT_WARN_STATE:-$HOME/.botmux/logs/.cred-rt-warn-state}"
 CURL_TIMEOUT="${CURL_TIMEOUT:-30}"
 
 log(){ printf '%s %s\n' "$(date '+%H:%M:%S')" "$*"; }
@@ -53,6 +61,17 @@ haskeys(){ "$NODE_BIN" -e 'try{const o=(JSON.parse(require("fs").readFileSync(pr
 leftmin(){ "$NODE_BIN" -e 'try{const o=JSON.parse(require("fs").readFileSync(process.argv[1])).claudeAiOauth;console.log(Math.round((Number(o.expiresAt)-Date.now())/60000))}catch(e){console.log(-99999)}' "$1"; }
 expfmt(){ "$NODE_BIN" -e 'try{const o=JSON.parse(require("fs").readFileSync(process.argv[1])).claudeAiOauth;const d=new Date(Number(o.expiresAt));const p=n=>String(n).padStart(2,"0");console.log(p(d.getMonth()+1)+"-"+p(d.getDate())+" "+p(d.getHours())+":"+p(d.getMinutes()))}catch(e){console.log("?")}' "$1"; }
 nextref(){ "$NODE_BIN" -e 'try{const o=JSON.parse(require("fs").readFileSync(process.argv[1])).claudeAiOauth;const m=Number(process.argv[2]||120);let t=Number(o.expiresAt)-m*60000;const now=Date.now();if(t<now)t=now;const s=1800000;t=Math.ceil(t/s)*s;if(t<=now)t+=s;const d=new Date(t);const p=n=>String(n).padStart(2,"0");console.log(p(d.getMonth()+1)+"-"+p(d.getDate())+" "+p(d.getHours())+":"+p(d.getMinutes()))}catch(e){console.log("?")}' "$1" "$2"; }
+
+# ── refresh token 的寿命：注意它【不随刷新顺延】，是一个固定截止时刻（见文件头）──
+# 字段缺失（老版 claude / 端点不给）时一律输出空串 → 上层所有 RT 相关输出整块静默，不瞎猜。
+rtleftdays(){ "$NODE_BIN" -e 'try{const o=JSON.parse(require("fs").readFileSync(process.argv[1])).claudeAiOauth;const t=Number(o.refreshTokenExpiresAt);if(!t)process.exit(0);console.log(Math.trunc((t-Date.now())/86400000))}catch(e){}' "$1"; }
+rtexpfmt(){ "$NODE_BIN" -e 'try{const o=JSON.parse(require("fs").readFileSync(process.argv[1])).claudeAiOauth;const t=Number(o.refreshTokenExpiresAt);if(!t)process.exit(0);const d=new Date(t);const p=n=>String(n).padStart(2,"0");console.log(p(d.getMonth()+1)+"-"+p(d.getDate())+" "+p(d.getHours())+":"+p(d.getMinutes()))}catch(e){}' "$1"; }
+# 挂在每条心跳末尾的一行（含前导换行）；字段缺失就什么都不输出
+rtsuffix(){
+  local d; d="$(rtleftdays "$1")"; [ -n "$d" ] || return 0
+  if [ "$d" -lt 0 ] 2>/dev/null; then printf '\nRT 到期: %s (已过期 %s 天，必须人工 /login)' "$(rtexpfmt "$1")" "$((0 - d))"
+  else printf '\nRT 到期: %s (剩 %s 天，到期只能人工 /login)' "$(rtexpfmt "$1")" "$d"; fi
+}
 alive(){ kill -0 "$1" 2>/dev/null || ps -p "$1" >/dev/null 2>&1; }
 
 # ── 告警通道：走 lark-cli bot 身份，完全不依赖 claude 凭证（否则凭证一挂告警跟着哑）──
@@ -84,6 +103,24 @@ alert(){
 }
 heartbeat(){ [ "${HEARTBEAT:-1}" = 1 ] || return 0; alert "$1"; }
 failcount(){ local v; v="$(cat "$ALERT_STATE" 2>/dev/null)"; case "$v" in ''|*[!0-9]*|??????*) v=0;; esac; printf '%s' "$((10#$v))"; }
+
+# ── RT 到期预警：与 access token 的刷新逻辑完全无关，每轮都独立判一次 ──
+# 去重键 = 日期|RT截止：同一天只吵一次；换了新 RT 窗口(截止变了)自然重置。
+rtwarn(){
+  local d exp today
+  d="$(rtleftdays "$CRED")"; [ -n "$d" ] || return 0
+  [ "$d" -le "$RT_WARN_DAYS" ] 2>/dev/null || return 0
+  exp="$(rtexpfmt "$CRED")"; today="$(date '+%Y-%m-%d')"
+  [ "$(cat "$RT_WARN_STATE" 2>/dev/null)" = "$today|$exp" ] && return 0
+  local head="refresh token 还剩 ${d} 天到期（${exp}）"
+  [ "$d" -lt 0 ] 2>/dev/null && head="refresh token 已于 ${exp} 过期 $((0 - d)) 天"
+  [ "$d" = 0 ] && head="refresh token 今天（${exp}）就到期"
+  log "⚠️ ${head} → 发红警催人工 /login"
+  alert "🔴【${HOSTTAG}】${head}
+自动刷新只续 access token 那 8 小时；RT 的截止时刻【不随刷新顺延】，到期即 invalid_grant，本机全部 bot 一起掉线。
+需人工处理: SSH 里 claude 执行 /login（浏览器授权），趁早不趁晚。" \
+    && printf '%s\n' "$today|$exp" > "$RT_WARN_STATE" 2>/dev/null
+}
 setcount(){ printf '%s\n' "$1" > "$ALERT_STATE.tmp.$$" 2>/dev/null && mv -f "$ALERT_STATE.tmp.$$" "$ALERT_STATE" 2>/dev/null; }
 
 # ── 前置 ──
@@ -129,6 +166,9 @@ if ! haskeys "$CRED"; then
   exit 4
 fi
 
+# ── RT 到期预警（放在时机门之前：无需刷新的那 90% 轮次也必须能预警）──
+rtwarn
+
 # ── 时机门 ──
 FORCE="${FORCE:-0}"; [ "${1:-}" = "--force" ] && FORCE=1
 LEFT="$(leftmin "$CRED")"
@@ -136,7 +176,7 @@ if [ "$FORCE" != 1 ] && [ "${LEFT:-0}" -gt "$MARGIN_MIN" ] 2>/dev/null; then
   log "剩余 ${LEFT}m > 阈值 ${MARGIN_MIN}m → 无需刷新(no-op)"
   heartbeat "🟢【${HOSTTAG}】凭证心跳: 本轮无需刷新(剩 ${LEFT}m > 阈值 ${MARGIN_MIN}m)
 token 到期: $(expfmt "$CRED")
-预计下次刷新: $(nextref "$CRED" "$MARGIN_MIN")"
+预计下次刷新: $(nextref "$CRED" "$MARGIN_MIN")$(rtsuffix "$CRED")"
   exit 0
 fi
 log "剩余 ${LEFT}m ≤ 阈值 ${MARGIN_MIN}m(或 --force) → 执行刷新"
@@ -169,7 +209,7 @@ live 未被改动，token 到期: $(expfmt "$CRED")（剩 ${LEFT}m）
 连续失败或已进红线，请人工看一眼网络/端点"
   else
     heartbeat "🟡【${HOSTTAG}】凭证心跳: 本轮没刷到(网络层失败)，live 完好，30 分钟后重试
-token 到期: $(expfmt "$CRED")（剩 ${LEFT}m）"
+token 到期: $(expfmt "$CRED")（剩 ${LEFT}m）$(rtsuffix "$CRED")"
   fi
   exit 1
 fi
@@ -222,7 +262,7 @@ if [ "$HTTP" = 200 ]; then
 
     heartbeat "✅【${HOSTTAG}】凭证心跳: 本轮已刷新成功(直连 OAuth 端点)
 新 token 到期: $(expfmt "$CRED")
-预计下次刷新: $(nextref "$CRED" "$MARGIN_MIN")${RECOV}"
+预计下次刷新: $(nextref "$CRED" "$MARGIN_MIN")$(rtsuffix "$CRED")${RECOV}"
 
     # 旧 AT 在轮换那一刻就被吊销 → 运行中的会话必须立刻冷启动，慢一秒就有人掉
     if [ "$SUSPEND" = 1 ]; then
