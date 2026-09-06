@@ -93,19 +93,23 @@ fi
 echo "bun：${BUN}（$("$BUN" --version 2>/dev/null || echo '版本未知')）"
 
 # 本地改动检查：阶段 ② 会 `reset --hard`，任何本地提交/改动都会被抹掉——所以这道闸是唯一防线。
-# 只有未提交的 brand-template 改动能自动丢（正式修复是它的超集）；
+# 只有两类未提交改动能自动丢：
+#   * brand-template（正式修复是它的超集）
+#   * bun.lock —— 上游仓库里那份与 package.json 不完全一致（node-pty / @napi-rs/canvas 的
+#     dependencies 归属不同），`bun install` 每次都会把它重写一遍。**每装一次就脏一次**，
+#     不放行的话这道闸会在第二次升级时无条件 exit 2。它是纯生成物，丢掉无损失。
 # 动了别的文件 → 停下来让人判断，绝不擅自 checkout。
 DIRTY="$(git status --porcelain)"
 if [ -n "$DIRTY" ]; then
-  OTHER="$(printf '%s\n' "$DIRTY" | grep -vE 'brand-template' || true)"
+  OTHER="$(printf '%s\n' "$DIRTY" | grep -vE 'brand-template|bun\.lock' || true)"
   if [ -n "$OTHER" ]; then
-    echo "🛑 有本地改动（不止 brand-template），拒绝自动升级，请人工处理：" >&2
+    echo "🛑 有本地改动（不止 brand-template / bun.lock），拒绝自动升级，请人工处理：" >&2
     printf '%s\n' "$DIRTY" >&2
     exit 2
   fi
-  echo "丢弃本地 brand-template 改动（正式修复是超集）"
-  # 只丢 brand-template 相关（别的文件已在上面 exit 2 挡掉）；用 -- 明确边界，其一不存在也不报错
-  git checkout -- src/im/lark/brand-template.ts test/brand-template.test.ts 2>/dev/null || true
+  echo "丢弃本地 brand-template / bun.lock 改动（前者正式修复是超集，后者是 bun install 的生成物）"
+  # 只丢这两类（别的文件已在上面 exit 2 挡掉）；用 -- 明确边界，某个不存在也不报错
+  git checkout -- src/im/lark/brand-template.ts test/brand-template.test.ts bun.lock 2>/dev/null || true
 fi
 
 LOG="${HOME}/.botmux/logs/self-upgrade.log"
