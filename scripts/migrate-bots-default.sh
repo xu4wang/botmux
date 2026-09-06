@@ -94,7 +94,7 @@ if ! grep -q "$REPO_ROOT/dist/cli.js" "$BM" 2>/dev/null; then
    它指向             = $(sed -n 's/^exec node "\(.*\)".*/\1/p' "$BM" 2>/dev/null || echo "（不是 wrapper，多半是 npm 装的）")
    本 checkout 期望   = ${REPO_ROOT}/dist/cli.js
 
-   修：在本 checkout 跑  npx pnpm@9 switch:here
+   修：在本 checkout 跑  bun run switch:here
        并确保 ~/.botmux/bin 在 PATH **最前**（npm 版会抢在前面）
        彻底点：npm rm -g botmux
 EOF

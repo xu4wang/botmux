@@ -19,9 +19,22 @@ resolve_checkout() {
   sed -n 's#^exec node "\(.*\)/dist/cli.js".*#\1#p' "$(command -v botmux)" 2>/dev/null
 }
 
+# 上游 2026-08 起把包管理器换成 bun（`packageManager: bun@1.4.x`，仓库里只有 bun.lock）——
+# 再跑 pnpm 会被 `ERR_PNPM_OTHER_PM_EXPECTED` 直接顶回来。bun 常装在 `~/.bun/bin`，
+# 而这个脚本可能从 cron / daemon 派生的窄 PATH 环境里跑起来，所以不能只靠 `command -v`。
+resolve_bun() {
+  command -v bun 2>/dev/null && return 0
+  for c in "$HOME/.bun/bin/bun" /opt/homebrew/bin/bun /usr/local/bin/bun; do
+    [ -x "$c" ] && { echo "$c"; return 0; }
+  done
+  return 1
+}
+
 # ── 阶段 ②：已被 re-spawn 进独立 session，执行真正的升级（输出全进日志，因为发起方会话已断）──
 if [ "${BOTMUX_SELF_UPGRADE_DETACHED:-}" = "1" ]; then
   CK="$(resolve_checkout)"
+  # 阶段 ① 已解析好绝对路径并经 env 传下来；万一没有（有人直接带标记变量跑阶段 ②）再解析一次。
+  BUN="${BOTMUX_SELF_UPGRADE_BUN:-$(resolve_bun || true)}"
   LOG="${HOME}/.botmux/logs/self-upgrade.log"
   {
     echo "=== 自升级开始 checkout=${CK} ==="
@@ -41,8 +54,8 @@ if [ "${BOTMUX_SELF_UPGRADE_DETACHED:-}" = "1" ]; then
     # && 链：任一步失败即停，绝不半途 restart（daemon 会继续跑旧代码，安全）
     git fetch "$RMT" "$BR" \
       && git reset --hard FETCH_HEAD \
-      && npx pnpm@9 install \
-      && npx pnpm@9 switch:here \
+      && "$BUN" install \
+      && "$BUN" run switch:here \
       && botmux restart \
       && botmux autostart \
       && botmux status
@@ -69,6 +82,16 @@ if [ "${NODE_MAJOR:-0}" -lt 22 ]; then
   exit 3
 fi
 
+# bun 闸：与 Node 闸同理——阶段 ② 一旦 `reset --hard`，代码就已经换成 bun 版仓库；
+# 那时才发现没有 bun，机器会卡在「新代码 + 老 dist」。宁可现在就停。
+BUN="$(resolve_bun || true)"
+if [ -z "$BUN" ]; then
+  echo "🛑 找不到 bun：上游已把包管理器换成 bun（仓库只有 bun.lock，pnpm 会直接报 ERR_PNPM_OTHER_PM_EXPECTED）。" >&2
+  echo "   先装：curl -fsSL https://bun.sh/install | bash   （现在就停，代码还没动）" >&2
+  exit 4
+fi
+echo "bun：${BUN}（$("$BUN" --version 2>/dev/null || echo '版本未知')）"
+
 # 本地改动检查：阶段 ② 会 `reset --hard`，任何本地提交/改动都会被抹掉——所以这道闸是唯一防线。
 # 只有未提交的 brand-template 改动能自动丢（正式修复是它的超集）；
 # 动了别的文件 → 停下来让人判断，绝不擅自 checkout。
@@ -89,6 +112,6 @@ LOG="${HOME}/.botmux/logs/self-upgrade.log"
 SELF="${CK}/scripts/self-upgrade.sh"
 echo "✅ 检查通过。升级已甩进独立 session —— 本会话马上会断（这是预期），进度看：${LOG}"
 # env 前缀设标记变量；python os.setsid 脱离进程组；输入输出全断开（否则会话一断它也跟着收 EOF）
-nohup env BOTMUX_SELF_UPGRADE_DETACHED=1 BOTMUX_SELF_UPGRADE_SCRIPT="$SELF" python3 -c \
+nohup env BOTMUX_SELF_UPGRADE_DETACHED=1 BOTMUX_SELF_UPGRADE_SCRIPT="$SELF" BOTMUX_SELF_UPGRADE_BUN="$BUN" python3 -c \
   "import os,subprocess; os.setsid(); subprocess.run(['bash', os.environ['BOTMUX_SELF_UPGRADE_SCRIPT']])" \
   >/dev/null 2>&1 </dev/null &

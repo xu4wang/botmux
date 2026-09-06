@@ -4,7 +4,7 @@
 #   ./scripts/role-deploy.sh --bots cli_xxx,cli_yyy      # 全新：建角色库骨架
 #   ./scripts/role-deploy.sh --import <export.tar.gz>    # 迁移：带上源机的角色与记忆
 #   加 --configure-bots 顺带改 ~/.botmux/bots.json（会先备份）
-#   加 --skip-build 跳过 pnpm install/build
+#   加 --skip-build 跳过 bun install/build
 #
 # 做四件事：① 前置检查 ② build + 认领全局 botmux ③ 角色库（骨架或导入，记忆桶按本机路径重算）
 # ④ 可选改 bots.json。跑完还需人工做两步（脚本末尾会提示）。
@@ -32,7 +32,18 @@ slug() { node -e 'process.stdout.write(process.argv[1].replace(/[^A-Za-z0-9]/g,"
 
 echo "== ① 前置检查 =="
 command -v node >/dev/null || { echo "缺少 node" >&2; exit 1; }
-[ "$SKIP_BUILD" -eq 1 ] || command -v pnpm >/dev/null || { echo "缺少 pnpm" >&2; exit 1; }
+# 上游 2026-08 起换成 bun（仓库只有 bun.lock，pnpm 会报 ERR_PNPM_OTHER_PM_EXPECTED）。
+# bun 常装在 ~/.bun/bin，脚本可能从窄 PATH 起，所以补候选路径。
+BUN=""
+if [ "$SKIP_BUILD" -eq 0 ]; then
+  BUN="$(command -v bun 2>/dev/null || true)"
+  if [ -z "$BUN" ]; then
+    for c in "$HOME/.bun/bin/bun" /opt/homebrew/bin/bun /usr/local/bin/bun; do
+      [ -x "$c" ] && { BUN="$c"; break; }
+    done
+  fi
+  [ -n "$BUN" ] || { echo "缺少 bun（curl -fsSL https://bun.sh/install | bash），或加 --skip-build" >&2; exit 1; }
+fi
 version_ge() {  # $1 >= $2 ?
   node -e 'const p=s=>String(s).split(".").map(Number);const a=p(process.argv[1]),b=p(process.argv[2]);for(let i=0;i<3;i++){const x=a[i]||0,y=b[i]||0;if(x>y)process.exit(0);if(x<y)process.exit(1);}process.exit(0)' "$1" "$2"
 }
@@ -51,7 +62,7 @@ fi
 
 if [ "$SKIP_BUILD" -eq 0 ]; then
   echo "== ② 安装依赖 + build + 认领全局 botmux =="
-  (cd "$REPO_ROOT" && pnpm install && pnpm switch:here)
+  (cd "$REPO_ROOT" && "$BUN" install && "$BUN" run switch:here)
 fi
 
 echo "== ③ 角色库 =="
