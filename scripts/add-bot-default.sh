@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# 按「默认偏好」新增一个 botmux 机器人：读隔离 + 角色系统 + 私聊全开 + 唯一管理员。
+# 按「默认偏好」新增一个 botmux 机器人：文件沙盒（含读隔离）+ 角色系统 + 私聊/群聊全开 + 唯一管理员。
 #
 #   ./scripts/add-bot-default.sh --app-id cli_xxx --app-secret xxx [--name 小助手] [--cli claude-code]
 #   ./scripts/add-bot-default.sh --admin --app-id cli_xxx --app-secret xxx   # 管理 bot（首次安装第一个）
@@ -14,7 +14,9 @@
 # 做完这些（每步失败即停，不留半成品）：
 #   ① botmux setup add        —— 凭证换 token 校验通过才写盘；只拉起这个 bot，不动其它
 #   ② 角色库骨架 + 三件套      —— defaultWorkingDir / brandLabel / tuiSlashAllow
-#   ③ bots.json 补字段         —— p2pOpen: true；readIsolation: true（--admin 时为 false）
+#   ③ bots.json 补字段         —— p2pOpen: true；readIsolation + sandbox: true（--admin 时都不开）；
+#                                 sandboxPaths（可写 ~/demo-site、只读 ~/.config/amber-client.json）；
+#                                 disableStreamingCard: true（--admin 时不设）
 #   ④ lark-cli 身份 —— 建 ~/.lark-cli-bots/<appId>/，让它用自己的飞书 app
 #   ⑤ botmux restart + 自检
 #
@@ -47,6 +49,9 @@ done
 [ -n "$APP_ID" ] && [ -n "$APP_SECRET" ] || { echo "必须给 --app-id 与 --app-secret" >&2; exit 1; }
 
 command -v botmux >/dev/null || { echo "找不到 botmux（把 ~/.botmux/bin 加进 PATH）" >&2; exit 1; }
+# node 在第 ② 步（role-deploy.sh）之后才用到——缺了会在 setup add 已写盘后才失败，留下半成品。
+# ssh 非登录 shell 常拿不到 homebrew PATH：用 `zsh -lc '…'` 跑本脚本。
+command -v node >/dev/null || { echo "找不到 node（ssh 远程执行请用登录 shell：zsh -lc '…'）" >&2; exit 1; }
 if [ "$ADMIN" -eq 0 ] && [ "$(uname -s)" != "Darwin" ]; then
   echo "读隔离只支持 macOS。本机不是 macOS —— 要么加 --admin（不隔离），要么别用这个脚本" >&2
   exit 1
@@ -67,7 +72,7 @@ botmux "${add_args[@]}"
 echo "== ② 角色库骨架 + 角色三件套 =="
 "$REPO_ROOT/scripts/role-deploy.sh" --bots "$APP_ID" --configure-bots --skip-build
 
-echo "== ③ 读隔离 + 私聊全开 =="
+echo "== ③ 文件沙盒 + 私聊/群聊全开 =="
 cp "$BOTS_JSON" "$BOTS_JSON.bak-addbot-$(date +%Y%m%d-%H%M%S)"
 node -e '
 const fs=require("fs"); const [p,appId,owner,admin]=process.argv.slice(1);
@@ -77,8 +82,20 @@ if (!b) { console.error("bots.json 里找不到 "+appId+"（setup add 是不是�
 if (admin==="1") {
   // 管理 bot：绝不开读隔离——隔离会 deny bots.json / logs / 别的 bot 的家，它就管不了任何东西
   delete b.readIsolation;
+  delete b.sandbox;
+  delete b.sandboxPaths;
 } else {
   b.readIsolation = true;
+  // 文件沙盒（写隔离）：机队业务 bot 统一开。daemon 启动时也会把 legacy readIsolation 迁成 sandbox，这里显式写死。
+  b.sandbox = true;
+  // 沙盒里的额外可达路径：demo 站（发布 HTML 页面）可写、amber 客户端配置只读。路径不存在就不加
+  //（sandbox 的 profile 对不存在的路径无意义，也避免在没有 demo 站的机器上留下死配置）。
+  const home = process.env.HOME;
+  const rw = [home + "/demo-site"].filter(x => fs.existsSync(x));
+  const ro = [home + "/.config/amber-client.json"].filter(x => fs.existsSync(x));
+  if (rw.length || ro.length) b.sandboxPaths = { readWrite: rw, readOnly: ro };
+  // 关流式卡片：业务 bot 统一只发最终消息（管理 bot 保持默认，和机队现状一致）
+  b.disableStreamingCard = true;
 }
 b.p2pOpen = true;
 // 群聊全开：defaultOncall 自动把 bot 进的每个新群绑成 oncall → 群里任何人都能 @ 它
@@ -94,7 +111,7 @@ if (b.defaultWorkingDir) {
 // 兜底：p2pOpen 没有管理员会导致群聊锁死 + 无人可管（fail-closed）
 if (!(b.allowedUsers||[]).length) b.allowedUsers = [owner];
 fs.writeFileSync(p, JSON.stringify(bots,null,2)+"\n");
-console.log("readIsolation="+(admin==="1"?"false（管理 bot）":"true")+", p2pOpen=true, allowedUsers=["+b.allowedUsers.join(",")+"]");
+console.log("readIsolation/sandbox="+(admin==="1"?"false（管理 bot）":"true")+", sandboxPaths="+JSON.stringify(b.sandboxPaths||null)+", disableStreamingCard="+(b.disableStreamingCard===true)+", p2pOpen=true, allowedUsers=["+b.allowedUsers.join(",")+"]");
 ' "$BOTS_JSON" "$APP_ID" "$OWNER" "$ADMIN"
 
 echo "== ④ lark-cli 身份：让这个 bot 用自己的 appid 操作飞书 =="
@@ -141,8 +158,9 @@ const fs=require("fs"); const [p,appId,admin]=process.argv.slice(1);
 const b=JSON.parse(fs.readFileSync(p,"utf8")).find(x=>x.larkAppId===appId);
 const ok=(k,v)=>console.log((v?"  ✅":"  ❌")+" "+k);
 console.log("配置自检：");
-if (admin==="1") ok("readIsolation=false（管理 bot 必须不隔离，否则读不到 bots.json）", b.readIsolation!==true);
-else ok("readIsolation", b.readIsolation===true);
+if (admin==="1") ok("readIsolation/sandbox=false（管理 bot 必须不隔离，否则读不到 bots.json）", b.readIsolation!==true && b.sandbox!==true);
+else { ok("readIsolation", b.readIsolation===true); ok("sandbox（文件沙盒）", b.sandbox===true); }
+if (admin!=="1") ok("disableStreamingCard（关流式卡片）", b.disableStreamingCard===true);
 ok("p2pOpen（私聊全开）", b.p2pOpen===true);
 ok("allowedUsers（管理员非空 —— p2pOpen 的前提）", (b.allowedUsers||[]).length>0);
 ok("defaultWorkingDir（角色系统）", !!b.defaultWorkingDir);
