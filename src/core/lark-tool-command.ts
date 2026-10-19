@@ -1,5 +1,7 @@
 export interface LarkToolInvocation {
   args: string[];
+  /** Command path resolved through help, e.g. ['drive', '+download']. */
+  command: string[];
   mode: 'bot' | 'user';
   sawAs: boolean;
   offline: boolean;
@@ -132,7 +134,7 @@ export function parseLarkToolInvocation(
     && !(root === 'auth' && sub === 'status')) {
     throw new Error('Managed lark-cli cannot change accounts. For this application authorization use botmux auth request --scope "<required scopes>" --json');
   }
-  return { args: output, mode, sawAs, offline, supportsAs, showHelp, literalIndex, passthroughProfile };
+  return { args: output, command, mode, sawAs, offline, supportsAs, showHelp, literalIndex, passthroughProfile };
 }
 
 export function larkToolExecutionArgs(invocation: LarkToolInvocation): string[] {

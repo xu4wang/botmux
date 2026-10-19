@@ -5,6 +5,7 @@ const root = `Usage:
   lark-cli [command]
 Available Commands:
   docs      Documents
+  drive     Drive
   sheets    Sheets
   im        Messages
   auth      Authorization
@@ -36,6 +37,7 @@ ${flags}
 export const LARK_TOOL_HELP: Record<string, string> = {
   '': root,
   docs: group('docs', ['+fetch']),
+  drive: group('drive', ['+download']),
   sheets: group('sheets', ['+cells-replace']),
   im: group('im', ['+send']),
   event: group('event', ['list', 'schema', 'consume']),
@@ -53,6 +55,14 @@ export const LARK_TOOL_HELP: Record<string, string> = {
       --replacement string   replacement
       --description string   description
       --dry-run         preview`),
+  'drive +download': leaf('drive +download', `      --as string           identity
+      --dry-run             preview
+      --file-token string   file token
+      --format string       output format
+  -q, --jq string           query
+      --json                JSON
+      --output string       local save path
+      --overwrite           overwrite`),
   'im +send': leaf('im +send', `      --as string      identity
       --text string    text
       --dry-run        preview`),

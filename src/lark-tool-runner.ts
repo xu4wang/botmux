@@ -1,10 +1,64 @@
 import { execFileSync, spawn } from 'node:child_process';
-import { readLarkToolBinding, parseLarkToolInvocation, larkToolChildEnv, larkToolPassthroughEnv, LARK_TOOL_ROUTE, larkToolPrompt } from './core/lark-tool-binding.js';
-import { larkToolExecutionArgs } from './core/lark-tool-command.js';
+import { readLarkToolBinding, parseLarkToolInvocation, larkToolChildEnv, larkToolPassthroughEnv, LARK_TOOL_ROUTE, larkToolPrompt, type LarkToolBinding } from './core/lark-tool-binding.js';
+import { larkToolExecutionArgs, type LarkToolInvocation } from './core/lark-tool-command.js';
+import { planDriveRangedDownload, runDriveRangedDownload } from './core/lark-drive-download.js';
 import { loopbackFetch } from './core/loopback-fetch.js';
 import { findOnlineDaemon, parseDaemonIpcPort } from './utils/daemon-discovery.js';
 
 const isLarkAppId = (value: string): boolean => /^cli_[A-Za-z0-9]{4,64}$/.test(value);
+
+type LarkToolIdentity = { mode: 'bot' | 'user'; credential: string; appId?: string };
+
+async function fetchIdentity(binding: LarkToolBinding, mode: 'bot' | 'user'): Promise<LarkToolIdentity> {
+  const port = parseDaemonIpcPort(findOnlineDaemon(binding.appId, binding.dataDir)?.ipcPort)
+    ?? binding.ipcPort ?? Number(process.env.BOTMUX_DAEMON_IPC_PORT);
+  if (!Number.isSafeInteger(port) || port <= 0 || port > 65535) throw new Error('The bound bot daemon is unavailable');
+  const payload = JSON.stringify({ mode });
+  const response = await loopbackFetch(`http://127.0.0.1:${port}/api/sessions/${encodeURIComponent(binding.sessionId)}/${LARK_TOOL_ROUTE}`, {
+    method: 'POST', headers: { 'content-type': 'application/json', 'x-botmux-lark-session': binding.accessKey },
+    body: payload, signal: AbortSignal.timeout(15_000),
+  });
+  const raw = await response.text();
+  const result = JSON.parse(raw) as { ok?: boolean; appId?: string; mode?: string; credentialType?: string; credential?: string; error?: string; issuer?: string };
+  if (!response.ok || result.ok !== true) throw new Error(result.error ?? 'lark_tool_identity_unavailable');
+  const credentialType = mode === 'bot' ? 'tenant_access_token' : 'user_access_token';
+  // A user grant issued by the botmux platform belongs to the platform's own
+  // application; the daemon says so explicitly. Bot calls and every other user
+  // grant stay pinned to the bound application.
+  const platformUser = mode === 'user' && result.issuer === 'platform'
+    && typeof result.appId === 'string' && isLarkAppId(result.appId);
+  if ((platformUser ? false : result.appId !== binding.appId) || result.mode !== mode
+    || result.credentialType !== credentialType || typeof result.credential !== 'string' || !result.credential) {
+    throw new Error('The lark-cli identity does not match this invocation');
+  }
+  return { mode, credential: result.credential, ...(platformUser ? { appId: result.appId } : {}) };
+}
+
+/** Large drive downloads outlive the Open Platform's per-request limit; the
+ *  runner fetches them in Range parts itself (see core/lark-drive-download.ts).
+ *  Returns 'delegate' whenever lark-cli should run as usual. */
+async function tryRangedDownload(binding: LarkToolBinding, identity: LarkToolIdentity, invocation: LarkToolInvocation): Promise<'delegate' | number> {
+  const plan = planDriveRangedDownload(invocation);
+  if (!plan) return 'delegate';
+  const abort = new AbortController();
+  const onTerm = () => abort.abort('SIGTERM');
+  const onInt = () => abort.abort('SIGINT');
+  process.on('SIGTERM', onTerm); process.on('SIGINT', onInt);
+  try {
+    return await runDriveRangedDownload(plan, {
+      brand: binding.brand, mode: identity.mode, credential: identity.credential,
+      refreshCredential: async () => (await fetchIdentity(binding, identity.mode)).credential,
+      env: process.env, cwd: process.cwd(), signal: abort.signal,
+      stdout: text => { process.stdout.write(text); }, stderr: text => { process.stderr.write(text); },
+    });
+  } catch (error) {
+    if (abort.signal.aborted) return abort.signal.reason === 'SIGINT' ? 130 : 143;
+    process.stderr.write(`botmux: ranged download unavailable (${error instanceof Error ? error.message : String(error)}); using lark-cli\n`);
+    return 'delegate';
+  } finally {
+    process.removeListener('SIGTERM', onTerm); process.removeListener('SIGINT', onInt);
+  }
+}
 
 async function main(): Promise<void> {
   const argv = process.argv.slice(2);
@@ -18,33 +72,16 @@ async function main(): Promise<void> {
     },
   ));
   const isPassthrough = Boolean(invocation.passthroughProfile);
-  let identity: { mode: 'bot' | 'user'; credential: string; appId?: string } | undefined;
+  let identity: LarkToolIdentity | undefined;
   if (!invocation.offline && !isPassthrough) {
-    const port = parseDaemonIpcPort(findOnlineDaemon(binding.appId, binding.dataDir)?.ipcPort)
-      ?? binding.ipcPort ?? Number(process.env.BOTMUX_DAEMON_IPC_PORT);
-    if (!Number.isSafeInteger(port) || port <= 0 || port > 65535) throw new Error('The bound bot daemon is unavailable');
-    const payload = JSON.stringify({ mode: invocation.mode });
-    const response = await loopbackFetch(`http://127.0.0.1:${port}/api/sessions/${encodeURIComponent(binding.sessionId)}/${LARK_TOOL_ROUTE}`, {
-      method: 'POST', headers: { 'content-type': 'application/json', 'x-botmux-lark-session': binding.accessKey },
-      body: payload, signal: AbortSignal.timeout(15_000),
-    });
-    const raw = await response.text();
-    const result = JSON.parse(raw) as { ok?: boolean; appId?: string; mode?: string; credentialType?: string; credential?: string; error?: string; issuer?: string };
-    if (!response.ok || result.ok !== true) throw new Error(result.error ?? 'lark_tool_identity_unavailable');
-    const credentialType = invocation.mode === 'bot' ? 'tenant_access_token' : 'user_access_token';
-    // A user grant issued by the botmux platform belongs to the platform's own
-    // application; the daemon says so explicitly. Bot calls and every other user
-    // grant stay pinned to the bound application.
-    const platformUser = invocation.mode === 'user' && result.issuer === 'platform'
-      && typeof result.appId === 'string' && isLarkAppId(result.appId);
-    if ((platformUser ? false : result.appId !== binding.appId) || result.mode !== invocation.mode
-      || result.credentialType !== credentialType || typeof result.credential !== 'string' || !result.credential) {
-      throw new Error('The lark-cli identity does not match this invocation');
-    }
-    identity = { mode: invocation.mode, credential: result.credential, ...(platformUser ? { appId: result.appId } : {}) };
+    identity = await fetchIdentity(binding, invocation.mode);
   }
   if (invocation.showHelp) {
     process.stderr.write(`botmux: ${larkToolPrompt(binding.appId, process.env.LANG?.startsWith('zh') ? 'zh' : 'en')}\n`);
+  }
+  if (identity) {
+    const ranged = await tryRangedDownload(binding, identity, invocation);
+    if (ranged !== 'delegate') { process.exitCode = ranged; return; }
   }
   const args = larkToolExecutionArgs(invocation);
   const childEnv = isPassthrough
