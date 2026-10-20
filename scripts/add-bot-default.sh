@@ -16,7 +16,8 @@
 #   ② 角色库骨架 + 三件套      —— defaultWorkingDir / brandLabel / tuiSlashAllow
 #   ③ bots.json 补字段         —— p2pOpen: true；readIsolation + sandbox: true（--admin 时都不开）；
 #                                 sandboxPaths（可写 ~/demo-site、只读 ~/.config/amber-client.json）；
-#                                 disableStreamingCard: true（--admin 时不设）
+#                                 disableStreamingCard: true（--admin 时不设）；
+#                                 canTalkDaemonCommands: /status /close /schedule；idleSuspendMinutes: 15
 #   ④ lark-cli 身份 —— 建 ~/.lark-cli-bots/<appId>/，让它用自己的飞书 app
 #   ⑤ botmux restart + 自检
 #
@@ -98,6 +99,10 @@ if (admin==="1") {
   b.disableStreamingCard = true;
 }
 b.p2pOpen = true;
+// 群里非管理员也能用的 daemon 命令（默认这些命令只限 allowedUsers）。机队统一这三个；已有的项保留不覆盖。
+b.canTalkDaemonCommands = [...new Set([...(b.canTalkDaemonCommands||[]), "/status", "/close", "/schedule"])];
+// 空闲 15 分钟挂起 CLI（下条消息自动续起），释放内存；机队统一。
+b.idleSuspendMinutes = 15;
 // 群聊全开：defaultOncall 自动把 bot 进的每个新群绑成 oncall → 群里任何人都能 @ 它
 // （oncall 腿只放行 canTalk，不授 canOperate —— 管理操作仍只限 allowedUsers）。
 // ⚠️ workingDir 必须 === defaultWorkingDir：有 oncall 绑定时 pin 取 oncallEntry.workingDir，
@@ -111,7 +116,7 @@ if (b.defaultWorkingDir) {
 // 兜底：p2pOpen 没有管理员会导致群聊锁死 + 无人可管（fail-closed）
 if (!(b.allowedUsers||[]).length) b.allowedUsers = [owner];
 fs.writeFileSync(p, JSON.stringify(bots,null,2)+"\n");
-console.log("readIsolation/sandbox="+(admin==="1"?"false（管理 bot）":"true")+", sandboxPaths="+JSON.stringify(b.sandboxPaths||null)+", disableStreamingCard="+(b.disableStreamingCard===true)+", p2pOpen=true, allowedUsers=["+b.allowedUsers.join(",")+"]");
+console.log("readIsolation/sandbox="+(admin==="1"?"false（管理 bot）":"true")+", sandboxPaths="+JSON.stringify(b.sandboxPaths||null)+", disableStreamingCard="+(b.disableStreamingCard===true)+", p2pOpen=true, canTalkDaemonCommands="+JSON.stringify(b.canTalkDaemonCommands)+", idleSuspendMinutes="+b.idleSuspendMinutes+", allowedUsers=["+b.allowedUsers.join(",")+"]");
 ' "$BOTS_JSON" "$APP_ID" "$OWNER" "$ADMIN"
 
 echo "== ④ lark-cli 身份：让这个 bot 用自己的 appid 操作飞书 =="
@@ -162,6 +167,10 @@ if (admin==="1") ok("readIsolation/sandbox=false（管理 bot 必须不隔离，
 else { ok("readIsolation", b.readIsolation===true); ok("sandbox（文件沙盒）", b.sandbox===true); }
 if (admin!=="1") ok("disableStreamingCard（关流式卡片）", b.disableStreamingCard===true);
 ok("p2pOpen（私聊全开）", b.p2pOpen===true);
+ok("canTalkDaemonCommands 含 /status /close /schedule", ["/status","/close","/schedule"].every(c=>(b.canTalkDaemonCommands||[]).includes(c)));
+ok("idleSuspendMinutes = 15", b.idleSuspendMinutes===15);
+if (admin!=="1" && fs.existsSync(process.env.HOME+"/.config/amber-client.json"))
+  ok("sandboxPaths 只读 amber-client.json", (b.sandboxPaths?.readOnly||[]).includes(process.env.HOME+"/.config/amber-client.json"));
 ok("allowedUsers（管理员非空 —— p2pOpen 的前提）", (b.allowedUsers||[]).length>0);
 ok("defaultWorkingDir（角色系统）", !!b.defaultWorkingDir);
 ok("brandLabel（角色名脚注）", (b.brandLabel||"").includes("{cwdName}"));
