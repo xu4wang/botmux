@@ -8,6 +8,9 @@
 #
 # 做四件事：① 前置检查 ② build + 认领全局 botmux ③ 角色库（骨架或导入，记忆桶按本机路径重算）
 # ④ 可选改 bots.json。跑完还需人工做两步（脚本末尾会提示）。
+#
+# 角色模板（docs/roles/）从「本机 botmux 安装所用的源码目录」读：解析 botmux 命令 → <源码>/dist/cli.js
+# → <源码>/docs/roles/。ops/local 分支本身不带这个目录（模板只在上游一份）。BOTMUX_SRC=<源码目录> 可覆盖。
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
@@ -65,14 +68,42 @@ if [ "$SKIP_BUILD" -eq 0 ]; then
   (cd "$REPO_ROOT" && "$BUN" install && "$BUN" run switch:here)
 fi
 
+# 本机 botmux 装自哪份源码：机队的 botmux 命令要么是指向 <源码>/dist/cli.js 的软链接 / node 脚本，
+# 要么是 ~/.botmux/bin/botmux 这种 `exec node "<源码>/dist/cli.js"` 的 sh 启动器。
+resolve_botmux_src() {
+  if [ -n "${BOTMUX_SRC:-}" ]; then echo "$BOTMUX_SRC"; return 0; fi
+  local b; b="$(command -v botmux 2>/dev/null || true)"
+  [ -n "$b" ] || b="$HOME/.botmux/bin/botmux"
+  [ -e "$b" ] || return 1
+  while [ -L "$b" ]; do   # 逐级解软链接（macOS 老版本没有 realpath / readlink -f）
+    local t; t="$(readlink "$b")"
+    case "$t" in /*) b="$t" ;; *) b="$(dirname "$b")/$t" ;; esac
+  done
+  local cli=""
+  case "$b" in
+    */dist/cli.js) cli="$b" ;;
+    *) [ "$(head -c 2 "$b")" = "#!" ] && cli="$(grep -o '"[^"]*/dist/cli\.js"' "$b" | head -1 | tr -d '"')" ;;
+  esac
+  [ -n "$cli" ] || return 1
+  (cd "$(dirname "$cli")/.." && pwd -P)
+}
+BOTMUX_SRC_DIR="$(resolve_botmux_src || true)"
+ROLE_TEMPLATES="${BOTMUX_SRC_DIR:+$BOTMUX_SRC_DIR/docs/roles}"
+if [ -z "$ROLE_TEMPLATES" ] || [ ! -f "$ROLE_TEMPLATES/role-protocol-template.md" ]; then
+  echo "❌ 找不到角色模板：botmux 源码目录解析为「${BOTMUX_SRC_DIR:-（解析失败）}」，其下没有 docs/roles/role-protocol-template.md" >&2
+  echo "   用 BOTMUX_SRC=<botmux 源码目录> 指定（该目录下要有 docs/roles/）" >&2
+  exit 1
+fi
+
 echo "== ③ 角色库 =="
+echo "角色模板：$ROLE_TEMPLATES"
 mkdir -p "$ROLES_ROOT"
 
 write_default_role() {   # $1 = appId
   local app_id="$1" root="$ROLES_ROOT/$1" role="$ROLES_ROOT/$1/shared/default"
   mkdir -p "$role/knowledge"
-  # 协议：从仓库模板生成，把 <ROLES_ROOT> 换成本机绝对路径
-  sed "s#<ROLES_ROOT>#$root#g" "$REPO_ROOT/docs/roles/role-protocol-template.md" > "$root/_role-protocol.md"
+  # 协议：从 botmux 源码里的模板生成，把 <ROLES_ROOT> 换成本机绝对路径
+  sed "s#<ROLES_ROOT>#$root#g" "$ROLE_TEMPLATES/role-protocol-template.md" > "$root/_role-protocol.md"
   cp "$root/_role-protocol.md" "$role/_role-protocol.md"
   [ -f "$role/.botmux-dir.json" ] || printf '{\n  "name": "默认助理"\n}\n' > "$role/.botmux-dir.json"
   [ -f "$role/CLAUDE.md" ] || cat > "$role/CLAUDE.md" <<'EOF'
@@ -190,5 +221,5 @@ cat <<EOF
 2) 每个 bot 开一个新话题，跟「默认助理」说句话——这一次冷启动会种下目录信任标记，
    否则第一次切角色可能弹 Claude Code 的信任框卡住会话。
 
-验收清单见 docs/roles/deploy-runbook.md 第 6 节。
+验收清单见 $ROLE_TEMPLATES/deploy-runbook.md 第 6 节。
 EOF
