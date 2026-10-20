@@ -15,11 +15,14 @@
 #   ① botmux setup add        —— 凭证换 token 校验通过才写盘；只拉起这个 bot，不动其它
 #   ② 角色库骨架 + 三件套      —— defaultWorkingDir / brandLabel / tuiSlashAllow
 #   ③ bots.json 补字段         —— p2pOpen: true；readIsolation + sandbox: true（--admin 时都不开）；
-#                                 sandboxPaths（可写 ~/demo-site、只读 ~/.config/amber-client.json）；
+#                                 sandboxPaths（可写 ~/demo-site、~/.botmux/data/turn-send-ledger，
+#                                 只读 ~/.config/amber-client.json）；
 #                                 disableStreamingCard: true（--admin 时不设）；
 #                                 canTalkDaemonCommands: /status /close /schedule；idleSuspendMinutes: 15
 #   ④ lark-cli 身份 —— 建 ~/.lark-cli-bots/<appId>/，让它用自己的飞书 app
 #   ⑤ botmux restart + 自检
+#   ⑥ Amber（业务 bot）—— 装 amber skill 到 bot 自己的配置目录 + 导出执行端运行环境（要管理员批准）
+#      仓库位置默认 ~/amber，可用 AMBER_DIR 覆盖；没装 Amber / 执行端的机器自动跳过
 #
 # --admin（管理 bot）：**关闭读隔离**，其余（角色系统、p2pOpen、唯一管理员）不变。
 #   为什么不能隔离：读隔离会 deny 掉 ~/.botmux/bots.json、daemon logs、其它 bot 的 BOT_HOME
@@ -89,10 +92,11 @@ if (admin==="1") {
   b.readIsolation = true;
   // 文件沙盒（写隔离）：机队业务 bot 统一开。daemon 启动时也会把 legacy readIsolation 迁成 sandbox，这里显式写死。
   b.sandbox = true;
-  // 沙盒里的额外可达路径：demo 站（发布 HTML 页面）可写、amber 客户端配置只读。路径不存在就不加
+  // 沙盒里的额外可达路径：demo 站（发布 HTML 页面）、turn-send-ledger（botmux send 的本轮投递记录）可写，
+  // amber 客户端配置只读。路径不存在就不加
   //（sandbox 的 profile 对不存在的路径无意义，也避免在没有 demo 站的机器上留下死配置）。
   const home = process.env.HOME;
-  const rw = [home + "/demo-site"].filter(x => fs.existsSync(x));
+  const rw = [home + "/demo-site", home + "/.botmux/data/turn-send-ledger"].filter(x => fs.existsSync(x));
   const ro = [home + "/.config/amber-client.json"].filter(x => fs.existsSync(x));
   if (rw.length || ro.length) b.sandboxPaths = { readWrite: rw, readOnly: ro };
   // 关流式卡片：业务 bot 统一只发最终消息（管理 bot 保持默认，和机队现状一致）
@@ -171,6 +175,8 @@ ok("canTalkDaemonCommands 含 /status /close /schedule", ["/status","/close","/s
 ok("idleSuspendMinutes = 15", b.idleSuspendMinutes===15);
 if (admin!=="1" && fs.existsSync(process.env.HOME+"/.config/amber-client.json"))
   ok("sandboxPaths 只读 amber-client.json", (b.sandboxPaths?.readOnly||[]).includes(process.env.HOME+"/.config/amber-client.json"));
+if (admin!=="1" && fs.existsSync(process.env.HOME+"/.botmux/data/turn-send-ledger"))
+  ok("sandboxPaths 可写 turn-send-ledger", (b.sandboxPaths?.readWrite||[]).includes(process.env.HOME+"/.botmux/data/turn-send-ledger"));
 ok("allowedUsers（管理员非空 —— p2pOpen 的前提）", (b.allowedUsers||[]).length>0);
 ok("defaultWorkingDir（角色系统）", !!b.defaultWorkingDir);
 ok("brandLabel（角色名脚注）", (b.brandLabel||"").includes("{cwdName}"));
@@ -179,6 +185,40 @@ ok("defaultOncall（群聊全开，且 workingDir = 角色目录）",
 ok("lark-cli 用自己的 appid", fs.existsSync(process.env.HOME+"/.lark-cli-bots/"+appId+"/config.json"));
 if (!(b.allowedUsers||[]).length) { console.error("\n❌ 管理员为空：p2pOpen 会锁死群聊且无人可管，务必修复"); process.exit(1); }
 ' "$BOTS_JSON" "$APP_ID" "$ADMIN"
+
+AMBER_PENDING=0
+if [ "$ADMIN" -eq 0 ]; then
+  echo "== ⑥ Amber：skill + 执行端运行环境 =="
+  AMBER_DIR="${AMBER_DIR:-$HOME/amber}"
+  # skill 是拷贝安装（不随仓库更新）。装到 bot 自己的配置目录 —— 沙盒 bot 读的是它，不是 ~/.claude
+  if [ -f "$AMBER_DIR/skills/amber/SKILL.md" ]; then
+    case "$CLI" in codex) CFG_DIR="$HOME/.botmux/bots/$APP_ID/codex" ;; *) CFG_DIR="$HOME/.botmux/bots/$APP_ID/claude" ;; esac
+    if [ -d "$CFG_DIR" ]; then
+      mkdir -p "$CFG_DIR/skills/amber"
+      cp "$AMBER_DIR/skills/amber/SKILL.md" "$CFG_DIR/skills/amber/SKILL.md.tmp"
+      mv "$CFG_DIR/skills/amber/SKILL.md.tmp" "$CFG_DIR/skills/amber/SKILL.md"
+      echo "  ✅ amber skill → $CFG_DIR/skills/amber/（新会话生效）"
+    else
+      echo "  ⚠️ 没有 ${CFG_DIR}（bot 用全局配置）—— 确认 ~/.claude/skills/amber/ 已装"
+    fi
+  else
+    echo "  ⚠️ 没找到 $AMBER_DIR/skills/amber/SKILL.md，跳过 skill（Amber 仓库不在这台机器？）"
+  fi
+  # 执行端运行环境：从 botmux 导出这个 bot 的访问权限。新环境要管理员批准，批准前该执行端所有环境暂停
+  EXPORTER="$AMBER_DIR/client/amber-executor/export-botmux-env.mjs"
+  ENV_NAME="${NAME:-$APP_ID}"
+  if [ -f "$EXPORTER" ] && [ -d "$HOME/.config/amber-executor/envs" ]; then
+    if node "$EXPORTER" --bot "$APP_ID" --name "$ENV_NAME" --out "$HOME/.config/amber-executor/envs/$ENV_NAME.json"; then
+      launchctl kickstart -k "gui/$(id -u)/com.amber.executor" 2>/dev/null || true
+      echo "  ✅ 运行环境「${ENV_NAME}」已导出，执行端已重新申请登记"
+      AMBER_PENDING=1
+    else
+      echo "  ⚠️ 导出运行环境失败，手动跑：node $EXPORTER --bot $APP_ID --name $ENV_NAME --out ~/.config/amber-executor/envs/$ENV_NAME.json"
+    fi
+  else
+    echo "  ⚠️ 没找到导出工具 ${EXPORTER} 或执行端目录 ~/.config/amber-executor/envs（这台机器没装 Amber 执行端？），跳过运行环境"
+  fi
+fi
 
 cat <<EOF
 
@@ -193,3 +233,8 @@ cat <<EOF
 群聊已全开（defaultOncall）：bot 进的每个新群自动绑定，群里任何人都能 @ 它（只 talk，
 管理操作仍只限 owner）。它的 workingDir 已对齐角色目录，角色系统在群里照常生效。
 EOF
+if [ "$AMBER_PENDING" -eq 1 ]; then
+  echo
+  echo "⚠️ Amber 管理员会收到执行端批准卡片（核对公钥指纹）：批准前这台执行端上【所有】运行环境暂停，尽快批。"
+  node "$AMBER_DIR/client/amber-executor/amber-executor.mjs" status 2>/dev/null | grep -E "公钥指纹|状态" || true
+fi
