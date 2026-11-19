@@ -24,6 +24,7 @@ import { forkWorker, sendWorkerInput, promoteQueuedActivationTail, forkAdoptWork
 import { createCliAdapterSync } from '../adapters/cli/registry.js';
 import type { CliAdapter } from '../adapters/cli/types.js';
 import { botHomePath } from '../adapters/cli/read-isolation.js';
+import { credentialSourceForcesBotHome } from '../services/cli-credential-source.js';
 import { buildBotmuxShellHints, buildManagedLarkToolPromptBlocks } from '../adapters/cli/shared-hints.js';
 import { usesLarkToolBinding } from './lark-tool-binding.js';
 import { effectiveReplyDelivery, type ReplyDelivery } from './reply-delivery.js';
@@ -2047,7 +2048,8 @@ function resolveEnvelopeInjectionMode(cfg?: EnvelopeInjectionCfg): 'hook' | 'inl
  * preflight 必须查这份而不是全局——per-bot 安装是 best-effort（provisionIsolatedBotHome
  * 吞异常），查全局会把安装失败误判为已装，导致该 session 每轮系统性丢 reminder。
  *
- * 与 worker willRedirectCliData 的微差保持一致：
+ * 与 worker willRedirectCliData 的微差保持一致（含不开沙箱但配了 credentialsSourceDir 的
+ * Claude bot，同样重定向到 BOT_HOME）：
  *  - backendType !== 'riff'：riff 后端的 CLI 跑在远端，本地 settings 不适用，
  *    hook 模式对它无意义（远端没有 botmux hook，sidecar 写了没人读）。
  *  - process.env.SESSION_DATA_DIR（不用 config.session.dataDir 的 packagedDataDir
@@ -2065,7 +2067,13 @@ function effectivePromptHookConfigPath(
   const sandboxRequested = botConfig.sandbox === true
     || botConfig.readIsolation === true
     || process.env.BOTMUX_SANDBOX === '1';
-  const willRedirect = sandboxRequested
+  // 未开沙箱但配了 credentialsSourceDir：与 worker 同样重定向到 BOT_HOME。
+  const credentialSourceHome = credentialSourceForcesBotHome({
+    sourceDir: botConfig.credentialsSourceDir,
+    cliId: botConfig.cliId,
+    sandboxRequested,
+  });
+  const willRedirect = (sandboxRequested || credentialSourceHome)
     && adapter.supportsReadIsolation === true
     && !botConfig.wrapperCli
     && (sessionBackendType ?? botConfig.backendType) !== 'riff'
