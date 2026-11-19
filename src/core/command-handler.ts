@@ -3175,6 +3175,11 @@ export async function handleCommand(
       }
 
       case '/cd': {
+        // 个人助理模式：cwd = owner 的 work/，不可换（换了就出 owner 子树）。
+        if (ds?.session.assistantOwnerOpenId) {
+          await sessionReply(rootId, t('cmd.assistant.cwd_locked', undefined, loc));
+          break;
+        }
         const targetPath = message.content.replace(/^\/cd\s*/, '').trim();
         if (!targetPath) {
           await sessionReply(rootId, t('cmd.cd.usage', undefined, loc));
@@ -3327,6 +3332,11 @@ export async function handleCommand(
         break;
       }
       case '/repo': {
+        // 个人助理模式：同 /cd，目录固定在 owner 的 work/。
+        if (ds?.session.assistantOwnerOpenId) {
+          await sessionReply(rootId, t('cmd.assistant.cwd_locked', undefined, loc));
+          break;
+        }
         // A live REMOTE generation (Riff or Mojo) must finish the explicit
         // /close protocol before its anchor can be reused. The generic
         // repo-switch path closes and immediately reforks; if remote
