@@ -1152,7 +1152,6 @@ import {
   registerHostAsk,
   restorePersistedAsks as restorePersistedAsksBroker,
   startHookAskReclaim,
-  findPendingAskByAnchor,
   listPendingAsksByAnchor,
   askAnswerActorFor,
   submitCustomReply,
@@ -26642,6 +26641,8 @@ async function startInitialPassthroughSession(args: {
   parsed: LarkMessage;
   /** 本轮附件元信息，转给 prompt.submit 校验闸（内容不在此传）。 */
   promptResources?: MessageResource[];
+  /** 个人助理模式：消息进来时的主人（RoutingContext.assistantPreparedOwnerOpenId）。 */
+  assistantArrivalOwner?: string;
   cmd: string;
   commandContent: string;
   senderOpenId?: string;
@@ -26731,6 +26732,10 @@ async function startInitialPassthroughSession(args: {
   const assistantSpawn = resolveAssistantSpawn(larkAppId, chatId, chatType, senderOpenId);
   if (assistantSpawn.kind === 'unclaimed') {
     await notifyAssistantUnclaimed(larkAppId, chatId);
+    return;
+  }
+  if (assistantSpawn.kind === 'owner' && assistantOwnerDrifted(args.assistantArrivalOwner, assistantSpawn.openId)) {
+    refuseAssistantOwnerDrift(larkAppId, anchor, messageId);
     return;
   }
   const session = sessionStore.createSession(chatId, rootIdForStore, commandContent.substring(0, 50), chatType, undefined, { source: 'ordinary-feishu' });
@@ -27353,6 +27358,7 @@ async function handleNewTopicAdmitted(data: any, ctx: RoutingContext): Promise<v
   // union_id, and the event is the only source that works for senders outside
   // the bot app's contact range. Synchronous, so admission timing is unchanged.
   noteInboundSenderUnionId(ctx.larkAppId, data);
+  stampAssistantArrivalOwner(ctx, data); // 见 handleThreadReplyAdmitted
   if (handleDocumentAskTextReply(data, ctx)) return;
   await prepareGroupBackground(data, ctx);
   const { chatId, messageId, chatType, larkAppId, replyRootId, substituteTrigger, messageListener } = ctx;
@@ -27688,6 +27694,11 @@ async function handleNewTopicAdmitted(data: any, ctx: RoutingContext): Promise<v
     content,
   });
 
+  // 个人助理模式：Saved Workflow 命令也是在消费这条输入，先核对进来时的主人（含配对的种子消息）。
+  if (assistantArrivalDrifted(ctx, data)) {
+    refuseAssistantOwnerDrift(larkAppId, anchor, messageId, ctx);
+    return;
+  }
   // Workflow 保留动词必须先于即兴 grill，避免 `run/save/cancel/list/show`
   // 被当成自由文本目标；v2 runtime 已没有回退路径。
   if (await handleV3SavedWorkflowCommandIfAny({
@@ -27742,6 +27753,12 @@ async function handleNewTopicAdmitted(data: any, ctx: RoutingContext): Promise<v
     // 下面的 parseSlashCommandInvocation 会让它落到正常 spawn 路径。
   } else if (isLegacyTemplateCommand(cmdContent)) {
     await sessionReply(anchor, LEGACY_TEMPLATE_RETIRED_MESSAGE, 'text', larkAppId);
+    return;
+  }
+
+  // 个人助理模式：斜杠命令（含会预建会话的 /schedule 等）消费这条输入之前，先核对进来时的主人。
+  if (assistantArrivalDrifted(ctx, data)) {
+    refuseAssistantOwnerDrift(larkAppId, anchor, messageId, ctx);
     return;
   }
 
@@ -27805,12 +27822,24 @@ async function handleNewTopicAdmitted(data: any, ctx: RoutingContext): Promise<v
     await notifyAssistantUnclaimed(larkAppId, chatId);
     return;
   }
+  // 消息进来之后（准备群背景、提示钩子等等待期间）换了主：不按新主人建会话。
+  if (assistantSpawn.kind === 'owner'
+    && (assistantOwnerDrifted(ctx.assistantPreparedOwnerOpenId, assistantSpawn.openId) || assistantArrivalDrifted(ctx, data))) {
+    refuseAssistantOwnerDrift(larkAppId, anchor, messageId, ctx);
+    return;
+  }
 
   // Download attachments
   // 个人助理模式：附件落主人的桶（只在助理模式下多传这一参）
   const { attachments, needLogin } = assistantSpawn.kind === 'owner'
     ? await downloadResources(larkAppId, messageId, resources, senderOpenId, assistantSpawn.openId)
     : await downloadResources(larkAppId, messageId, resources, senderOpenId);
+  // 下载期间换了主：这条按旧主人准备，不再为它建会话，请用户重发。
+  if (assistantSpawn.kind === 'owner'
+    && assistantOwnerDrifted(assistantSpawn.openId, assistantOwnerForChat(larkAppId, chatId, chatType, senderOpenId))) {
+    refuseAssistantOwnerDrift(larkAppId, anchor, messageId, ctx);
+    return;
+  }
   if (attachments.length > 0) {
     parsed.attachments = attachments;
   }
@@ -28149,6 +28178,7 @@ async function handleNewTopicAdmitted(data: any, ctx: RoutingContext): Promise<v
         senderResolved: true,
         sender: newTopicSender,
         postParticipantMentions: newTopicPostAt,
+        ...(assistantSpawn.kind === 'owner' ? { assistantOwnerOpenId: assistantSpawn.openId } : {}),
       });
     }
     return;
@@ -28531,6 +28561,7 @@ async function executeNewTopicSlash(slash: NewTopicSlashContext): Promise<boolea
       if (slashDecision.delivery === 'cold_start') {
         await startInitialPassthroughSession({
           promptResources: resources,
+          assistantArrivalOwner: ctx.assistantPreparedOwnerOpenId,
           larkAppId,
           chatId,
           chatType,
@@ -29547,6 +29578,8 @@ interface PreparedThreadReply {
    *  and a "seed post @OtherBot + follow-up @self only" turn fails open. Pre-
    *  extracted (not raw messages) so this never re-depends on ctx.forwardSeedData. */
   postParticipantMentions?: LarkMention[];
+  /** 个人助理模式：这条输入（附件已落进其桶）是按哪位主人准备的。改投的目标会话必须归同一主人。 */
+  assistantOwnerOpenId?: string;
 }
 
 function activePrincipalLaneSessionById(
@@ -29926,6 +29959,48 @@ async function handleThreadReply(
 
 
 
+/** 事件上记主人用的字段（随 durable inbox 一起持久化，重放时仍是到达那一刻的主人）。 */
+const ASSISTANT_ARRIVAL_OWNER_FIELD = '__botmuxAssistantArrivalOwner';
+
+/** 个人助理模式：飞书事件一到就记下当时的主人。 */
+function stampAssistantArrivalOwnerOnEvent(larkAppId: string, data: any): void {
+  if (!data?.message || data[ASSISTANT_ARRIVAL_OWNER_FIELD] !== undefined) return;
+  const chatType = data.message.chat_type === 'p2p' ? 'p2p' : 'group';
+  const owner = assistantOwnerForChat(larkAppId, data.message.chat_id ?? '', chatType, data.sender?.sender_id?.open_id);
+  if (owner) data[ASSISTANT_ARRIVAL_OWNER_FIELD] = owner;
+}
+
+/** 个人助理模式：把消息到达时的主人带到路由上下文（事件上已记的优先；没记就按此刻的归属）。已盖过的不覆盖。 */
+function stampAssistantArrivalOwner(ctx: RoutingContext, data: any): void {
+  if (ctx.assistantPreparedOwnerOpenId !== undefined) return;
+  const eventStamp = data?.[ASSISTANT_ARRIVAL_OWNER_FIELD];
+  if (typeof eventStamp === 'string' && eventStamp) { ctx.assistantPreparedOwnerOpenId = eventStamp; return; }
+  const arrivalOwner = assistantOwnerForChat(ctx.larkAppId, ctx.chatId ?? data?.message?.chat_id ?? '', ctx.chatType,
+    data?.sender?.sender_id?.open_id);
+  if (arrivalOwner) ctx.assistantPreparedOwnerOpenId = arrivalOwner;
+}
+
+function refuseAssistantOwnerDrift(larkAppId: string, anchor: string, messageId: string, ctx?: RoutingContext): void {
+  if (ctx) markIngressAdmitted(ctx);
+  logger.warn(`[assistant-mode:${larkAppId}] owner changed while preparing ${messageId}; refusing it`);
+  void sessionReply(anchor, tr('worker.assistant.session_retired', {}, localeForBot(larkAppId)), 'text', larkAppId).catch(() => undefined);
+}
+
+/** 个人助理模式：这条输入（及配对进来的种子消息）进来时的主人，与此刻的主人不同。 */
+function assistantArrivalDrifted(ctx: RoutingContext, data: any, preparedOwner?: string): boolean {
+  const current = assistantOwnerForChat(ctx.larkAppId, ctx.chatId ?? data?.message?.chat_id ?? '', ctx.chatType,
+    data?.sender?.sender_id?.open_id);
+  const seedStamp = ctx.forwardSeedData?.[ASSISTANT_ARRIVAL_OWNER_FIELD];
+  return assistantOwnerDrifted(preparedOwner ?? ctx.assistantPreparedOwnerOpenId, current)
+    || assistantOwnerDrifted(typeof seedStamp === 'string' ? seedStamp : undefined, current);
+}
+
+/** 个人助理模式：输入按 prepared 主人准备、现在归 current 主人（模式开着）且两者不同。
+ *  模式已关（current 为空）不算漂移——会话退回普通共享语义。 */
+function assistantOwnerDrifted(prepared: string | undefined, current: string | undefined): boolean {
+  return !!prepared && !!current && prepared !== current;
+}
+
 async function handleThreadReplyAdmitted(
   data: any,
   ctx: RoutingContext,
@@ -29935,6 +30010,9 @@ async function handleThreadReplyAdmitted(
 ): Promise<void> {
   if (feedbackMaintenanceActive(config.session.dataDir)) throw new Error('feedback_storage_maintenance');
   noteInboundSenderUnionId(ctx.larkAppId, data); // see handleNewTopicAdmitted
+  // 个人助理模式：消息第一次进来时就记下当时的主人。之后所有重入、改投、级联回放都带着这个
+  // ctx（或其拷贝），在消费输入前统一核对，归属变了就拒收、请用户重发。
+  if (!prepared?.assistantOwnerOpenId) stampAssistantArrivalOwner(ctx, data);
   if (!replay && handleDocumentAskTextReply(data, ctx)) return;
   await prepareGroupBackground(data, ctx);
   const { chatId: ctxChatId, chatType: ctxChatType, scope, anchor, larkAppId, replyRootId, substituteTrigger } = ctx;
@@ -30295,6 +30373,11 @@ async function handleThreadReplyAdmitted(
     }
   }
 
+  // 个人助理模式：Saved Workflow 命令也是在消费这条输入，先核对进来时的主人（含配对的种子消息）。
+  if (assistantArrivalDrifted(ctx, data, prepared?.assistantOwnerOpenId)) {
+    refuseAssistantOwnerDrift(larkAppId, anchor, parsed.messageId, ctx);
+    return;
+  }
   // v3 Workflow 命令在 thread 内同样由 host 直接处理，不转发给 CLI。
   if (await handleV3SavedWorkflowCommandIfAny({
     // 同上（D8）：结尾的 `@机器人` 不能进入 Saved Workflow 的名称或引用。
@@ -30350,6 +30433,23 @@ async function handleThreadReplyAdmitted(
     return;
   }
 
+  // 个人助理模式：斜杠命令、ask 答复等任何会消费这条输入的分支之前，先核对归属——
+  // 改投过来的输入必须是按当前主人准备的；已有会话必须仍归当前主人（否则退役它、请用户重发）。
+  {
+    const currentAssistantOwner = assistantOwnerForChat(larkAppId, threadChatId ?? '', ctxChatType, threadSenderOpenId);
+    if (assistantOwnerDrifted(prepared?.assistantOwnerOpenId ?? ctx.assistantPreparedOwnerOpenId, currentAssistantOwner)
+      || assistantArrivalDrifted(ctx, data, prepared?.assistantOwnerOpenId)) {
+      refuseAssistantOwnerDrift(larkAppId, anchor, parsed.messageId, ctx);
+      return;
+    }
+    const routedDs = activeSessions.get(runtimeSessionKey);
+    if (routedDs && (routedDs.hasHistory || !!routedDs.session.cliSessionId || !!routedDs.session.assistantOwnerOpenId)
+      && !assistantLiveInputAdmission(routedDs, parsed.messageId, { context: 'inbound message' })) {
+      markIngressAdmitted(ctx);
+      return;
+    }
+  }
+
   // 斜杠命令执行段已搬到 executeThreadSlash（输入全部显式）；true = 已处理。
   if (await executeThreadSlash({
     ctx, data, larkAppId, scope, anchor, replyRootId, parsed, resources, cmdContent,
@@ -30369,6 +30469,13 @@ async function handleThreadReplyAdmitted(
   // 触发的排除理由），拦截器这里只负责拿着结果去 settle。
   // 没有 hook 连着的 dormant hook ask（hook 随 CLI 退出、或重启后还没重连）不在
   // 候选里——broker 的 list/find 已过滤：此刻没有 CLI 在等答案，这条文字照常进会话。
+  const assistantAskOwnedByCurrentOwner = (askSessionId: string): boolean => {
+    const current = assistantOwnerForChat(larkAppId, threadChatId ?? '', ctxChatType, threadSenderOpenId);
+    if (!current) return true;
+    const live = [...activeSessions.values()].find(candidate => candidate.session.sessionId === askSessionId);
+    const owner = live?.session.assistantOwnerOpenId ?? sessionStore.getOwnedSession(askSessionId)?.assistantOwnerOpenId;
+    return owner === current;
+  };
   const askCandidate = ctx.effortTaskReentry ? null : askCustomReplyCandidate({
     senderOpenId: threadSenderOpenId,
     chatId: threadChatId,
@@ -30377,10 +30484,13 @@ async function handleThreadReplyAdmitted(
     isWorkflowGrillTrigger: !!threadGrill,
   });
   if (askCandidate) {
-    const candidates = listPendingAsksByAnchor({ larkAppId, chatId: askCandidate.chatId, anchor });
+    // 个人助理模式：旧主人会话发起、退役后仍挂着的 ask 不参与挑选，不能拿新主人的文字去答。
+    const candidates = listPendingAsksByAnchor({ larkAppId, chatId: askCandidate.chatId, anchor })
+      .filter(ask => assistantAskOwnedByCurrentOwner(ask.sessionId));
     const quoted = candidates.find(ask => !!ask.cardMessageId && parsed.parentId === ask.cardMessageId);
     const ambiguous = candidates.length > 1 && candidates.some(ask => ask.originKind === CODEX_ASYNC_ASK_ORIGIN);
-    const pendingAsk = quoted ?? (ambiguous ? undefined : findPendingAskByAnchor({ larkAppId, chatId: askCandidate.chatId, anchor }));
+    // 与 findPendingAskByAnchor 同序（最先注册的那个），只是先滤掉不归当前主人的。
+    const pendingAsk = quoted ?? (ambiguous ? undefined : candidates[0]);
     if (ambiguous && !quoted) {
       await sessionReply(anchor, tr('card.ask.async_ambiguous', undefined, localeForBot(larkAppId)), 'text', larkAppId);
     }
@@ -30753,12 +30863,22 @@ async function handleThreadReplyAdmitted(
   // user-token fallback for a download should use the SENDER's own credentials.
   const inboundSenderOpenId = parsed.senderId || data?.sender?.sender_id?.open_id;
   let attachments: LarkAttachment[];
+  // 个人助理模式：这条输入（及其附件）按哪位主人准备的；下面自动建会话时归属若已变，就不交给新主人。
+  let inputAssistantOwner: string | undefined;
   if (prepared) {
     attachments = prepared.attachments;
+    inputAssistantOwner = prepared.assistantOwnerOpenId;
   } else {
-    // 没有活会话（下面会自动建）时按当前归属解析 owner，附件才落进新会话读得到的 owner 桶。
-    const attachmentOwner = ds?.session.assistantOwnerOpenId
-      ?? assistantOwnerForChat(effectiveAppId, ctxChatId ?? data?.message?.chat_id ?? '', ctxChatType, inboundSenderOpenId);
+    // 附件按当前归属落主人的桶（上面已核对过：有会话时它的主人就是当前主人，或是还没认领、
+    // 起 worker 时会认领给当前主人的新会话）。
+    // 模式关掉后仍在跑的会话沙盒还冻结着原主人，附件继续落它的桶，否则 worker 读不到。
+    const attachmentOwner = assistantOwnerForChat(effectiveAppId, ctxChatId ?? data?.message?.chat_id ?? '', ctxChatType, inboundSenderOpenId)
+      ?? ds?.session.assistantOwnerOpenId;
+    if (assistantOwnerDrifted(ctx.assistantPreparedOwnerOpenId, attachmentOwner)) {
+      refuseAssistantOwnerDrift(larkAppId, anchor, parsed.messageId, ctx);
+      return;
+    }
+    inputAssistantOwner = ctx.assistantPreparedOwnerOpenId ?? attachmentOwner;
     const downloaded = attachmentOwner
       ? await downloadResources(effectiveAppId, parsed.messageId, resources, inboundSenderOpenId, attachmentOwner)
       : await downloadResources(effectiveAppId, parsed.messageId, resources, inboundSenderOpenId);
@@ -31166,8 +31286,13 @@ async function handleThreadReplyAdmitted(
     // true, but races (between check and execution, or session-closed events)
     // can land us here.
     if (activeSessions.has(runtimeSessionKey)) {
+      // 准备期间换了主：重入会按新主人重下附件并交给新主人的会话，这里直接拒收、请用户重发。
+      if (assistantOwnerDrifted(inputAssistantOwner, assistantOwnerForChat(larkAppId, ctxChatId ?? data?.message?.chat_id ?? '', ctxChatType, threadSenderOpenId))) {
+        refuseAssistantOwnerDrift(larkAppId, anchor, parsed.messageId, ctx);
+        return;
+      }
       logger.info(`[${larkAppId}] Session already exists for ${scope}-scope ${anchor}, routing to canonical owner`);
-      await handleThreadReplyAdmitted(data, ctx);
+      await handleThreadReplyAdmitted(data, inputAssistantOwner ? { ...ctx, assistantPreparedOwnerOpenId: inputAssistantOwner } : ctx);
       return;
     }
 
@@ -31193,6 +31318,11 @@ async function handleThreadReplyAdmitted(
     const assistantSpawn = resolveAssistantSpawn(larkAppId, autoCreateChatId, autoCreateChatType, threadSenderOpenId);
     if (assistantSpawn.kind === 'unclaimed') {
       await notifyAssistantUnclaimed(larkAppId, autoCreateChatId);
+      return;
+    }
+    // 准备这条输入（下载附件）期间换了主：不把它交给新主人的会话，请用户重发。
+    if (inputAssistantOwner && assistantSpawn.kind === 'owner' && assistantSpawn.openId !== inputAssistantOwner) {
+      refuseAssistantOwnerDrift(larkAppId, anchor, parsed.messageId, ctx);
       return;
     }
     const session = sessionStore.createSession(autoCreateChatId, rootIdForStore, parsed.content.substring(0, 50), autoCreateChatType, undefined, { source: 'ordinary-feishu' });
@@ -31351,6 +31481,9 @@ async function handleThreadReplyAdmitted(
           senderResolved: true,
           sender: autoCreateSender,
           postParticipantMentions: autoCreatePostAt,
+          ...(inputAssistantOwner ?? (assistantSpawn.kind === 'owner' ? assistantSpawn.openId : undefined)
+            ? { assistantOwnerOpenId: inputAssistantOwner ?? (assistantSpawn.kind === 'owner' ? assistantSpawn.openId : undefined) }
+            : {}),
         });
       }
       return;
@@ -32651,6 +32784,7 @@ async function executeThreadSlash(slash: ThreadSlashContext): Promise<boolean> {
       if (slashDecision.delivery === 'cold_start' && chatId) {
         await startInitialPassthroughSession({
           promptResources: resources,
+          assistantArrivalOwner: ctx.assistantPreparedOwnerOpenId,
           larkAppId,
           chatId: chatId,
           chatType: chatType,
@@ -35904,6 +36038,7 @@ export async function startDaemon(botIndex?: number): Promise<void> {
     setInputCaptureRuntime(cfg.larkAppId, inputCapture);
     inputCapture.start();
     const botEventHandlers: EventHandlers = {
+      stampAssistantArrivalOwner: data => stampAssistantArrivalOwnerOnEvent(cfg.larkAppId, data),
       captureHumanInput: data => captureInboundText(data, inputCapture,
         id => isKnownPeerBot(config.session.dataDir, cfg.larkAppId, id),
         // Same fold as decideRouting: p2p chat mode keeps DM replies in the chat session unless the root seeded a /t topic.

@@ -3220,6 +3220,9 @@ export interface RoutingContext {
   /** 'thread' → reply_in_thread to a (real or freshly seeded) thread root.
    *  'chat'   → plain message to the chat (no threading). */
   scope: 'thread' | 'chat';
+  /** 个人助理模式：daemon 内部重入时带上这条输入是按哪位主人准备的（附件已落其桶）；
+   *  重入后归属若已换，拒收而不是交给新主人。 */
+  assistantPreparedOwnerOpenId?: string;
   /** Routing key. `chatId` for chat-scope, the thread root id for
    *  thread-scope (an existing rootMessageId, or this messageId when
    *  it's the seed of a brand-new thread). A beforeSessionTurn hook may
@@ -4211,6 +4214,8 @@ export interface EventHandlers {
   /** Exact host-installed capture. Must synchronously persist before returning
    * true; thrown persistence errors must not fall through to ordinary routing. */
   captureHumanInput?: (data: any) => boolean;
+  /** 个人助理模式：事件一到（排队、持久化之前）就记下当时的主人，写在 data 上随消息走。 */
+  stampAssistantArrivalOwner?: (data: any) => void;
   handleCardAction: (data: any, larkAppId: string) => Promise<any>;
   handleNewTopic: (data: any, ctx: RoutingContext) => Promise<void>;
   handleThreadReply: (data: any, ctx: RoutingContext) => Promise<void>;
@@ -7714,6 +7719,8 @@ export function createLarkEventDispatcherRuntime(
     'im.message.reaction.created_v1': () => {},
     'im.message.reaction.deleted_v1': () => {},
     'im.message.receive_v1': (data: any) => {
+      try { handlers.stampAssistantArrivalOwner?.(data); }
+      catch (err) { logger.warn(`[${larkAppId}] assistant-mode arrival stamp failed: ${String(err)}`); }
       // The SDK acknowledges when this callback returns. Capture before the
       // ordinary ACK-safe async scheduler, or a crash could lose accepted input.
       // Durable primary is the exception: its callback must first persist the

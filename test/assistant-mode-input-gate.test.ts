@@ -110,7 +110,7 @@ vi.mock('@larksuiteoapi/node-sdk', () => ({
 
 
 
-import { initWorkerPool, sendWorkerInput } from '../src/core/worker-pool.js';
+import { initWorkerPool, sendWorkerInput, sendWorkerSessionInput } from '../src/core/worker-pool.js';
 import type { DaemonSession } from '../src/core/types.js';
 import { getBot } from '../src/bot-registry.js';
 
@@ -153,5 +153,16 @@ describe('assistant-mode input gate on a live worker', () => {
     const plain = liveSession();
     expect(sendWorkerInput(plain.ds, 'hello', 'om_turn_3')).toBe(true);
     expect(sessionReply).not.toHaveBeenCalled();
+  });
+
+  it('raw terminal input (a native slash command passed straight through) does not reach a session whose owner changed', () => {
+    vi.mocked(getBot).mockReturnValue({ config: { larkAppId: 'app_test', larkAppSecret: 's', cliId: 'claude-code', assistantMode: true }, resolvedAllowedUsers: [], botOpenId: 'ou_bot', botName: 'B' } as any);
+    admission.decision = { kind: 'reject', expected: 'ou_owner' };
+    const { ds, worker } = liveSession();
+    expect(sendWorkerSessionInput(ds, { type: 'raw_input', data: '/compact keep the new owner\'s notes\r' } as any)).toBe(false);
+    expect(worker.send).not.toHaveBeenCalled();
+    // A key press carries no content and still goes through.
+    sendWorkerSessionInput(ds, { type: 'term_action', key: 'enter' } as any);
+    expect(worker.send).toHaveBeenCalledTimes(1);
   });
 });

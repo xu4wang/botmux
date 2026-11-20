@@ -15295,6 +15295,16 @@ export function sendWorkerSessionInput(
   } else if (message.type === 'message') {
     cancelDeploymentContinuation(ds.session, previous => sessionStore.updateDeploymentContinuation(ds.session, previous));
   }
+  // 个人助理模式：/compact 等原生斜杠命令直送（raw_input / inject_command）同样要按当前主人复核，
+  // bootstrap / 转交等待之后实际发送前再复核一次。
+  const carriesUserContent = message.type === 'raw_input' || message.type === 'inject_command';
+  const contentAdmitted = (): boolean => {
+    if (!carriesUserContent) return true;
+    let bot: ReturnType<typeof getBot>;
+    try { bot = getBot(ds.larkAppId); } catch { return true; }
+    return assistantLiveInputAdmission(ds, undefined, { context: message.type, bot });
+  };
+  if (!contentAdmitted()) return false;
   const controller = controllerForSession(ds);
   if (controller && !controller.acceptsUserInput()) return false;
   const scoped = controller && message.type === 'message' && message.turnId
@@ -15308,6 +15318,7 @@ export function sendWorkerSessionInput(
   const worker = ds.worker;
   if (!worker || worker.killed) return false;
   return afterWorkerIpcBootstrap(worker, () => {
+    if (!contentAdmitted()) return false;
     const sent = worker.send(annotated);
     if (onIpcDispatched && sent !== false && ds.worker === worker && canForkRegisteredSession(ds)) onIpcDispatched();
     return sent;
